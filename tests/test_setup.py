@@ -40,6 +40,9 @@ class SetupTests(Sandbox):
         fake = bin_dir / "rea"
         fake.write_text(FAKE_REA)
         fake.chmod(0o755)
+        agent = bin_dir / "claude"
+        agent.write_text("#!/bin/sh\nexit 0\n")
+        agent.chmod(0o755)
         self.state = self.tmp / "rea-state"
         ghidra = self.tmp / "ghidra"
         (ghidra / "Ghidra").mkdir(parents=True)

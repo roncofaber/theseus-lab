@@ -42,6 +42,9 @@ class ToolResolutionTests(Sandbox):
         make_ghidra(self.home / "software/ghidra_11.4_PUBLIC")
         newest = make_ghidra(self.home / "software/ghidra_12.2_PUBLIC")
         self.assertEqual((str(newest), "install location"), tools.resolve(self.conf(), "ghidra"))
+        home_only = [g for g in tools.CATALOG["java"]["globs"] if g.startswith("~")]
+        self.addCleanup(tools.CATALOG["java"].__setitem__, "globs", tools.CATALOG["java"]["globs"])
+        tools.CATALOG["java"]["globs"] = home_only
         make_executable(self.home / "software/jdk-21/bin/java")
         jdk25 = self.home / "software/jdk-25-temurin"
         make_executable(jdk25 / "bin/java")

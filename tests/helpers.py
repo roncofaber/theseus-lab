@@ -12,7 +12,8 @@ SRC = REPO / "src"
 
 
 def base_env(root):
-    env = {key: value for key, value in os.environ.items() if not key.startswith(("THESEUS_", "GIT_"))}
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("THESEUS_", "GIT_")) and key not in ("JAVA_HOME", "GHIDRA_INSTALL_DIR")}
     env.update({
         "THESEUS_DATA": str(root / "data"),
         "THESEUS_SCRATCH": str(root / "scratch"),

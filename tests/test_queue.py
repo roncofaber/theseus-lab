@@ -218,6 +218,12 @@ class QueueTests(Sandbox):
         data = json.loads(self.theseus("top", "--json").stdout)
         self.assertEqual(["visible-task"], data["queue"]["ready"])
         self.assertEqual("free", data["agents"][0]["state"])
+        self.assertIn("visible-task", data["times"])
+        self.add("second-task")
+        self.theseus("queue", "tick")
+        flat = " ".join(self.theseus("top", "--once").stdout.split())
+        self.assertIn("POSTED", flat)
+        self.assertRegex(flat, r"working visible-task - 0m \d\d:\d\d with worker-a")
 
 
 

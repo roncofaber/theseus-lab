@@ -182,7 +182,7 @@ def add(queue, task_id, role, owned, objective, contract, accept, depends=(), mi
     document = queue.load()
     milestone = milestone if milestone is not None else document.get("currentMilestone")
     record = {
-        "id": task_id, "role": role, "status": "pending", "owner": None, "dependencies": list(depends),
+        "id": task_id, "role": role, "status": "pending", "owner": None, "createdAt": now(), "dependencies": list(depends),
         "ownedPaths": list(owned), "objective": objective, "generalContract": contract, "acceptance": list(accept),
         "sharedFilesReadOnly": True, "result": None,
     }
@@ -278,7 +278,7 @@ def deliver(queue, task_id, handoff):
     if task["status"] != "in_progress":
         raise TaskError(f"{task_id} is {task['status']}, not in_progress")
     task["status"] = "verification"
-    task.setdefault("execution", {})["handoff"] = str(handoff)
+    task.setdefault("execution", {}).update({"handoff": str(handoff), "deliveredAt": now()})
     queue.save(document)
     result = handoff_result(handoff)
     record(queue, "delivered" if result in ("delivered", None) else result, task,

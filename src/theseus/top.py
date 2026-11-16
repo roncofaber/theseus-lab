@@ -162,6 +162,47 @@ def verification_state(conf):
     return {"unverified": len(unverified), "limit": limit, "last": last}
 
 
+POSTED_CACHE = {}
+
+
+def posted_at(conf, task):
+    """When the task was added: its createdAt, or for older records the first commit that mentions it in the task file."""
+    if task.get("createdAt"):
+        return task["createdAt"]
+    if task["id"] not in POSTED_CACHE:
+        result = subprocess.run(["git", "-C", str(conf.root), "log", "--reverse", "--format=%cI", "-S", f'"id": "{task["id"]}"',
+                                 "--", str(conf.tasks_file.relative_to(conf.root))], capture_output=True, text=True)
+        POSTED_CACHE[task["id"]] = (result.stdout.split() or [None])[0]
+    return POSTED_CACHE[task["id"]]
+
+
+def task_times(conf):
+    """task id -> (posted, entered its current status) as ISO stamps."""
+    times = {}
+    for task in t.Queue(conf).load().get("tasks", []):
+        execution = task.get("execution") or {}
+        posted = posted_at(conf, task)
+        since = {"in_progress": execution.get("assignedAt"), "verification": execution.get("deliveredAt"),
+                 "merged": (task.get("merge") or {}).get("mergedAt")}.get(task.get("status")) or posted
+        times[task["id"]] = (posted, since)
+    return times
+
+
+def age(stamp):
+    try:
+        return time.time() - datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except (ValueError, AttributeError):
+        return None
+
+
+def posted_label(stamp):
+    try:
+        moment = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone()
+    except (ValueError, AttributeError):
+        return "-"
+    return moment.strftime("%H:%M") if moment.date() == datetime.now().astimezone().date() else moment.strftime("%b %d")
+
+
 def snapshot(conf, sample=False):
     states = ag.states(conf)
     if sample:
@@ -175,6 +216,7 @@ def snapshot(conf, sample=False):
         "queue": {k: [x["id"] for x in v] for k, v in summary.items()},
         "rooms": {x["id"]: x.get("room") for v in summary.values() for x in v},
         "blocked": {x["id"]: x["reasons"] for x in summary["blocked"]},
+        "times": task_times(conf),
         "paused": wq.paused(conf), "git": git_state(conf), "verification": verification_state(conf),
         "events": wq.events(conf, ROWS["events"]),
     }
@@ -350,7 +392,7 @@ def render(state, width=120):
               f"{MAGENTA}review {len(queue['review'])}{R} {DIM}·{R} {CYAN}merged {len(queue['merged'])}{R} {DIM}·{R} "
               f"{DIM}blocked {len(queue['blocked'])} · held {len(queue['held'])}{R}")
     frame.rule("QUEUE", counts + (f"  {YELLOW}{B}PAUSED{R}" if state["paused"] else ""))
-    frame.header(f"{'STATUS':<9} {'TASK':<36} {'ROOM':<6} NEXT STEP")
+    frame.header(f"{'STATUS':<9} {'TASK':<36} {'ROOM':<6} {'FOR':<7} {'POSTED':<7} NEXT STEP")
     rows = []
     for key, label in (("review", "review"), ("merged", "merged"), ("in_progress", "working"), ("ready", "ready"),
                        ("blocked", "blocked"), ("held", "held")):
@@ -358,8 +400,11 @@ def render(state, width=120):
         for task_id in queue[key]:
             detail = ", ".join(state["blocked"].get(task_id, [])) if key == "blocked" else {
                 "review": "theseus merge", "merged": "verify, then theseus tasks complete", "held": "hold set",
-                "ready": "next free agent"}.get(key, "")
-            rows.append(f"{color}{label:<9}{R} {cut(task_id, 36):<36} {state['rooms'].get(task_id) or '-':<6} {DIM}{detail}{R}")
+                "ready": "next free agent",
+                "in_progress": next((f"with {a['name']}" for a in state["agents"] if a.get("task") == task_id), "")}.get(key, "")
+            posted, since = state["times"].get(task_id, (None, None))
+            rows.append(f"{color}{label:<9}{R} {cut(task_id, 36):<36} {state['rooms'].get(task_id) or '-':<6} "
+                        f"{duration(age(since)):<7} {posted_label(posted):<7} {DIM}{detail}{R}")
     frame.fixed(rows, ROWS["queue"], "queue empty: write task records (theseus tasks add)")
 
     frame.rule("EVENTS", f"{DIM}newest first, last {ROWS['events']}{R}")
