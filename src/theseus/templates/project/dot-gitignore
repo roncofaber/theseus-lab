@@ -1,0 +1,4 @@
+theseus.local.toml
+.theseus/
+__pycache__/
+*.pyc

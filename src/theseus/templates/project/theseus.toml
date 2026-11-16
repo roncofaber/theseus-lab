@@ -1,0 +1,102 @@
+# theseus configuration for {{PROJECT}}. Every value the workflow would otherwise hard-code lives here.
+# Machine-specific values (the original's path, a different data root) go in the Git-ignored theseus.local.toml,
+# which is merged over this file. `theseus config show` prints the resolved values.
+
+[project]
+name = "{{PROJECT}}"
+prefix = "{{PREFIX}}"
+
+[paths]
+# Durable, Git-excluded artifacts: evidence, logs, decompiled corpus, worker records.
+data = "~/.local/share/${THESEUS_PROJECT}"
+# Builds, run directories and temporary worktrees; safe to prune.
+scratch = "${TMPDIR:-/tmp}/${THESEUS_PROJECT}"
+worktrees = "${THESEUS_DATA}/worktrees"
+# Read-only original installation(s); set in theseus.local.toml.
+original = []
+
+[commands]
+# Shell commands run from the project root with THESEUS_* in the environment; use "$THESEUS_BUILD_DIR" for build output
+# (unique per checkout, so worktrees never share build state). An empty list is reported as
+# NOT CONFIGURED (exit 4), never as a pass.
+build = []
+smoke = []
+smoke_timeout = 300
+# Full verification, run on a clean detached worktree of the commit by `theseus verify`.
+verify = []
+
+[limits]
+# Concurrent heavy runs (build, smoke, verify, `theseus heavy -- CMD`) across all workers on this host.
+heavy_runs = 2
+
+[workers]
+# Agent profile for workers (`theseus agents profiles` lists them): claude-code (your own Claude Code login or API
+# key), codex, opencode, gemini-cli, claude-subagent (launched by a Claude Code coordinator). A [workers.<name>]
+# section adjusts a profile (model, capacity, permission_mode, command, env, interactive); a section with another name
+# sets preset = "<profile>" to define a variant.
+default = "claude-code"
+retries = 3
+
+[workers.claude-code]
+# Empty model: the CLI's default. Keep capacity within your plan's rate limits.
+model = ""
+capacity = 2
+permission_mode = "auto"
+
+[instances]
+# Persistent worker sessions in tmux panes, for example:
+# panes = [{ name = "{{PREFIX}}-worker-1", pane = "%1" }]
+panes = []
+# Busy marker, launch command and session records come from each agent's profile; set them here only to override.
+# busy_pattern = "esc to interrupt"
+# Session name instances send their done line to (agents with peer messaging, such as Claude Code); empty: they reply
+# in their own pane and the queue detects the handoff file.
+coordinator = ""
+brief = ".agents/skills/theseus-worker/instance-brief.md"
+idle_minutes = 5
+# A handoff counts as delivered once the pane is idle, it states a Result and it has not changed for this long.
+handoff_settle_seconds = 45
+
+[tools]
+# External tools this project needs (see `theseus tools`): missing ones fail `theseus doctor`. Where each tool lives
+# is resolved per machine (environment, `theseus tools set NAME PATH` in theseus.local.toml, PATH, common locations).
+need = []
+
+[rooms]
+# Clean-room separation for a port that will be published. Dirty-room instances read the original's code and write the
+# specification in their own words; clean-room instances implement from spec_paths, captures and public documentation.
+# An instance that worked a dirty task is refused clean work until `theseus instance compact PANE --clear` wipes its
+# context (taint = "until-clear"), or for good (taint = "permanent"). Leave both instance lists empty to let any
+# instance take either room.
+enabled = false
+taint = "until-clear"
+clean_instances = []
+dirty_instances = []
+# Repository globs and data-root folders only the dirty room may read; spec_paths are the handover both rooms read.
+dirty_paths = []
+dirty_data = []
+spec_paths = []
+
+[git]
+# Base for new worker worktrees: "HEAD", or "origin/main" to fetch first.
+base = "HEAD"
+remote = "origin"
+branch = "main"
+
+[verification]
+# Pathspecs whose changes need a full verification pass; doc_paths are excluded from them.
+code_paths = ["."]
+doc_paths = ["docs", "AGENTS.md", "README.md", ".agents", ".claude", "theseus.toml"]
+max_unverified_merges = 15
+# The override is also refused once the oldest unverified code commit is older than this (0 disables).
+max_unverified_hours = 24
+
+[re]
+# Original binaries: [[re.targets]] entries with name, path and sha256 (paths usually in theseus.local.toml).
+targets = []
+evidence = 'ev_[0-9a-f]{64}'
+# Agent clients `theseus setup rea` registers the REA MCP server and skill for (REA's client names).
+clients = ["claude_code"]
+# Restrict indexed hex addresses to an image range when the default pattern catches unrelated hex numbers.
+address_low = 0
+address_high = 0

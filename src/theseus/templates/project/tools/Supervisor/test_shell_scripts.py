@@ -1,0 +1,28 @@
+"""Every shell script under tools/ (by .sh suffix or a bash/sh shebang) parses and passes shellcheck at warning
+severity. Without shellcheck the lint is skipped and reported as skipped."""
+from pathlib import Path
+import unittest
+
+from theseus import rules
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class ShellScriptTests(unittest.TestCase):
+    def setUp(self):
+        self.scripts = rules.shell_scripts(ROOT / "tools")
+
+    def test_hook_is_discovered(self):
+        self.assertIn(ROOT / "tools/git-hooks/pre-push", self.scripts)
+
+    def test_bash_syntax(self):
+        self.assertEqual([], rules.syntax_errors(self.scripts))
+
+    def test_shellcheck_warning_severity(self):
+        if not rules.shellcheck_available():
+            self.skipTest("shellcheck is not installed; lint skipped")
+        self.assertEqual([], rules.shellcheck_errors(self.scripts, cwd=ROOT))
+
+
+if __name__ == "__main__":
+    unittest.main()

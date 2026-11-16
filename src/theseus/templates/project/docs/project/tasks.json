@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "currentMilestone": null,
+  "objectiveComplete": false,
+  "policy": {
+    "lifecycle": "pending -> in_progress (assigned) -> verification (delivered) -> merged (integrated; satisfies dependencies) -> completed (verified against acceptance; archivable). Runtime observation and user testing are recorded separately under evidence.",
+    "dependencyPolicy": "A task is ready when every dependency is merged or completed, it is in the current milestone, and it has no externalBlocker, researchRequired or pause record. externalBlocker is reserved for inputs the team cannot obtain itself; unrecovered original behavior is researchRequired and becomes a bounded reverse-engineering task, not a reason to wait for the user.",
+    "generalSystemPolicy": "Every implementation task states its general contract and covers representative variations of the original's inputs. A single device, file or scenario is a fixture, never a subsystem boundary.",
+    "idlePolicy": "Occupied worker slots are not a reason to stop: integrate, review, verify or write the next task records."
+  },
+  "tasks": []
+}

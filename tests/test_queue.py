@@ -1,0 +1,233 @@
+"""Agent registry, work queue and dashboard with a fake tmux: panes are idle prompts whose typed input is logged, so
+assignments, resets and nudges can be observed without real sessions."""
+import json
+import os
+import unittest
+
+from helpers import Sandbox
+
+FAKE_TMUX = """#!/usr/bin/env bash
+case "$1" in
+    display) case " $FAKE_PANES " in *" $4 "*) echo 1 ;; *) exit 1 ;; esac ;;
+    capture-pane) cat "$FAKE_STATE/screen-$4" 2>/dev/null || echo "> " ;;
+    send-keys) printf '%s\\n' "$*" >> "$FAKE_STATE/typed" ;;
+esac
+"""
+
+
+class QueueTests(Sandbox):
+    def setUp(self):
+        super().setUp()
+        self.scaffold()
+        self.state = self.tmp / "state"
+        bin_dir = self.tmp / "bin"
+        self.state.mkdir()
+        bin_dir.mkdir()
+        (bin_dir / "tmux").write_text(FAKE_TMUX)
+        (bin_dir / "tmux").chmod(0o755)
+        self.env.update({"PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_STATE": str(self.state),
+                         "FAKE_PANES": "%1 %2", "THESEUS_COMPACT_POLL": "0.01", "THESEUS_TYPE_POLL": "0.01"})
+        self.theseus("tasks", "milestone", "M1")
+        self.git("commit", "-q", "-am", "milestone")
+        self.theseus("agents", "add", "worker-a", "%1")
+
+    def add(self, task_id, room=None, **extra):
+        args = ["tasks", "add", task_id, "--role", "research", "--owned", f"docs/investigations/{task_id}.md",
+                "--objective", "Do it.", "--contract", "All variants.", "--accept", "Done."]
+        if room:
+            args += ["--room", room]
+        self.theseus(*args)
+        if extra:
+            path = self.project / "docs/project/tasks.json"
+            document = json.loads(path.read_text())
+            document["tasks"][-1].update(extra)
+            path.write_text(json.dumps(document, indent=2) + "\n")
+        self.git("commit", "-q", "-am", f"queue {task_id}")
+
+    def typed(self):
+        path = self.state / "typed"
+        return path.read_text() if path.exists() else ""
+
+    def deliver(self, task_id, text=None, settled=True):
+        record = json.loads(self.theseus("tasks", "show", task_id).stdout)
+        handoff = self.tmp / (record["execution"]["logDir"] + "/handoff.md")
+        self.write(handoff, text if text is not None else f"Task: {task_id}\nResult: delivered\n", root=self.tmp)
+        if settled:
+            old = handoff.stat().st_mtime - 120
+            os.utime(handoff, (old, old))
+        return handoff
+
+    def test_registry_add_remove_enable(self):
+        listed = self.theseus("agents").stdout
+        self.assertRegex(listed, r"worker-a\s+%1\s+free")
+        self.assertNotEqual(0, self.theseus("agents", "add", "worker-b", "%1", check=False).returncode)
+        self.theseus("agents", "add", "worker-b", "%2")
+        self.theseus("agents", "disable", "worker-b")
+        self.assertRegex(self.theseus("agents").stdout, r"worker-b\s+%2\s+disabled")
+        self.theseus("agents", "remove", "worker-b")
+        self.assertNotIn("worker-b", self.theseus("agents").stdout)
+        self.assertTrue((self.tmp / "data/agents.json").exists())
+
+    def test_tick_assigns_delivers_resets_and_assigns_again(self):
+        self.add("first-task")
+        self.add("second-task")
+        out = self.theseus("queue", "tick").stdout
+        self.assertIn("assigned   worker-a", out)
+        self.assertIn("first-task", out)
+        self.assertIn("New task first-task", self.typed())
+        self.assertEqual("in_progress", json.loads(self.theseus("tasks", "show", "first-task").stdout)["status"])
+        self.assertNotIn("assigned", self.theseus("queue", "tick").stdout, "a working agent gets nothing new")
+        self.deliver("first-task")
+        out = self.theseus("queue", "tick").stdout
+        self.assertIn("delivered  worker-a", out)
+        self.assertIn("compacted  worker-a", out)
+        self.assertIn("assigned   worker-a", out)
+        self.assertIn("/compact Keep only", self.typed())
+        self.assertIn("New task second-task", self.typed())
+        self.assertEqual("verification", json.loads(self.theseus("tasks", "show", "first-task").stdout)["status"])
+        self.assertIn("review", self.theseus("queue").stdout)
+
+    def test_an_agent_is_reset_even_when_its_task_was_merged_by_hand(self):
+        self.add("hand-merged")
+        self.add("after-hand-merge")
+        self.theseus("queue", "tick")
+        self.deliver("hand-merged")
+        self.theseus("tasks", "deliver", "hand-merged", "--handoff", "/dev/null")
+        self.git("commit", "-q", "-am", "delivered outside the queue")
+        out = self.theseus("queue", "tick").stdout
+        self.assertIn("compacted  worker-a", out)
+        self.assertIn("after-hand-merge", out)
+
+    def test_clean_work_after_dirty_work_clears_the_context_first(self):
+        path = self.project / "theseus.toml"
+        text = path.read_text()
+        self.assertIn('enabled = false\ntaint = "until-clear"', text)
+        path.write_text(text.replace('enabled = false\ntaint = "until-clear"', 'enabled = true\ntaint = "until-clear"'))
+        self.git("commit", "-q", "-am", "rooms")
+        self.add("re-dirty", room="dirty")
+        self.add("clean-next", room="clean")
+        self.theseus("queue", "tick")
+        self.deliver("re-dirty")
+        out = self.theseus("queue", "tick").stdout
+        self.assertIn("cleared    worker-a", out)
+        self.assertIn("/clear", self.typed())
+        self.assertIn("clean-next", out)
+        self.assertNotIn("worker-a", json.loads((self.tmp / "data/rooms.json").read_text())["tainted"])
+
+    def test_held_tasks_paused_queue_and_disabled_agents_get_no_work(self):
+        self.add("held-task", hold=True)
+        self.assertNotIn("assigned", self.theseus("queue", "tick").stdout)
+        self.theseus("tasks", "note", "held-task", "Camera is the 400B; cooling allowed.")
+        self.theseus("tasks", "release-hold", "held-task")
+        self.git("commit", "-q", "-am", "release")
+        self.assertIn("held-task", self.theseus("queue", "tick").stdout)
+        self.assertIn("Coordinator notes: Camera is the 400B; cooling allowed.", self.typed())
+        self.deliver("held-task")
+        self.theseus("queue", "tick")
+        self.add("open-task")
+        self.theseus("queue", "pause")
+        self.assertNotIn("assigned", self.theseus("queue", "tick").stdout)
+        self.theseus("queue", "resume")
+        self.theseus("agents", "disable", "worker-a")
+        self.assertNotIn("assigned", self.theseus("queue", "tick").stdout)
+        self.theseus("agents", "enable", "worker-a")
+        self.assertIn("open-task", self.theseus("queue", "tick").stdout)
+
+    def test_stalled_agent_is_nudged_once_then_reported(self):
+        self.replace_config("idle_minutes = 5", "idle_minutes = 0")
+        self.git("commit", "-q", "-am", "instant stall")
+        self.add("slow-task")
+        self.theseus("queue", "tick")
+        self.assertIn("nudged", self.theseus("queue", "tick").stdout)
+        self.assertIn("Continue the current task", self.typed())
+        self.assertIn("stalled", self.theseus("queue", "tick").stdout)
+        self.assertNotIn("stalled", self.theseus("queue", "tick").stdout, "a stall is reported once")
+
+    def test_an_interim_handoff_while_busy_is_not_a_delivery(self):
+        self.add("busy-task")
+        self.theseus("queue", "tick")
+        self.deliver("busy-task")
+        (self.state / "screen-%1").write_text("working (esc to interrupt)\n")
+        self.assertNotIn("delivered", self.theseus("queue", "tick").stdout)
+        (self.state / "screen-%1").write_text("> \n")
+        self.assertIn("delivered", self.theseus("queue", "tick").stdout)
+        self.theseus("tasks", "reopen", "busy-task", "--reason", "interim handoff")
+        self.assertEqual("in_progress", json.loads(self.theseus("tasks", "show", "busy-task").stdout)["status"])
+
+    def test_a_fresh_or_unfinished_handoff_is_not_a_delivery(self):
+        self.add("settling-task")
+        self.theseus("queue", "tick")
+        self.deliver("settling-task", settled=False)
+        self.assertNotIn("delivered", self.theseus("queue", "tick").stdout)
+        self.deliver("settling-task", text="Task: settling-task\nStill working on the decoder.\n")
+        self.assertNotIn("delivered", self.theseus("queue", "tick").stdout)
+        self.deliver("settling-task", text="Task: settling-task\n**Result**: partial. Two of three modes.\n")
+        out = self.theseus("queue", "tick").stdout
+        self.assertIn("partial", out)
+        self.assertEqual("verification", json.loads(self.theseus("tasks", "show", "settling-task").stdout)["status"])
+
+    def test_status_changes_outside_the_queue_appear_in_the_event_history(self):
+        self.add("manual-task")
+        self.theseus("queue", "tick")
+        self.theseus("tasks", "release", "manual-task", "--reason", "reassigning by hand")
+        log = self.theseus("queue", "log").stdout
+        self.assertRegex(log, r"assigned\s+worker-a\s+manual-task")
+        self.assertRegex(log, r"released\s+worker-a\s+manual-task")
+
+    def test_dirty_work_after_clean_work_only_compacts(self):
+        path = self.project / "theseus.toml"
+        path.write_text(path.read_text().replace('enabled = false\ntaint = "until-clear"', 'enabled = true\ntaint = "until-clear"'))
+        self.git("commit", "-q", "-am", "rooms")
+        self.add("clean-first", room="clean")
+        self.add("dirty-next", room="dirty")
+        self.theseus("queue", "tick")
+        self.deliver("clean-first")
+        out = self.theseus("queue", "tick").stdout
+        self.assertIn("compacted  worker-a", out)
+        self.assertNotIn("cleared", out)
+        self.assertIn("dirty-next", out)
+        self.assertIn("/compact", self.typed())
+        self.assertNotIn("/clear", self.typed())
+
+    def test_an_agent_without_a_busy_marker_is_quiet_not_nudged(self):
+        self.theseus("agents", "remove", "worker-a")
+        added = self.theseus("agents", "add", "worker-a", "%1", "--profile", "codex")
+        self.assertIn("no busy marker", added.stderr)
+        self.add("silent-task")
+        self.theseus("queue", "tick")
+        old = 1_000_000_000
+        for path in (self.tmp / "worktrees").rglob("*"):
+            os.utime(path, (old, old))
+        self.assertRegex(self.theseus("agents").stdout, r"worker-a\s+%1\s+quiet")
+        self.assertNotIn("nudged", self.theseus("queue", "tick").stdout)
+
+    def test_wait_returns_when_a_delivery_needs_the_coordinator(self):
+        self.add("watched-task")
+        self.theseus("queue", "tick")
+        self.deliver("watched-task")
+        result = self.theseus("queue", "wait", "--timeout", "20", "--interval", "1")
+        self.assertIn("delivered", result.stdout)
+
+    def test_top_renders_and_exports_json(self):
+        self.add("visible-task")
+        frame = self.theseus("top", "--once").stdout
+        self.assertIn("theseus top", frame)
+        self.assertIn("worker-a", frame)
+        self.assertIn("ready visible-task", " ".join(frame.split()))
+        self.assertNotIn("\033[", frame)
+        data = json.loads(self.theseus("top", "--json").stdout)
+        self.assertEqual(["visible-task"], data["queue"]["ready"])
+        self.assertEqual("free", data["agents"][0]["state"])
+
+
+
+class RepaintTests(unittest.TestCase):
+    def test_only_changed_lines_are_rewritten_inside_a_synchronized_update(self):
+        from theseus.top import repaint
+        out = repaint(["one", "two", "three"], ["one", "TWO", "three"])
+        self.assertTrue(out.startswith("\033[?2026h") and out.endswith("\033[?2026l"))
+        self.assertIn("\033[2;1HTWO", out)
+        self.assertNotIn("one", out)
+        self.assertIn("\033[2;1H\033[J", repaint(["a", "b", "c"], ["a"]))
+if __name__ == "__main__":
+    unittest.main()

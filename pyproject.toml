@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "theseus-lab"
+version = "0.1.0"
+description = "Toolkit for Heuristic Exploration of Superseded, End-of-life, Unsupported Software: a coordinator and worker agent workflow for reverse engineering and porting legacy software"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+theseus = "theseus.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+theseus = ["templates/**/*", "templates/**/.*", "scripts/*", "skills/**/*"]

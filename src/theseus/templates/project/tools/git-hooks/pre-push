@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Pre-push gate: runs the supervisor and docs checks on each pushed commit and refuses code that no passing full
+# verification covers. THESEUS_PUSH_UNVERIFIED="reason" allows a logged code-only push within the configured budget.
+# Enable with: git config core.hooksPath tools/git-hooks
+set -euo pipefail
+command -v theseus >/dev/null || { echo "pre-push: theseus is not on PATH; install theseus-lab" >&2; exit 1; }
+exec theseus guard "$@"
