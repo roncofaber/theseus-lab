@@ -1,6 +1,6 @@
 # Design notes
 
-Decisions behind the package layout, for whoever changes it next. The user-facing description is in `README.md`.
+Decisions behind the package layout, for contributors. User documentation starts at the [README](../README.md).
 
 ## Shape
 
@@ -17,11 +17,11 @@ Decisions behind the package layout, for whoever changes it next. The user-facin
 
 - `pending -> in_progress -> verification -> merged -> completed`. `merged` satisfies dependencies, so code-only rounds do not stall the queue, but only `completed` tasks are archived, so merged work stays visible until verified.
 - `evidence.observed` and `evidence.userTested` are recorded separately from status, because a merge, a runtime observation and a user test are different claims.
-- `currentMilestone` gates `ready` and `assign`; the Supervisor rejects in-progress work outside it.
+- `currentMilestone` gates `ready` and `assign`; the rule tests (`theseus check`) reject in-progress work outside it.
 
 ## Integration
 
-- One path (`theseus merge`) replaces the two integration scripts of the source project. It refuses: tracked changes in main other than the task file, a worker HEAD that moved, paths outside ownership, untracked files the delivery would overwrite. On a failed apply or patch it resets only the touched paths and deletes only files it created.
+- There is one integration path, `theseus merge`. It refuses: tracked changes in main other than the task file, a worker HEAD that moved, paths outside ownership, untracked files the delivery would overwrite. On a failed apply or patch it resets only the touched paths and deletes only files it created.
 - The task file may be dirty at merge time because dispatch leaves the assignment uncommitted; merge commits it afterwards together with the merged status.
 
 ## Verification
@@ -32,4 +32,4 @@ Decisions behind the package layout, for whoever changes it next. The user-facin
 
 ## Citations
 
-- The address index of the source project became a citation index with configurable kinds. A device-protocol port cites captures (`cap_<hash>@<frame>`) and the fold check protects them exactly like native addresses.
+- The citation index has configurable kinds. Native ports cite addresses; a device-protocol port cites captures (`cap_<hash>@<frame>`), and the fold check protects both the same way.

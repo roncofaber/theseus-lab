@@ -18,10 +18,10 @@ Optional tools by feature:
 | `jq` | `theseus status`, `stop`, `wait` for headless workers |
 | `tmux` | persistent worker sessions, `theseus queue`, `theseus instance` |
 | `shellcheck` | the project's shell lint (`theseus check`) |
-| systemd user manager | per-worker CPU and memory slices (Linux); without it workers run unconfined |
+| systemd user manager | CPU and memory limits per worker (Linux); without it workers run without limits |
 | `nvidia-smi` | the GPU line in `theseus top` |
 
-Linux is the primary platform. On macOS the workflow runs, with fewer features: no resource slices, no per-agent memory in `theseus top`, and only a liveness check for headless workers.
+Linux is the primary platform. On macOS the workflow runs, with fewer features: no per-worker limits, no per-agent memory in `theseus top`, and only a liveness check for headless workers.
 
 ## 2. Pick your agent
 
