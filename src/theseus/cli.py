@@ -167,6 +167,9 @@ def config_check():
                 errors += found
                 warnings += notes
             for label, file, data in conf.layers:
+                if label == "project" and (data.get("instances") or {}).get("panes"):
+                    warnings.append(f"{file}: [instances] panes lists tmux pane ids, which belong to one machine; move them "
+                                    f"to {cfg.LOCAL_NAME} (Git-ignored), or let theseus supervise the agents ([agents])")
                 if label in ("project", "project-local"):
                     for name, section in (data.get("workers") or {}).items():
                         if isinstance(section, dict):
@@ -1172,15 +1175,26 @@ SHELL_COMMANDS = {"status": "status.sh", "stop": "stop.sh", "followup": "followu
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    if argv == ["--schema-version"]:
+        from . import store
+        print(store.SCHEMA_VERSION)
+        return
     if argv and argv[0] in SHELL_COMMANDS:
         sys.exit(run_script(SHELL_COMMANDS[argv[0]], argv[1:]))
     parser = build_parser()
     args = parser.parse_args(argv)
     from . import store
-    try:
-        args.func(args)
-    except store.StoreError as error:
-        sys.exit(f"theseus: {error}")
+    while True:
+        try:
+            args.func(args)
+            return
+        except store.SchemaTooNew as error:
+            if not (args.command == "queue" and args.action in ("run", "wait")):
+                sys.exit(f"theseus: {error}")
+            from . import upgrade
+            upgrade.newer_store(error, argv, interval=args.interval or 30)
+        except store.StoreError as error:
+            sys.exit(f"theseus: {error}")
 
 
 if __name__ == "__main__":

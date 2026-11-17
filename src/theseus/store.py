@@ -31,6 +31,14 @@ DEFAULTS = {"retention": {"samples_days": 14, "events_days": 0},
 class StoreError(Exception):
     pass
 
+
+class SchemaTooNew(StoreError):
+    """The database was migrated by a newer theseus; version is its schema version."""
+
+    def __init__(self, message, version):
+        super().__init__(message)
+        self.version = version
+
 MIGRATIONS = [
     [
         """CREATE TABLE projects (
@@ -328,14 +336,14 @@ def version(conn):
 def migrate(conn):
     current = version(conn)
     if current > SCHEMA_VERSION:
-        raise StoreError(f"{database_name(conn)} has schema version {current}, newer than the {SCHEMA_VERSION} this theseus "
-                         f"knows; upgrade theseus (or restore an older backup with `theseus db restore`)")
+        raise SchemaTooNew(f"{database_name(conn)} has schema version {current}, newer than the {SCHEMA_VERSION} this "
+                           f"theseus knows; upgrade theseus (or restore an older backup with `theseus db restore`)", current)
     if current == SCHEMA_VERSION:
         return
     with transaction(conn):
         current = version(conn)
         if current > SCHEMA_VERSION:
-            raise StoreError(f"{database_name(conn)} has schema version {current}, newer than this theseus knows")
+            raise SchemaTooNew(f"{database_name(conn)} has schema version {current}, newer than this theseus knows", current)
         for number, statements in enumerate(MIGRATIONS[current:], current + 1):
             for statement in statements:
                 statement(conn) if callable(statement) else conn.execute(statement)

@@ -411,5 +411,53 @@ class WakeTests(Sandbox):
         self.assertEqual(5.0, self.wq.next_sleep(self.conf, 5, 1000.0))
 
 
+class NewerStoreTests(Sandbox):
+    """`queue wait` and `queue run` outlive a store upgrade: on a schema newer than they know they become the installed
+    theseus with the same arguments, or wait for one that knows it."""
+
+    def setUp(self):
+        super().setUp()
+        self.scaffold()
+        from theseus import store
+        with store.opened() as conn:
+            conn.execute(f"PRAGMA user_version = {store.SCHEMA_VERSION + 1}")
+        self.fake = self.tmp / "installed-theseus"
+        self.record = self.tmp / "exec-record"
+
+    def installed(self, schema):
+        self.fake.write_text(f"""#!/usr/bin/env bash
+if [ "$1" = --schema-version ]; then echo {schema}; exit 0; fi
+printf '%s\\n' "$*" > "{self.record}"
+""")
+        self.fake.chmod(0o755)
+        return {**self.env, "THESEUS_INSTALLED": str(self.fake)}
+
+    def test_wait_becomes_the_installed_theseus_with_its_arguments(self):
+        from theseus import store
+        result = self.theseus("queue", "wait", "--interval", "1", "--timeout", "5",
+                              env=self.installed(store.SCHEMA_VERSION + 1))
+        self.assertEqual("queue wait --interval 1 --timeout 5\n", self.record.read_text())
+        self.assertIn(f"schema {store.SCHEMA_VERSION + 1}; continuing as", result.stderr)
+
+    def test_an_installed_theseus_that_is_still_older_is_waited_for(self):
+        import subprocess
+        import sys
+        process = subprocess.Popen([sys.executable, "-m", "theseus", "queue", "run", "--interval", "1"], cwd=self.project,
+                                   env=self.installed(1), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            process.communicate(timeout=3.5)
+            self.fail("queue run exited instead of waiting for an upgrade")
+        except subprocess.TimeoutExpired:
+            process.kill()
+            _, err = process.communicate()
+        self.assertEqual(1, err.count("retrying every 1s until it is upgraded"), err)
+        self.assertFalse(self.record.exists())
+
+    def test_other_commands_still_refuse_a_newer_store(self):
+        result = self.theseus("queue", "tick", check=False)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("newer than", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

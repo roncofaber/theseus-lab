@@ -49,6 +49,8 @@ Three claims are kept separate: *merged* (the code is in), *observed* (the coord
 theseus agents add worker-1 %3 --profile claude-code
 ```
 
+Pane ids belong to one machine and one tmux server, so a `[[instances.panes]]` list that seeds the registry goes in the Git-ignored `theseus.local.toml`, never in the tracked `theseus.toml` (`theseus config check` warns when it finds one there).
+
 `theseus queue run` (or `theseus queue wait` from the coordinator) then repeats this cycle:
 
 - When an agent's task is done, the task moves to review. A task counts as done when the agent is idle, its handoff states a result, and the handoff has stopped changing.

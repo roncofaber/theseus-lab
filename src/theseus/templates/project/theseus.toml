@@ -47,8 +47,8 @@ retries = 3
 # permission_mode = "auto"
 
 [instances]
-# Persistent worker sessions in tmux panes, for example:
-# panes = [{ name = "{{PREFIX}}-worker-1", pane = "%1" }]
+# Hand-made persistent worker panes belong in the Git-ignored theseus.local.toml (pane ids are per machine), for example
+# panes = [{ name = "{{PREFIX}}-worker-1", pane = "%1" }]; supervised agents ([agents] there) need none.
 panes = []
 # Busy marker, launch command and session records come from each agent's profile; set them here only to override.
 # busy_pattern = "esc to interrupt"
