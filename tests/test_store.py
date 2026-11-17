@@ -473,14 +473,57 @@ class MigrationTests(StoreCase):
 
 
 class MaintenanceTests(StoreCase):
-    def test_trim_keeps_fourteen_days_of_samples_and_every_event_by_default(self):
+    def test_trim_keeps_fourteen_days_of_samples_and_a_year_of_events_by_default(self):
         now = time.time()
-        for days in (1, 13, 15, 40):
+        for days in (1, 13, 15, 40, 400):
             store.add_sample(self.conn, "first", "a1", "working", at=now - days * store.DAY)
             store.add_event(self.conn, "first", "tick", at=now - days * store.DAY)
-        self.assertEqual({"samples": 2, "events": 0}, store.trim(self.conn, now))
+        removed = store.trim(self.conn, now)
+        self.assertEqual((3, 1), (removed["samples"], removed["events"]))
         self.assertEqual(2, len(store.samples(self.conn)))
         self.assertEqual(4, len(store.events(self.conn)))
+
+    def test_every_growing_table_is_trimmed_by_age_and_the_latest_run_survives(self):
+        now = time.time()
+        old, recent = now - 400 * store.DAY, now - store.DAY
+        for at in (old, recent):
+            store.add_delivery(self.conn, "first", "t1", agent="a1", result="delivered", at=at)
+            store.add_gateway_error(self.conn, "gw", "first", 524, True, agent="a1", at=at)
+            session = store.start_session(self.conn, "first", started=at)
+            store.end_session(self.conn, session, ended=at)
+        for gen, at in enumerate((old, old, recent), 1):
+            run = store.add_run(self.conn, "first", "a1", "start", at=at)
+            store.close_run(self.conn, run["id"], "crash", at=at)
+        lone = store.add_run(self.conn, "first", "a2", "start", at=old)
+        store.close_run(self.conn, lone["id"], "down", at=old)
+        store.add_run(self.conn, "first", "a3", "start", at=old)
+        store.put_gateway_retry(self.conn, "first", "a1", now=old, task="t1", pool="gw", phase="exhausted")
+        store.put_gateway_retry(self.conn, "first", "a2", now=old, task="t2", pool="gw", phase="waiting")
+        store.put_gateway_retry(self.conn, "first", "a3", now=recent, task="t3", pool="gw", phase="recovered")
+        removed = store.trim(self.conn, now)
+        self.assertEqual({"deliveries": 1, "gateway_errors": 1, "coordinator_sessions": 1, "agent_runs": 2,
+                          "gateway_retries": 1},
+                         {key: removed[key] for key in ("deliveries", "gateway_errors", "coordinator_sessions",
+                                                        "agent_runs", "gateway_retries")})
+        self.assertEqual([3], [r["gen"] for r in store.runs(self.conn, "first", "a1")])
+        self.assertEqual(4, store.add_run(self.conn, "first", "a1", "start")["gen"], "gen numbering continues")
+        self.assertEqual(1, len(store.runs(self.conn, "first", "a2")), "an agent's latest run is kept")
+        self.assertEqual(1, len(store.runs(self.conn, "first", "a3")), "an open run is kept")
+        self.assertEqual({"a2", "a3"}, {r["agent"] for r in store.gateway_retries(self.conn)})
+
+    def test_prune_removes_every_row_of_a_gone_project(self):
+        store.upsert_project(self.conn, "gone", root=self.tmp / "missing")
+        store.add_gateway_error(self.conn, "gw", "gone", 524, True, agent="a1")
+        store.put_gateway_retry(self.conn, "gone", "a1", task="t1", pool="gw", phase="waiting")
+        store.add_run(self.conn, "gone", "a1", "start")
+        store.add_delivery(self.conn, "gone", "t1")
+        store.add_sample(self.conn, "gone", "a1", "free")
+        store.put_lease(self.conn, "gw", "gone", "a1", "t1", time.time())
+        self.assertEqual(["gone"], store.prune_projects(self.conn))
+        tables = [row[0] for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+        left = {table: self.conn.execute(f'SELECT COUNT(*) FROM "{table}" WHERE project = ?', ("gone",)).fetchone()[0]
+                for table in tables if "project" in [c[1] for c in self.conn.execute(f'PRAGMA table_info("{table}")')]}
+        self.assertEqual({}, {table: count for table, count in left.items() if count})
 
     def test_retention_comes_from_store_toml(self):
         (self.tmp / "store.toml").write_text("[retention]\nsamples_days = 2\nevents_days = 30\n")
@@ -488,7 +531,8 @@ class MaintenanceTests(StoreCase):
         for days in (1, 13, 40):
             store.add_sample(self.conn, "first", "a1", "working", at=now - days * store.DAY)
             store.add_event(self.conn, "first", "tick", at=now - days * store.DAY)
-        self.assertEqual({"samples": 2, "events": 1}, store.trim(self.conn, now))
+        removed = store.trim(self.conn, now)
+        self.assertEqual((2, 1), (removed["samples"], removed["events"]))
         (self.tmp / "store.toml").write_text("[retention\n")
         with self.assertRaises(store.StoreError):
             store.settings()

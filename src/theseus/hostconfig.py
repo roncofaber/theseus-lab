@@ -28,7 +28,7 @@ SUPERVISOR_DEFAULTS = {"socket": "theseus", "size": "220x50", "history_limit": 5
 GATEWAY_DEFAULTS = {"breaker_errors": 3, "breaker_window_minutes": 10, "strong_codes": [530], "parallel_cap_step": 1,
                     "parallel_cap_minutes": 10}
 POOL_KEYS = ("max", "priority")
-STORE_KEYS = {"retention": ("samples_days", "events_days"), "backups": ("directory", "daily", "weekly")}
+STORE_KEYS = {"retention": ("samples_days", "events_days", "deliveries_days", "runs_days", "gateway_days"), "backups": ("directory", "daily", "weekly")}
 
 
 class ConfigError(Exception):

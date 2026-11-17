@@ -23,8 +23,8 @@ BUSY_TIMEOUT = 30.0
 CLAIM_TTL = 15 * 60
 LEASE_TTL = 30 * 60
 DAY = 24 * 3600
-GATEWAY_ERROR_DAYS = 7
-DEFAULTS = {"retention": {"samples_days": 14, "events_days": 0},
+DEFAULTS = {"retention": {"samples_days": 14, "events_days": 365, "deliveries_days": 365, "runs_days": 90,
+                          "gateway_days": 7},
             "backups": {"directory": "", "daily": 7, "weekly": 4}}
 
 
@@ -386,7 +386,8 @@ def list_projects(conn):
 
 def prune_projects(conn, missing_root=True, older_than=None, dry_run=False):
     """Remove projects whose root directory no longer exists, or (with older_than, in seconds) that nobody saw for
-    that long; their agents, events, deliveries, samples, sessions and task index go with them. Returns the names
+    that long; their agents, agent runs, events, deliveries, samples, sessions, task index, gateway errors and retry
+    episodes and pool slots go with them. Returns the names
     (with dry_run, the names it would remove). Nothing calls this automatically."""
     cutoff = time.time() - older_than if older_than is not None else None
     with transaction(conn):
@@ -397,6 +398,8 @@ def prune_projects(conn, missing_root=True, older_than=None, dry_run=False):
             if gone or stale:
                 doomed.append(row["name"])
         if not dry_run:
+            for table in ("gateway_errors", "gateway_retries", "pool_leases", "pool_claims"):
+                conn.executemany(f"DELETE FROM {table} WHERE project = ?", [(name,) for name in doomed])
             conn.executemany("DELETE FROM projects WHERE name = ?", [(name,) for name in doomed])
     return doomed
 
@@ -1193,15 +1196,33 @@ def backup_dir():
 
 
 def trim(conn, now=None):
-    """Delete samples (and events, when retention.events_days is set) older than their retention."""
+    """Delete rows older than their retention (a key set to 0 keeps them): samples, events, deliveries and ended
+    coordinator sessions; ended agent runs except each agent's latest, whose gen numbers the next run; gateway errors and
+    gateway retry episodes that are no longer waiting. Returns the rows removed per table."""
     now = time.time() if now is None else now
     retention = settings()["retention"]
+
+    def cutoff(key):
+        days = float(retention.get(key) or 0)
+        return now - days * DAY if days else None
+
+    statements = (
+        ("samples", "samples_days", "DELETE FROM samples WHERE epoch < ?"),
+        ("events", "events_days", "DELETE FROM events WHERE epoch < ?"),
+        ("deliveries", "deliveries_days", "DELETE FROM deliveries WHERE epoch < ?"),
+        ("coordinator_sessions", "events_days",
+         "DELETE FROM coordinator_sessions WHERE ended_epoch IS NOT NULL AND ended_epoch < ?"),
+        ("agent_runs", "runs_days", "DELETE FROM agent_runs WHERE ended_epoch IS NOT NULL AND ended_epoch < ? AND id NOT IN "
+                                    "(SELECT MAX(id) FROM agent_runs GROUP BY project, agent)"),
+        ("gateway_errors", "gateway_days", "DELETE FROM gateway_errors WHERE epoch < ?"),
+        ("gateway_retries", "gateway_days",
+         "DELETE FROM gateway_retries WHERE phase != 'waiting' AND COALESCE(updated_epoch, 0) < ?"),
+    )
     removed = {}
     with transaction(conn):
-        for table, key in (("samples", "samples_days"), ("events", "events_days")):
-            days = float(retention.get(key) or 0)
-            removed[table] = conn.execute(f"DELETE FROM {table} WHERE epoch < ?", (now - days * DAY,)).rowcount if days else 0
-        conn.execute("DELETE FROM gateway_errors WHERE epoch < ?", (now - GATEWAY_ERROR_DAYS * DAY,))
+        for table, key, statement in statements:
+            limit = cutoff(key)
+            removed[table] = conn.execute(statement, (limit,)).rowcount if limit is not None else 0
     return removed
 
 

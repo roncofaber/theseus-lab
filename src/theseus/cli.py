@@ -842,7 +842,8 @@ def cmd_db(args):
             older = args.older_than_days * 86400 if args.older_than_days else None
             names = store.prune_projects(conn, older_than=older, dry_run=not args.yes)
             verb = "removed" if args.yes else "would remove"
-            print(f"{verb} {', '.join(names)} and all their events, agents, deliveries and samples" if names
+            print(f"{verb} {', '.join(names)} and all their rows (events, agents, runs, deliveries, samples, gateway "
+                  f"errors and retries, pool slots)" if names
                   else "nothing to prune")
             if names and not args.yes:
                 print("rerun with --yes to delete them")
