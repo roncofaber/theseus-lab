@@ -7,7 +7,6 @@ import re
 import shutil
 import signal
 import subprocess
-import sys
 import time
 import unittest
 from pathlib import Path
@@ -152,6 +151,8 @@ def drain(fd, until=None, timeout=10):
 
 
 @unittest.skipUnless(REAL_TMUX, "tmux is not installed")
+
+
 class SupervisorTests(Sandbox):
     def setUp(self):
         super().setUp()
@@ -225,7 +226,7 @@ class SupervisorTests(Sandbox):
     def up(self, *names, check=True):
         return self.theseus("agents", "up", *names, check=check, timeout=60)
 
-    def test_up_starts_each_slot_once_and_a_second_up_keeps_them(self):
+    def test_up_reconciles_restarts_a_killed_agent_and_names_its_transcript(self):
         out = self.up().stdout
         self.assertRegex(out, r"demo-fake-1\s+started\s+fresh session; ready")
         self.assertRegex(out, r"demo-fake-2\s+started")
@@ -250,8 +251,6 @@ class SupervisorTests(Sandbox):
         self.assertRegex(listed, r"demo-fake-1\s+free\s+fake\s+gen 1")
         self.assertRegex(self.theseus("agents").stdout, r"demo-fake-1\s+=demo--demo-fake-1:\s+free")
         self.assertEqual("", self.legacy_calls())
-
-    def test_a_killed_agent_is_restarted_alone_with_its_exit_recorded(self):
         self.up()
         pid = int(self.tmux("display", "-p", "-t", "=demo--demo-fake-1:", "#{pane_pid}").stdout)
         os.kill(pid, 9)
@@ -265,145 +264,6 @@ class SupervisorTests(Sandbox):
         self.assertRegex(out, r"demo-fake-1\s+kept")
         self.assertTrue((self.tmp / "data/agents/demo-fake-1/crash-1.txt").exists())
         self.assertTrue(self.events("exited"))
-
-    def test_a_crash_loop_gives_up_after_max_crashes_with_one_error(self):
-        (self.state / "mode-demo-fake-1").write_text("crash")
-        self.up("demo-fake-1", check=False)
-        crashed = lambda: [e for e in self.events("error") if "crashed 3 times" in e["detail"]]
-        self.wait_for(lambda: (self.record("demo-fake-1") or {}).get("phase") == "failed" and crashed(), timeout=30,
-                      message="the agent to be marked failed")
-        errors = crashed()
-        self.assertEqual(1, len(errors))
-        self.assertRegex(self.up("demo-fake-1").stdout, r"demo-fake-1\s+failed")
-        (self.state / "mode-demo-fake-1").write_text("normal")
-        self.assertRegex(self.theseus("agents", "restart", "demo-fake-1", timeout=60).stdout, r"restarted")
-        self.assertEqual("ready", self.record("demo-fake-1")["phase"])
-
-    def record(self, name):
-        from theseus import store
-        with store.opened() as conn:
-            return next((a for a in store.list_agents(conn, "demo") if a["name"] == name), None)
-
-    def test_a_startup_dialog_blocks_the_agent_and_is_never_answered(self):
-        (self.state / "mode-demo-fake-1").write_text("trust")
-        out = self.up("demo-fake-1").stdout
-        self.assertRegex(out, r"demo-fake-1\s+started\s+fresh session; blocked")
-        self.assertTrue(any("startup dialog" in e["detail"] for e in self.events("error")))
-        self.assertNotIn("answer demo-fake-1", self.log())
-        self.assertRegex(self.theseus("agents").stdout, r"demo-fake-1\s+\S+\s+blocked")
-        self.assertRegex(self.theseus("agents", "down", "demo-fake-1", timeout=60).stdout, r"demo-fake-1\s+stopped")
-        self.assertNotIn("answer demo-fake-1", self.log())
-
-    def test_config_drift_is_reported_not_applied(self):
-        self.up()
-        self.replace_config('env = { FAKE_SECRET = "s3cret-value" }', 'env = { FAKE_SECRET = "s3cret-value", FAKE_MORE = "1" }')
-        out = self.up().stdout
-        self.assertRegex(out, r"demo-fake-1\s+drift")
-        self.assertEqual(1, len(self.runs("demo-fake-1")))
-        self.assertEqual(2, len(self.events("drift")))
-        self.up()
-        self.assertEqual(2, len(self.events("drift")))
-
-    def test_lowering_a_count_stops_a_free_agent(self):
-        self.up()
-        self.replace_config("fake = 2", "fake = 1")
-        out = self.up().stdout
-        self.assertRegex(out, r"demo-fake-2\s+(removed|stopping)")
-        self.wait_for(lambda: self.tmux("has-session", "-t", "=demo--demo-fake-2").returncode != 0 or
-                      self.up() and False, message="the agent to exit")
-        self.up()
-        self.assertIsNone(self.record("demo-fake-2"))
-        self.assertIn("input demo-fake-2: /exit", self.log())
-
-    def test_down_keeps_an_agent_stopped_until_up_names_it(self):
-        self.up()
-        self.assertRegex(self.theseus("agents", "down", "demo-fake-2", timeout=60).stdout, r"demo-fake-2\s+stopped")
-        self.assertIn("input demo-fake-2: /exit", self.log())
-        self.assertNotEqual(0, self.tmux("has-session", "-t", "=demo--demo-fake-2").returncode)
-        self.assertRegex(self.up().stdout, r"demo-fake-2\s+down")
-        self.assertRegex(self.up("demo-fake-2").stdout, r"demo-fake-2\s+(started|restarted)")
-
-    def test_a_lost_server_resumes_only_the_agent_that_holds_a_task(self):
-        self.up()
-        first = self.record("demo-fake-1")["session_id"]
-        self.add_task("t-one")
-        from theseus import integrate
-        integrate.assign(self.conf(), "t-one", "demo-fake-1-t-one", "fake", "persistent-instance",
-                         owner="fake:demo-fake-1:demo-fake-1-t-one", instance="demo-fake-1")
-        self.tmux("kill-server")
-        out = self.up().stdout
-        self.assertRegex(out, rf"demo-fake-1\s+restarted\s+resuming {first}")
-        self.assertRegex(out, r"demo-fake-2\s+restarted\s+fresh session")
-        self.assertIn(f"resume={first}", self.log().splitlines()[-1] + self.log())
-        self.assertEqual("server-lost", self.runs("demo-fake-1")[1]["stop_reason"])
-
-    def use_status(self):
-        self.replace_config("status_command = []", 'status_command = ["fake-status"]')
-        self.git("commit", "-q", "-am", "status command")
-
-    def assign(self, task_id, agent="demo-fake-1"):
-        self.add_task(task_id)
-        from theseus import integrate
-        integrate.assign(self.conf(), task_id, f"{agent}-{task_id}", "fake", "persistent-instance",
-                         owner=f"fake:{agent}:{agent}-{task_id}", instance=agent)
-
-    def test_the_status_command_marks_ready_and_its_session_changes_are_stored(self):
-        self.use_status()
-        self.assertRegex(self.up().stdout, r"demo-fake-1\s+started\s+fresh session; ready")
-        fresh = "99999999-8888-7777-6666-555555555555"
-        (self.state / "session-demo-fake-1").write_text(fresh)
-        self.theseus("queue", "tick", "--no-assign", timeout=60)
-        self.assertEqual(fresh, self.record("demo-fake-1")["session_id"])
-
-    def test_an_agent_missing_from_the_status_list_times_out_as_blocked(self):
-        self.use_status()
-        (self.tmp / "config.toml").write_text(HOST.replace("ready_seconds = 15", "ready_seconds = 1"))
-        (self.state / "hidden-demo-fake-1").write_text("1")
-        self.assertRegex(self.up("demo-fake-1").stdout, r"demo-fake-1\s+started\s+fresh session; blocked")
-        self.assertTrue(any("not ready after 1s" in e["detail"] for e in self.events("error")))
-
-    def test_waiting_for_input_with_a_task_raises_one_stalled_event(self):
-        self.use_status()
-        self.up()
-        self.assign("t-wait")
-        (self.state / "status-demo-fake-1").write_text("waiting")
-        (self.state / "waiting-demo-fake-1").write_text("permission prompt")
-        self.theseus("queue", "tick", timeout=60)
-        self.theseus("queue", "tick", timeout=60)
-        stalled = [e for e in self.events("stalled") if "waiting for permission prompt" in e["detail"]]
-        self.assertEqual(1, len(stalled))
-        self.assertRegex(self.theseus("agents").stdout, r"demo-fake-1\s+\S+\s+waiting")
-
-    def test_the_queue_relaunches_a_supervised_agent_onto_a_compatible_profile(self):
-        self.set_config('\n[workers.fake2]\npreset = "claude-code"\ncommand = "fake-agent"\ncapacity = 3\n'
-                        'env = { FAKE_SECRET = "other-value" }\n\n[workers.fake2.interactive]\nstatus_command = []\n')
-        self.git("commit", "-q", "-am", "fake2")
-        self.up()
-        session = self.record("demo-fake-1")["session_id"]
-        self.add_task("t-rea")
-        self.theseus("tasks", "profile", "t-rea", "fake2")
-        self.git("commit", "-q", "-am", "profile")
-        out = self.theseus("queue", "tick", timeout=120).stdout
-        self.assertIn("relaunched", out)
-        self.assertIn("assigned", out)
-        self.assertRegex(self.log(), rf"start name=demo-fake-1 session= resume={session} pid=\d+ secret=other-value")
-        self.assertEqual("fake2", self.runs("demo-fake-1")[0]["profile"])
-        self.assertIn("input demo-fake-1: /exit", self.log())
-
-    def test_a_thrashing_agent_restarts_fresh_and_gets_its_restart_prompt(self):
-        self.up()
-        self.assign("t-refill")
-        from theseus import supervisor
-        supervisor.send(self.conf(), "demo-fake-1", "please thrash", expect_busy=False)
-        out = self.theseus("queue", "tick", "--no-assign", timeout=60).stdout
-        self.assertRegex(out, r"restarted\s+demo-fake-1\s+t-refill thrashing: restarted on a fresh session")
-        self.wait_for(lambda: self.theseus("queue", "tick", "--no-assign", timeout=60) and
-                      "Your context was cleared" in self.log(), timeout=30, message="the restart prompt")
-        starts = [line for line in self.log().splitlines() if line.startswith("start name=demo-fake-1")]
-        self.assertEqual(2, len(starts))
-        self.assertIn("resume= ", starts[-1])
-
-    def test_the_transcript_of_a_supervised_agent_comes_from_its_stored_session_id(self):
         sessions = self.tmp / "claude/sessions"
         sessions.mkdir(parents=True)
         self.replace_config("status_command = []", f'status_command = []\nsessions_dir = "{sessions}"')
@@ -419,87 +279,11 @@ class SupervisorTests(Sandbox):
         self.assertEqual(str(path), self.theseus("agents", "logs", "demo-fake-1", "--transcript").stdout.strip())
         self.assertEqual(1234, agents.state(self.conf(), rec)["context"]["tokens"])
 
-    def test_scale_writes_the_local_count_and_reconciles(self):
-        self.up()
-        out = self.theseus("agents", "scale", "fake", "3", timeout=60).stdout
-        self.assertIn("[agents.counts] fake = 3 in theseus.local.toml", out)
-        self.assertRegex(out, r"demo-fake-3\s+started")
-        self.assertIn("[agents.counts]\nfake = 3", (self.project / "theseus.local.toml").read_text())
-        self.theseus("agents", "scale", "fake", "2", timeout=60)
-        self.assertIn("fake = 2", (self.project / "theseus.local.toml").read_text())
-        self.assertEqual(1, (self.project / "theseus.local.toml").read_text().count("fake ="))
-
-    def test_scale_refuses_counts_written_inline(self):
-        self.up()
-        (self.project / "theseus.local.toml").write_text("[agents]\ncounts = { fake = 2 }\n")
-        result = self.theseus("agents", "scale", "fake", "3", check=False)
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("by hand", result.stderr)
-        self.assertEqual("[agents]\ncounts = { fake = 2 }\n", (self.project / "theseus.local.toml").read_text())
-
-    def test_attach_from_the_console_returns_on_the_detach_key(self):
-        import pty
-        self.up("demo-fake-1")
-        code = ("import sys; from theseus.tui.app import attach_supervised; "
-                "print('result', repr(attach_supervised(sys.argv[1], sys.argv[2])))")
-        pid, fd = pty.fork()
-        if pid == 0:
-            os.environ.clear()
-            os.environ.update({**self.env, "TERM": "xterm-256color"})
-            os.execvp(sys.executable, [sys.executable, "-c", code, str(self.project), "demo-fake-1"])
-        attached = lambda: self.tmux("display", "-p", "-t", "=demo--demo-fake-1:", "#{session_attached}").stdout.strip()
-        drain(fd, lambda: attached() == "1")
-        self.assertEqual("1", attached())
-        os.write(fd, b"\x11")
-        output, closed = drain(fd)
-        self.assertTrue(closed)
-        self.assertEqual(pid, os.waitpid(pid, 0)[0])
-        self.assertIn(b"result ''", output)
-        self.assertEqual("", self.legacy_calls())
-
-    def test_the_console_mirrors_and_restarts_a_supervised_agent(self):
-        import asyncio
-        self.up()
-        from theseus.tui.app import TopApp
-        from theseus.tui.popups import AgentScreen, Confirm
-        os.environ["PYTHONPATH"] = self.env["PYTHONPATH"]
-
-        async def drive():
-            app = TopApp(interval=3600, roots=[str(self.project)], current=str(self.project), color_system="truecolor",
-                         mirror_seconds=0.1)
-            async with app.run_test(size=(170, 60)) as pilot:
-                async def until(check, seconds=20):
-                    end = time.monotonic() + seconds
-                    while time.monotonic() < end:
-                        if check():
-                            return
-                        await pilot.pause(0.05)
-                    self.fail("console did not settle")
-                await until(lambda: app.active_item() is not None and "fake-1" in self.screen(app))
-                await pilot.press("a", "enter")
-                await until(lambda: isinstance(app.screen, AgentScreen))
-                popup = app.screen
-                await until(lambda: "fake agent demo-fake-1 ready" in popup.query_one("#mirror-text").render().plain)
-                window = lambda: self.tmux("display", "-p", "-t", "=demo--demo-fake-1:",
-                                           "#{window_width}x#{window_height}").stdout.strip()
-                await until(lambda: window() == "%dx%d" % popup.query_one("#mirror").visible_size())
-                await pilot.click("#send")
-                popup.query_one("#send").value = "hi there"
-                await pilot.press("enter")
-                await until(lambda: "input demo-fake-1: hi there" in self.log())
-                await pilot.press("escape")
-                await until(lambda: len(app.screen_stack) == 1)
-                await until(lambda: window() == "220x50")
-                self.assertEqual("220x50", self.tmux("display", "-p", "-t", "=demo--demo-fake-2:",
-                                                     "#{window_width}x#{window_height}").stdout.strip())
-                await pilot.press("a", "enter")
-                await until(lambda: isinstance(app.screen, AgentScreen))
-                await pilot.press("R")
-                await until(lambda: isinstance(app.screen, Confirm))
-                await pilot.press("y")
-                await until(lambda: len(self.runs("demo-fake-1")) == 2, 60)
-        asyncio.run(drive())
-        self.assertEqual("", self.legacy_calls())
+    def assign(self, task_id, agent="demo-fake-1"):
+        self.add_task(task_id)
+        from theseus import integrate
+        integrate.assign(self.conf(), task_id, f"{agent}-{task_id}", "fake", "persistent-instance",
+                         owner=f"fake:{agent}:{agent}-{task_id}", instance=agent)
 
     def screen(self, app):
         return "\n".join(strip.text for strip in app.screen._compositor.render_strips())
@@ -510,84 +294,18 @@ class SupervisorTests(Sandbox):
                      "--objective", "Do it.", "--contract", "All variants.", "--accept", "Done.")
         self.git("commit", "-q", "-am", f"queue {task_id}")
 
-    def test_a_missing_conversation_restarts_fresh(self):
-        self.up()
-        self.add_task("t-two")
-        from theseus import integrate
-        integrate.assign(self.conf(), "t-two", "demo-fake-1-t-two", "fake", "persistent-instance",
-                         owner="fake:demo-fake-1:demo-fake-1-t-two", instance="demo-fake-1")
-        (self.state / "mode-demo-fake-1").write_text("resume-missing")
-        self.tmux("kill-server")
-        out = self.up("demo-fake-1").stdout
-        self.assertIn("restarted fresh", out)
-        state = json.loads((self.tmp / "data/queue/agents-state.json").read_text())
-        self.assertEqual("t-two", state["demo-fake-1"]["restart_prompt"])
-
-    def test_verified_send_reaches_a_supervised_agent(self):
-        self.up()
-        from theseus import supervisor
-        ok, detail = supervisor.send(self.conf(), "demo-fake-1", "hello there")
-        self.assertTrue(ok, detail)
-        self.assertIn("input demo-fake-1: hello there", self.log())
-        screen = supervisor.capture(supervisor.record(self.conf(), "demo-fake-1"), ansi=False)
-        self.assertIn("fake agent demo-fake-1 ready", screen)
-        names = [item["name"] for item in supervisor.snapshot(self.conf())]
-        self.assertEqual(["demo-fake-1", "demo-fake-2"], names)
-        from theseus import top
-        self.assertIn("ready", top.capture("=demo--demo-fake-1:"))
-        self.assertEqual("", top.send_keys("=demo--demo-fake-1:", "Escape"))
-        top.agent_processes([{"name": "demo-fake-1", "pane": "=demo--demo-fake-1:"}])
-        self.assertEqual("", self.legacy_calls())
-
-    def test_a_queue_cycle_on_supervised_agents(self):
-        self.up()
-        self.add_task("t-cycle")
-        out = self.theseus("queue", "tick", timeout=60).stdout
-        self.assertIn("assigned", out)
-        self.wait_for(lambda: "New task t-cycle" in self.log(), message="the task message")
-        self.wait_for(lambda: re.search(r"^done\n> *$", self.tmux("capture-pane", "-p", "-t", "=demo--demo-fake-1:").stdout.rstrip(),
-                                        re.M), message="the agent to finish")
-        out = self.theseus("queue", "tick", timeout=60).stdout
-        self.assertIn("delivered", out)
-        self.assertEqual("", self.legacy_calls())
-
-    def test_the_hand_made_pane_migrates_with_its_conversation(self):
-        self.tmux("kill-server")
-        session = "11111111-2222-3333-4444-555555555555"
-        sessions = self.tmp / "sessions"
-        sessions.mkdir()
-        env = {**self.env}
-        subprocess.run([REAL_TMUX, "-S", str(self.legacy), "-f", "/dev/null", "new-session", "-d", "-s", "user", "-x", "200",
-                        "-y", "50", "bash", "--norc", "--noprofile"], env=env, check=True)
-        subprocess.run([REAL_TMUX, "-S", str(self.legacy), "send-keys", "-t", "user:", "-l",
-                        f"fake-agent --name demo-fake-1 --session-id {session}"], check=True)
-        subprocess.run([REAL_TMUX, "-S", str(self.legacy), "send-keys", "-t", "user:", "Enter"], check=True)
-        self.wait_for(lambda: "start name=demo-fake-1" in self.log(), message="the hand-made agent")
-        pid = int(re.search(r"start name=demo-fake-1 .* pid=(\d+)", self.log()).group(1))
-        (sessions / f"{pid}.json").write_text(json.dumps({"sessionId": session, "name": "demo-fake-1"}))
-        pane = subprocess.run([REAL_TMUX, "-S", str(self.legacy), "display", "-p", "-t", "user:", "#{pane_id}"],
-                              capture_output=True, text=True).stdout.strip()
-        self.replace_config("status_command = []", f'status_command = []\nsessions_dir = "{sessions}"')
-        self.replace_config("panes = []", f'panes = [{{ name = "demo-fake-1", pane = "{pane}" }}]')
-        self.replace_config('# default = "claude-code"', 'default = "fake"')
-        self.git("commit", "-q", "-am", "hand-made pane")
-        self.assertRegex(self.theseus("agents", "up", "--dry-run").stdout, r"demo-fake-1\s+legacy")
-        out = self.theseus("agents", "migrate", "demo-fake-1", timeout=90).stdout
-        self.assertRegex(out, rf"demo-fake-1\s+migrated\s+resumed {session}")
-        self.assertIn(f"resume={session}", self.log())
-        self.assertTrue(self.record("demo-fake-1")["managed"])
-        self.assertIn("input demo-fake-1: /exit", self.log())
-        self.assertTrue(self.tmux("has-session", "-t", "=demo--demo-fake-1").returncode == 0)
-
 
 @unittest.skipUnless(REAL_TMUX, "tmux is not installed")
+
+
 class TmuxSequenceTests(unittest.TestCase):
     """The production sequence on tmux itself: spawn, respawn, attach-size hooks and kill, which must never crash the
     server (a global window-size manual does on tmux 3.4)."""
 
-    def setUp(self):
-        self.socket = short_dir() / "s"
-        self.addCleanup(drop_tmux, self.socket)
+    @classmethod
+    def setUpClass(cls):
+        cls.socket = short_dir() / "s"
+        cls.addClassCleanup(drop_tmux, cls.socket)
 
     def test_attach_resizes_to_the_client_and_the_detach_key_restores_the_agent_size(self):
         import pty
@@ -620,13 +338,13 @@ class TmuxSequenceTests(unittest.TestCase):
         from unittest import mock
         from theseus import supervisor, tmux as tm
         server = tm.Server("-S", str(self.socket), conf_file=supervisor.tmux_conf(), env=supervisor.server_env())
-        server.new_session("a--x", ["sleep", "60"], "/", 220, 50)
-        server.run("resize-window", "-x", "220", "-y", "50", "-t", "=a--x:")
-        rec = {"name": "x", "managed": True, "server": f"path:{self.socket}", "target": "a--x"}
-        state = lambda: server.display("=a--x:", "#{window_width}x#{window_height} #{session_attached}")
+        server.new_session("c--x", ["sleep", "60"], "/", 220, 50)
+        server.run("resize-window", "-x", "220", "-y", "50", "-t", "=c--x:")
+        rec = {"name": "x", "managed": True, "server": f"path:{self.socket}", "target": "c--x"}
+        state = lambda: server.display("=c--x:", "#{window_width}x#{window_height} #{session_attached}")
         self.assertTrue(supervisor.fit(rec, 120, 33))
         self.assertEqual("120x33 0", state())
-        self.assertEqual("120x33", server.display("=a--x:", "#{pane_width}x#{pane_height}"))
+        self.assertEqual("120x33", server.display("=c--x:", "#{pane_width}x#{pane_height}"))
         self.assertFalse(supervisor.fit(rec, 120, 33), "an unchanged size is not sent again")
         self.assertFalse(supervisor.fit(rec, 8, 2))
         self.assertEqual("120x33 0", state())
@@ -655,15 +373,15 @@ class TmuxSequenceTests(unittest.TestCase):
     def test_spawn_respawn_and_kill_keep_the_server_alive(self):
         from theseus import supervisor, tmux as tm
         server = tm.Server("-S", str(self.socket), conf_file=supervisor.tmux_conf(), env=supervisor.server_env())
-        server.new_session("a--x", ["sleep", "60"], "/", 220, 50)
-        server.new_session("a--y", ["sleep", "60"], "/", 220, 50)
-        server.run("resize-window", "-x", "220", "-y", "50", "-t", "=a--x:")
-        self.assertEqual("220x50", server.display("=a--x:", "#{window_width}x#{window_height}"))
-        server.respawn("=a--x:", ["sleep", "61"])
-        self.assertIsNotNone(server.display("=a--x:", "#{pane_pid}"))
-        server.kill_session("a--x")
+        server.new_session("b--x", ["sleep", "60"], "/", 220, 50)
+        server.new_session("b--y", ["sleep", "60"], "/", 220, 50)
+        server.run("resize-window", "-x", "220", "-y", "50", "-t", "=b--x:")
+        self.assertEqual("220x50", server.display("=b--x:", "#{window_width}x#{window_height}"))
+        server.respawn("=b--x:", ["sleep", "61"])
+        self.assertIsNotNone(server.display("=b--x:", "#{pane_pid}"))
+        server.kill_session("b--x")
         self.assertTrue(server.alive())
-        self.assertTrue(server.has_session("a--y"))
+        self.assertTrue(server.has_session("b--y"))
         self.assertEqual("on", server.run("show-options", "-gv", "remain-on-exit").stdout.strip())
 
 

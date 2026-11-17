@@ -47,11 +47,25 @@ def short_dir():
 
 
 def drop_tmux(socket):
-    """Kill the throwaway tmux server on socket, if any, before removing its directory (never the reverse, which
+    """Kill the throwaway tmux server on socket, if any, and wait for its pane-died hooks (which name the socket on
+    their command line and write to the test's host store) before removing its directory (never the reverse, which
     leaves the server running on a deleted socket)."""
     import shutil
+    import time
     if socket.exists():
         subprocess.run(["tmux", "-S", str(socket), "kill-server"], capture_output=True)
+        needle = str(socket).encode()
+        for _ in range(100):
+            hooks = []
+            for entry in Path("/proc").iterdir() if Path("/proc").is_dir() else ():
+                try:
+                    if entry.name.isdigit() and needle in (entry / "cmdline").read_bytes():
+                        hooks.append(entry.name)
+                except OSError:
+                    continue
+            if not hooks:
+                break
+            time.sleep(0.05)
     shutil.rmtree(socket.parent, ignore_errors=True)
 
 

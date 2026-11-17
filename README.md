@@ -114,7 +114,7 @@ Any other CLI can be added as a custom profile; see [Agent profiles](docs/agent-
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup and guidelines. Tested agent profiles for new CLIs are especially useful.
 
-Run the tests in parallel with `pip install -e ".[dev]"` and `python -m pytest -n auto`; `python -m unittest discover -s tests` runs the same suite serially without extra dependencies.
+Run the tests with `python -m unittest discover -s tests` (about 30 s).
 
 ## License
 

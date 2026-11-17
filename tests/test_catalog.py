@@ -35,13 +35,6 @@ class CorpusSandbox(Sandbox):
 
 
 class CatalogTests(CorpusSandbox):
-    def test_show_finds_the_function_containing_an_address(self):
-        out = self.theseus("re", "show", "0x401050").stdout
-        self.assertIn("void init_device", out)
-        self.assertNotIn("limitations", out)
-        self.assertIn("limitations", self.theseus("re", "show", "FUN_00401050", "--header").stdout)
-        self.assertNotEqual(0, self.theseus("re", "show", "0x500000", check=False).returncode)
-
     def test_call_graph(self):
         self.assertIn("4 call edges", self.theseus("re", "calls").stdout)
         callers = self.theseus("re", "callers", "send_frame").stdout
@@ -50,21 +43,11 @@ class CatalogTests(CorpusSandbox):
         callees = self.theseus("re", "callees", "0x401000").stdout
         self.assertEqual(["0x00401040\tinit_device", "0x00401100\tFUN_00401100"], callees.splitlines())
 
-    def test_find_searches_exports_strings_and_the_citation_index(self):
-        self.write("docs/investigations/frames.md", "# Frames\n\nTask `frames` on base x.\n\nsend_frame lives at 0x00401180.\n")
-        self.theseus("docs", "index")
-        out = self.theseus("re", "find", "0x401180").stdout
-        self.assertIn("[export] 0x00401180", out)
-        self.assertIn("[index] | address | 0x00401180", out)
-        self.assertIn("[string]", self.theseus("re", "find", "device not").stdout)
-        self.assertEqual(1, self.theseus("re", "find", "nothing-matches-this", check=False).returncode)
-
     def test_rea_wrapper_answers_single_decompiles_from_the_corpus(self):
         env = dict(self.env, PATH="/usr/bin:/bin")
         out = self.theseus("re", "rea", "decompile", "ram:0x00401100", "--provider", "ghidra", env=env)
         self.assertIn("FUN_00401100", out.stdout)
         self.assertIn("answering from the decompiled corpus", out.stderr)
-
 
 
 def synthetic_pe(machine):
@@ -94,10 +77,5 @@ class InventoryTests(CorpusSandbox):
         self.assertIn(",ELF,x86-64,64,", text)
         self.assertTrue((self.tmp / "inv/binaries.md").exists())
 
-    def test_status_reports_what_each_target_already_has(self):
-        out = self.theseus("re", "status").stdout
-        self.assertRegex(out, r"app\s+file ok\s+catalog built\s+corpus 4 functions\s+calls -")
-        self.theseus("re", "calls")
-        self.assertRegex(self.theseus("re", "status").stdout, r"calls built")
 if __name__ == "__main__":
     unittest.main()

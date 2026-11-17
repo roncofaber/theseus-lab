@@ -38,27 +38,24 @@ fi
 for _ in $(seq 1 36); do pane_busy "$pane" || break; sleep 5; done
 pane_busy "$pane" && { echo "$pane still busy after 3 minutes; not restarting" >&2; exit 1; }
 type_line() { tmux send-keys -t "$pane" -l "$1" && sleep 0.3 && tmux send-keys -t "$pane" Enter; }
-poll=${THESEUS_RESTART_POLL:-1}
 type_line "/exit"
-deadline=$((SECONDS + 60))
-while kill -0 "$agent_pid" 2>/dev/null && ((SECONDS < deadline)); do sleep "$poll"; done
+for _ in $(seq 1 60); do kill -0 "$agent_pid" 2>/dev/null || break; sleep 1; done
 kill -0 "$agent_pid" 2>/dev/null && { echo "$pane: pid $agent_pid did not exit after /exit" >&2; exit 1; }
 type_line "$resume"
 new_pid="" fresh=""
-deadline=$((SECONDS + 90))
-while ((SECONDS < deadline)); do
+for _ in $(seq 1 90); do
     new_pid=$(agent)
     [[ -n "$new_pid" ]] && break
     if [[ -n "$missing" && -z "$fresh" ]] && tmux capture-pane -p -t "$pane" 2>/dev/null | grep -F -- "$missing" | grep -qF -- "$session"; then
         fresh=1
         type_line "$launch"
     fi
-    sleep "$poll"
+    sleep 1
 done
 [[ -n "$new_pid" ]] || { echo "$pane: no agent came back within 90 s" >&2; exit 1; }
 previous=""
 for _ in $(seq 1 30); do
-    sleep "$poll"
+    sleep "${THESEUS_RESTART_POLL:-1}"
     screen=$(tmux capture-pane -p -t "$pane" 2>/dev/null)
     [[ -n "$screen" && "$screen" == "$previous" ]] && ! pane_busy "$pane" && break
     previous=$screen

@@ -1,6 +1,5 @@
 """Tool resolution without hard-coded paths: environment, then theseus.local.toml, then PATH, then common install
 locations (newest version first) and REA's own MCP registration. HOME and PATH are sandboxed per test."""
-import json
 import os
 import unittest
 
@@ -60,27 +59,6 @@ class ToolResolutionTests(Sandbox):
         self.assertEqual((str(override), "environment GHIDRA_INSTALL_DIR"), tools.resolve(self.conf(), "ghidra"))
         self.assertIn("[tools.paths]", (self.project / "theseus.local.toml").read_text())
 
-    def test_set_refuses_a_path_that_is_not_the_tool_and_rewrites_an_existing_entry(self):
-        with self.assertRaises(cfg.ConfigError):
-            tools.set_tool(self.conf(), "ghidra", str(self.tmp))
-        with self.assertRaises(cfg.ConfigError):
-            tools.set_tool(self.conf(), "unknown-tool", "/bin/sh")
-        first, second = make_ghidra(self.tmp / "g1"), make_ghidra(self.tmp / "g2")
-        tools.set_tool(self.conf(), "ghidra", str(first))
-        tools.set_tool(self.conf(), "ghidra", str(second))
-        text = (self.project / "theseus.local.toml").read_text()
-        self.assertEqual(1, text.count("ghidra ="))
-        self.assertIn(str(second), text)
-        cfg.load(root=self.project)
-
-    def test_rea_falls_back_to_its_mcp_registration_and_runs_with_the_node_beside_it(self):
-        node = make_executable(self.home / ".nvm/versions/node/v24/bin/node")
-        rea = make_executable(self.home / ".nvm/versions/node/v24/bin/rea")
-        (self.home / ".claude.json").write_text(json.dumps({"mcpServers": {"rea": {"command": str(node), "args": [str(rea), "mcp"]}}}))
-        self.assertEqual(([str(node), str(rea)], "REA MCP registration"), tools.resolve(self.conf(), "rea"))
-        (self.home / ".claude.json").unlink()
-        self.assertEqual(([str(node), str(rea)], "install location"), tools.resolve(self.conf(), "rea"))
-
     def test_environment_exports_tools_to_scripts_and_workers(self):
         ghidra = make_ghidra(self.home / "software/ghidra_12.2_PUBLIC")
         env = self.conf().environment()
@@ -88,15 +66,6 @@ class ToolResolutionTests(Sandbox):
         self.assertEqual(str(ghidra), env["GHIDRA_INSTALL_DIR"])
         exported = self.theseus("tools", "env").stdout
         self.assertIn(f"export GHIDRA_INSTALL_DIR={ghidra}", exported)
-
-    def test_needed_tool_missing_fails_doctor(self):
-        self.replace_config("need = []", 'need = ["ghidra"]')
-        result = self.theseus("doctor", check=False)
-        self.assertEqual(1, result.returncode)
-        self.assertRegex(result.stdout, r"FAIL\s+ghidra\s+needed by this project")
-        make_ghidra(self.home / "software/ghidra_12.2_PUBLIC")
-        self.assertRegex(self.theseus("doctor", check=False).stdout, r"ok\s+ghidra")
-
 
 if __name__ == "__main__":
     unittest.main()

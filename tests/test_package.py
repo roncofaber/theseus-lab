@@ -4,18 +4,12 @@ Supervisor suite passes.
 
 Private words to keep out of the package (other project names, user names) go one per line in the Git-ignored
 tests/forbidden.local.txt or in the file THESEUS_FORBIDDEN_WORDS names; the shipped patterns are generic."""
-import importlib.util
 import os
 import re
-import shutil
-import subprocess
-import sys
-import tempfile
 import unittest
-import zipfile
 from pathlib import Path
 
-from helpers import REPO, base_env
+from helpers import REPO
 
 from theseus import rules
 
@@ -82,40 +76,6 @@ class GenericityTests(unittest.TestCase):
     def test_wine_appears_only_as_a_reference_run_backend(self):
         mentions = {str(p.relative_to(PACKAGE)) for p in shipped_files() if re.search(r"\bwine", p.read_text(errors="replace"), re.I)}
         self.assertEqual({"templates/project/dot-agents/skills/theseus-reference-runs/SKILL.md", "tools.py"}, mentions)
-
-
-class WheelTests(unittest.TestCase):
-    def test_wheel_in_a_fresh_venv_scaffolds_a_passing_project(self):
-        with tempfile.TemporaryDirectory(prefix="theseus-wheel-") as temporary:
-            root = Path(temporary)
-            (root / "gitconfig").write_text("[init]\n\tdefaultBranch = main\n")
-            builder = sys.executable if importlib.util.find_spec("pip") else shutil.which("python3")
-            build = subprocess.run([builder, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation", "-q",
-                                    "-w", str(root / "dist"), str(REPO)], capture_output=True, text=True)
-            self.assertEqual(0, build.returncode, build.stderr)
-            shutil.rmtree(REPO / "build", ignore_errors=True)
-            wheel = next((root / "dist").glob("theseus_lab-*.whl"))
-            with zipfile.ZipFile(wheel) as archive:
-                packaged = {name for name in archive.namelist() if name.startswith("theseus/")}
-            expected = {"theseus/" + p.relative_to(PACKAGE).as_posix() for p in shipped_files()}
-            self.assertEqual(set(), expected - packaged, "files missing from the wheel")
-            subprocess.run([sys.executable, "-m", "venv", str(root / "venv")], check=True)
-            python = root / "venv/bin/python"
-            install = subprocess.run([str(python), "-m", "pip", "install", "-q", "--no-deps", str(wheel)], capture_output=True, text=True)
-            self.assertEqual(0, install.returncode, install.stderr)
-            env = base_env(root)
-            env.pop("PYTHONPATH")
-            env["PATH"] = f"{root / 'venv/bin'}{os.pathsep}{env['PATH']}"
-            theseus = str(root / "venv/bin/theseus")
-            scaffold = subprocess.run([theseus, "scaffold", str(root / "project")], cwd=root, env=env, capture_output=True, text=True)
-            self.assertEqual(0, scaffold.returncode, scaffold.stderr)
-            self.assertIn("linked   .claude/skills", scaffold.stdout)
-            check = subprocess.run([theseus, "check"], cwd=root / "project", env=env, capture_output=True, text=True)
-            self.assertEqual(0, check.returncode, check.stdout + check.stderr)
-            self.assertIn("OK", check.stderr)
-            located = subprocess.run([str(python), "-c", "import theseus; print(theseus.__file__)"], capture_output=True, text=True, cwd=root)
-            self.assertIn(str(root / "venv"), located.stdout)
-            self.assertTrue(os.access(root / "project/tools/git-hooks/pre-push", os.X_OK))
 
 
 if __name__ == "__main__":

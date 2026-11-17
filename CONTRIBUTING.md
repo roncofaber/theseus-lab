@@ -7,13 +7,11 @@ Thanks for your interest in theseus-lab. Bug reports, fixes, documentation impro
 ```sh
 git clone https://github.com/roncofaber/theseus-lab
 cd theseus-lab
-uv venv .venv && uv pip install -e ".[dev]" --python .venv/bin/python
-.venv/bin/python -m pytest -n auto
+uv venv .venv && uv pip install -e . --python .venv/bin/python
+.venv/bin/python -m unittest discover -s tests
 ```
 
-`pytest -n auto` runs the suite in parallel with pytest-xdist, one worker per CPU; the `dev` extra installs both. The tests are plain `unittest` test cases, so the standard library runner works too, serially and much slower: `.venv/bin/python -m unittest discover -s tests`.
-
-The test suite needs `git`, `bash`, `jq`, `shellcheck` and `tmux`. It runs every command against temporary folders with a throwaway Git identity, a private host store, a fake agent CLI and either a fake `tmux` or a throwaway tmux server on its own socket, so it never touches your projects, your agents or your tmux sessions. Each test process (each xdist worker) gets its own temporary store and tmux socket. A few timing tests compare against the load of the machine; CI runs them serially before the parallel run.
+The test suite needs `git`, `bash`, `jq`, `shellcheck` and `tmux`. It runs every command against temporary folders with a throwaway Git identity, a private host store, a fake agent CLI and either a fake `tmux` or a throwaway tmux server on its own socket, so it never touches your projects, your agents or your tmux sessions.
 
 To try your changes on a real project, install your checkout as the CLI:
 
@@ -27,7 +25,7 @@ uv tool install --editable .
 - Process supervision and tmux handling live in `src/theseus/scripts/` as Bash, and must pass `shellcheck`.
 - Templates for new projects are in `src/theseus/templates/project/`. A path segment starting with `dot-` becomes `.` when a project is scaffolded.
 - Keep the package neutral. No company, site or vendor-specific settings in the package, the templates or the docs; those belong in a project's `theseus.toml` as a profile variant. The test suite checks this.
-- Add or update tests with every behavior change, and run the full suite before opening a pull request.
+- Add or update tests with every behavior change, and run the full suite before opening a pull request. Keep the suite small and fast (about 30 s): one or two tests per behavior that matters, fakes over real tmux and the Textual Pilot where a unit test proves the same thing, no timing benchmarks.
 - Write comments only when the reason for the code is not obvious from the code itself.
 
 ## Agent profiles
