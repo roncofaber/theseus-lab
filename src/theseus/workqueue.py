@@ -177,7 +177,19 @@ def tick(conf, assign=True):
     recorded = []
     claimed = set()
     with locked(conf):
-        for agent in ag.agents(conf):
+        from . import pools
+        registered = ag.agents(conf)
+        pool_names = {a["name"]: pools.pool_of(conf, a.get("provider")) for a in registered}
+        for pool in set(filter(None, pool_names.values())):
+            held = {}
+            for a in registered:
+                if pool_names[a["name"]] == pool:
+                    current = ag.current_task(conf, a["name"])
+                    if current:
+                        held[a["name"]] = current["id"]
+            pools.sync(conf, pool, held)
+        waiting_on_pool = set()
+        for agent in registered:
             info = ag.state(conf, agent)
             name, task_id = agent["name"], info["task"]
             if info["state"] == "delivered":
@@ -201,6 +213,15 @@ def tick(conf, assign=True):
             task, needed = next_task(conf, agent, info, claimed)
             if task is None:
                 continue
+            pool = pool_names.get(name)
+            if pool:
+                allowed, why = pools.may_start(conf, pool)
+                if not allowed:
+                    waiting_on_pool.add(pool)
+                    state = runtime(conf)
+                    state.setdefault(name, {})["pool_wait"] = why
+                    save_runtime(conf, state)
+                    continue
             claimed.add(task["id"])
             if needed:
                 ok, detail = reset(conf, agent, needed)
@@ -213,6 +234,10 @@ def tick(conf, assign=True):
             except Exception as error:
                 ok, detail = False, str(error)
             recorded.append(events(conf, 1)[-1] if ok else event(conf, "error", name, task["id"], detail))
+            if ok and pool:
+                pools.take(conf, pool, name, task["id"])
+        for pool in set(filter(None, pool_names.values())) - waiting_on_pool:
+            pools.drop_claim(conf, pool)
     return recorded
 
 

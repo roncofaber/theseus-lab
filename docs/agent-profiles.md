@@ -54,6 +54,7 @@ Use a variant per task with `theseus dispatch TASK --provider cheap-research`, o
 | `env` | Extra environment for the run; `{model}` is substituted |
 | `retry` | Resume automatically after a retryable gateway error (Claude JSON output with status 429, 5xx or 529) |
 | `capacity` | Concurrent active tasks under this profile |
+| `pool` | A host-wide pool shared with other projects (see [Configuration](configuration.md#sharing-agents-between-projects)) |
 | `interactive.launch`, `interactive.resume` | How a persistent instance is started and resumed (`{launch}`, `{session}`) by `theseus instance restart` |
 | `interactive.busy_pattern` | Text the agent shows only while working; the queue treats the pane as idle otherwise |
 | `interactive.compact`, `interactive.clear` | Commands typed between tasks: compact (same room, or clean to dirty) and clear (dirty to clean); `{keep}` is what compaction keeps |

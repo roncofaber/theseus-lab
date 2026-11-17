@@ -291,6 +291,14 @@ def eligibility(conf, states):
     return result
 
 
+def pool_states(conf):
+    from . import pools
+    try:
+        return [pools.status(name) for name in pools.project_pools(conf)]
+    except OSError:
+        return []
+
+
 def snapshot(conf, sample=False):
     states = ag.states(conf)
     if sample:
@@ -301,7 +309,7 @@ def snapshot(conf, sample=False):
     return {
         "project": conf.name, "milestone": t.Queue(conf).milestone(), "time": datetime.now(timezone.utc).isoformat(),
         "host": host_state(), "agents": states, "workers": other_workers(conf, states),
-        "eligible": eligibility(conf, states),
+        "eligible": eligibility(conf, states), "pools": pool_states(conf),
         "queue": {k: [x["id"] for x in v] for k, v in summary.items()},
         "rooms": {x["id"]: x.get("room") for v in summary.values() for x in v},
         "blocked": {x["id"]: x["reasons"] for x in summary["blocked"]},
@@ -495,6 +503,13 @@ def render(state, width=120, height=None, ui=None):
     over = verification["limit"] and (verification["unverified"] or 0) > verification["limit"]
     frame.row(f"verification {last_text}   {RED if over else ''}{verification['unverified']} unverified code commits"
               f"{R if over else ''} {DIM}(limit {verification['limit'] or '-'}){R}")
+    for pool in state.get("pools", []):
+        mine = pool["projects"].get(state["project"], 0)
+        others = ", ".join(f"{p} {n}" for p, n in sorted(pool["projects"].items()) if p != state["project"])
+        full = pool["max"] and pool["active"] >= pool["max"]
+        claims = f" {DIM}·{R} {YELLOW}claims: {', '.join(pool['claims'])}{R}" if pool["claims"] else ""
+        frame.row(f"pool {B}{pool['pool']}{R} {RED if full else GREEN}{B}{pool['active']}/{pool['max']}{R} working "
+                  f"{DIM}·{R} this project {mine}" + (f" {DIM}·{R} {others}" if others else "") + claims)
     today = state.get("today") or {}
     median = today.get("medianHandoff")
     frame.row(f"today {B}{today.get('delivered', 0)}{R} delivered {DIM}·{R} {B}{today.get('completed', 0)}{R} completed "
@@ -565,6 +580,13 @@ def render(state, width=120, height=None, ui=None):
             return f"{RED}no eligible agent{f' for the {room} room' if room else ''}{R}"
         idle = [n for n, _ in allowed if n in free]
         if idle:
+            for pool in state.get("pools", []):
+                if pool["max"] and pool["active"] >= pool["max"]:
+                    return f"{YELLOW}pool {pool['pool']} full ({pool['active']}/{pool['max']}){R}"
+                ahead = pool["priority"][: pool["priority"].index(state["project"])] if state["project"] in pool["priority"] else pool["priority"]
+                waiting = [p for p in ahead if p in pool["claims"]]
+                if waiting:
+                    return f"{YELLOW}yielding to {waiting[0]}{R}"
             return f"{GREEN}assigning on the next tick{R}"
         return f"{YELLOW}eligible agents busy ({len(allowed)}){R}"
 

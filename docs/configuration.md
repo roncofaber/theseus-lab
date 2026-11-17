@@ -33,6 +33,18 @@ theseus config check             # validate
 
 The scaffolded `theseus.toml` documents every key with comments.
 
+## Sharing agents between projects
+
+When several projects run on one machine against the same provider limit (for example a model gateway that allows four concurrent agents), declare a pool in `~/.config/theseus/pools.toml`:
+
+```toml
+[pools.gateway]
+max = 4                                   # agents working a task at once, across all projects
+priority = ["laser-port", "game-port"]    # earlier projects win when the pool is full
+```
+
+Each project's profile joins it with `pool = "gateway"` in `[workers.<profile>]`. Only agents working a task hold a slot; idle sessions cost nothing. When a project has ready work but the pool is full, it records a claim; lower-priority projects then start no new tasks, so their running tasks finish and the slots come back. `theseus pool` shows who holds each slot, and `theseus top` shows the pool on the PROJECT line.
+
 ## External tools
 
 theseus finds reverse-engineering and capture tools on each machine without hard-coded paths. `theseus tools` lists the known tools and where each was found: Ghidra, a JDK, REA, rizin, gdb, Python with pefile, capstone and lief, Kaitai, Wine, Xvfb, xdotool, bubblewrap, QEMU, tshark and ffmpeg.

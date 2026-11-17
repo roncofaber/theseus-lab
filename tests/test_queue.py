@@ -213,6 +213,24 @@ class QueueTests(Sandbox):
         self.theseus("tasks", "merged", "merged-quickly", "--commit", "abc1234")
         self.assertFalse(wq.still_open(conf, record))
 
+    def test_a_full_shared_pool_holds_assignment_until_a_slot_frees(self):
+        pools_file, pool_state = self.tmp / "pools.toml", self.tmp / "pool-state"
+        pools_file.write_text('[pools.gw]\nmax = 1\npriority = ["demo-port", "other"]\n')
+        self.env.update({"THESEUS_POOLS": str(pools_file), "THESEUS_POOL_STATE": str(pool_state)})
+        path = self.project / "theseus.toml"
+        path.write_text(path.read_text().replace('[workers.claude-code]\n', '[workers.claude-code]\npool = "gw"\n', 1))
+        self.git("commit", "-q", "-am", "pool")
+        pool_state.mkdir()
+        (pool_state / "gw.json").write_text(json.dumps({"leases": {"other/x": {"project": "other", "agent": "x", "task": "t",
+                                                                                "seen": __import__("time").time()}}, "claims": {}}))
+        self.add("pooled-task")
+        self.assertNotIn("assigned", self.theseus("queue", "tick").stdout)
+        self.assertIn("pool gw full (1/1)", " ".join(self.theseus("top", "--once").stdout.split()))
+        self.assertIn("demo-port", self.theseus("pool").stdout)
+        (pool_state / "gw.json").write_text(json.dumps({"leases": {}, "claims": {}}))
+        self.assertIn("assigned", self.theseus("queue", "tick").stdout)
+        self.assertIn("demo-port 1", self.theseus("pool").stdout)
+
     def test_wait_returns_when_a_delivery_needs_the_coordinator(self):
         self.add("watched-task")
         self.theseus("queue", "tick")

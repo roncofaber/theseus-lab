@@ -119,7 +119,7 @@ PRESETS = {
 }
 ALIASES = {"claude": "claude-subagent"}
 DEFAULT = "claude-code"
-OVERRIDABLE = set(PRESETS["claude-code"]) | {"preset", "fallback"}
+OVERRIDABLE = set(PRESETS["claude-code"]) | {"preset", "fallback", "pool"}
 
 
 class ProfileError(Exception):

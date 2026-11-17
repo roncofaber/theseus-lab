@@ -408,6 +408,21 @@ def cmd_agents(args):
         sys.exit(f"theseus: {error}")
 
 
+def cmd_pool(args):
+    from . import pools
+    names = [args.name] if args.name else sorted(pools.definitions())
+    if not names:
+        print(f"no pools defined; create {pools.config_path()} (see `theseus pool --help`)")
+        return
+    for name in names:
+        info = pools.status(name)
+        projects = ", ".join(f"{p} {n}" for p, n in sorted(info["projects"].items())) or "none"
+        print(f"{name}: {info['active']}/{info['max'] or '-'} working ({projects}); priority {' > '.join(info['priority']) or '-'}; "
+              f"claims {', '.join(info['claims']) or 'none'}")
+        for lease in sorted(info["leases"].values(), key=lambda v: (v["project"], v["agent"])):
+            print(f"  {lease['project']:<16} {lease['agent']:<20} {lease['task']}")
+
+
 def cmd_queue(args):
     from . import workqueue
     conf = load()
@@ -656,6 +671,13 @@ def build_parser():
     p.add_argument("--provider", "--profile", dest="provider", help="agent profile (theseus agents profiles)")
     p.add_argument("--rooms", help="comma-separated rooms this agent may work (clean,dirty)")
     p.set_defaults(func=guarded(cmd_agents))
+    p = sub.add_parser("pool", help="host-wide worker pools shared across projects (~/.config/theseus/pools.toml)",
+                       description="Show who holds the slots of each pool. A pool caps the agents working at once across "
+                                   "projects: [pools.NAME] max = N, priority = [\"project\", ...] in ~/.config/theseus/pools.toml; "
+                                   "a profile joins with pool = \"NAME\" in [workers.PROFILE].")
+    p.add_argument("name", nargs="?")
+    p.set_defaults(func=guarded(cmd_pool))
+
     p = sub.add_parser("queue", help="work queue: status, tick, run, wait, pause, resume, log")
     p.add_argument("action", nargs="?", default="status", choices=("status", "tick", "run", "wait", "pause", "resume", "log"))
     p.add_argument("--interval", type=int)
