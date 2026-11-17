@@ -8,7 +8,9 @@ to `rea setup` as the provider environment.
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
+import time
 from pathlib import Path
 
 from . import tools
@@ -130,6 +132,32 @@ def doctor(conf):
             location = skill_location(client)
             rows.append(("ok" if location else "FAIL", f"rea skill ({client})",
                          str(location) if location else "missing; run `theseus setup rea`"))
+    return rows + store_rows()
+
+
+def store_rows():
+    """The host store: path, schema version and size, last backup and maintenance, and project name conflicts."""
+    from . import registry, store
+    try:
+        with store.for_host() as conn:
+            info = store.check(conn, quick=True)
+            found = registry.conflicts()
+    except (store.StoreError, OSError, sqlite3.Error) as error:
+        return [("FAIL", "store", str(error))]
+    rows = [("ok", "store", f"{info['path']} schema {info['version']}, {info['size'] / 1048576:.1f} MiB")]
+    backup = info["backup"]
+    age = time.time() - store.epoch_of(backup["time"]) if backup else None
+    rows.append(("ok" if age is not None and age < 2 * store.DAY else "WARN", "store backup",
+                 f"{backup['time']} {backup['path']}" if backup else f"none yet in {info['backups']}; `theseus db backup`"))
+    rows.append(("ok" if info["maintained"] else "WARN", "store maintenance",
+                 info["maintained"] or "never; `theseus db maintain` (the queue runs it daily)"))
+    for job, error in info["errors"].items():
+        rows.append(("WARN", f"store {job}", f"last attempt failed: {error}"))
+    for conflict in found:
+        rows.append(("WARN", "project name", f"{conflict['name']} is {conflict['root']}; {conflict['other']} also claims it "
+                                             f"and is not recorded: give one a different [project] name"))
+    if not found:
+        rows.append(("ok", "project names", "no two project roots claim the same name"))
     return rows
 
 

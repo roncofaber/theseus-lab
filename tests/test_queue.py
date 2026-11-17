@@ -89,6 +89,13 @@ class QueueTests(Sandbox):
         self.assertIn("New task second-task", self.typed())
         self.assertEqual("verification", json.loads(self.theseus("tasks", "show", "first-task").stdout)["status"])
         self.assertIn("review", self.theseus("queue").stdout)
+        from theseus import store
+        with store.opened() as conn:
+            samples = store.samples(conn, "demo-port", agent="worker-a")
+            [delivery] = store.deliveries(conn, "demo-port")
+        self.assertEqual([("free", None), ("working", "first-task"), ("free", None)],
+                         [(s["state"], s["task"]) for s in samples])
+        self.assertEqual(("first-task", "worker-a", "delivered"), (delivery["task"], delivery["agent"], delivery["result"]))
 
     def test_an_agent_is_reset_even_when_its_task_was_merged_by_hand(self):
         self.add("hand-merged")

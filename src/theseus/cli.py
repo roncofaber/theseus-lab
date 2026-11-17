@@ -498,6 +498,63 @@ def cmd_projects(args):
         print("no projects registered yet: run any theseus command inside a project")
 
 
+def size_text(count):
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if count < 1024 or unit == "GiB":
+            return f"{count:.0f} {unit}" if unit == "B" else f"{count:.1f} {unit}"
+        count /= 1024
+
+
+def cmd_db(args):
+    from . import store
+    action = args.action
+    if action == "restore" and not args.yes:
+        sys.exit("theseus: restore replaces the host database for every project on this machine; "
+                 "rerun with --yes (the current database is backed up first)")
+    if action == "restore" and not args.file:
+        sys.exit("usage: theseus db restore FILE --yes")
+    with store.opened() as conn:
+        if action == "backup":
+            result = store.backup(conn)
+            print(f"backup {result['path']} ({size_text(result['size'])}), integrity_check {result['integrity']}")
+            for name in result["removed"]:
+                print(f"  rotated out {name}")
+        elif action == "maintain":
+            result = store.maintain(conn)
+            removed = ", ".join(f"{n} {table}" for table, n in result["removed"].items())
+            print(f"trimmed {removed}; ANALYZE, optimize, {result['freed_pages']} free page(s) returned"
+                  f"{' after converting to incremental vacuum' if result['vacuumed'] else ''}, WAL truncated; "
+                  f"{size_text(result['before'])} -> {size_text(result['after'])}")
+        elif action == "restore":
+            result = store.restore(conn, args.file)
+            print(f"saved the previous database as {result['saved']}")
+            print(f"restored {result['restored']} (schema version {result['version']})")
+        elif action == "prune":
+            older = args.older_than_days * 86400 if args.older_than_days else None
+            names = store.prune_projects(conn, older_than=older, dry_run=not args.yes)
+            verb = "removed" if args.yes else "would remove"
+            print(f"{verb} {', '.join(names)} and all their events, agents, deliveries and samples" if names
+                  else "nothing to prune")
+            if names and not args.yes:
+                print("rerun with --yes to delete them")
+        else:
+            info = store.check(conn)
+            ok = info["integrity"] == ["ok"]
+            print(f"database      {info['path']}")
+            print(f"integrity     {'ok' if ok else '; '.join(info['integrity'][:5])}")
+            print(f"schema        version {info['version']} (this theseus knows {info['known']})")
+            print(f"size          {size_text(info['size'])} (WAL {size_text(info['wal'])}, {info['pages']} pages of "
+                  f"{info['page_size']} B, {info['free_pages']} free)")
+            print("rows          " + ", ".join(f"{table} {count}" for table, count in info["rows"].items()))
+            backup = info["backup"]
+            print(f"last backup   {backup['time'] + ' ' + backup['path'] if backup else 'none'} (directory {info['backups']})")
+            print(f"maintenance   {info['maintained'] or 'never'}")
+            for job, error in info["errors"].items():
+                print(f"last {job} error: {error}")
+            if not ok:
+                sys.exit(1)
+
+
 def cmd_cleanup(args):
     from . import cleanup
     conf = load()
@@ -757,6 +814,20 @@ def build_parser():
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_projects)
 
+    p = sub.add_parser("db", help="host store: check, maintain, backup, restore FILE --yes, prune",
+                       description="The host database (~/.local/share/theseus/theseus.db, THESEUS_DB overrides) holds "
+                                   "projects, agents, events, pool slots, deliveries and samples for every project on "
+                                   "this machine. The queue runs maintain and backup at most once a day by itself.")
+    p.add_argument("action", nargs="?", default="check", choices=("check", "maintain", "backup", "restore", "prune"),
+                   help="check: integrity, version, sizes, rows, last backup and maintenance; maintain: trim by "
+                        "retention, ANALYZE, optimize, checkpoint, vacuum; backup: online copy, integrity check and "
+                        "rotation; restore FILE --yes: back up the current database, then load FILE; prune: list (with "
+                        "--yes delete) projects whose root is gone")
+    p.add_argument("file", nargs="?", help="restore: the backup file to load")
+    p.add_argument("--yes", action="store_true", help="restore, prune: really do it")
+    p.add_argument("--older-than-days", type=float, help="prune: also projects nobody used for this many days")
+    p.set_defaults(func=cmd_db)
+
     p = sub.add_parser("cleanup", help="reclaim disk from retired worktrees and old scratch (dry run by default)")
     p.add_argument("--apply", action="store_true")
     p.add_argument("--max-age-hours", type=float, default=24)
@@ -775,7 +846,11 @@ def main(argv=None):
         sys.exit(run_script(SHELL_COMMANDS[argv[0]], argv[1:]))
     parser = build_parser()
     args = parser.parse_args(argv)
-    args.func(args)
+    from . import store
+    try:
+        args.func(args)
+    except store.StoreError as error:
+        sys.exit(f"theseus: {error}")
 
 
 if __name__ == "__main__":

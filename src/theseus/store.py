@@ -901,7 +901,15 @@ def maintain(conn, now=None):
             "after": file_size(target)}
 
 
-BACKUP_NAME = re.compile(r"^theseus-(\d{8}T\d{6}Z)(?:-\d+)?\.db$")
+BACKUP_NAME = re.compile(r"^theseus-(\d{8}T\d{6}Z)(?:-(\d+))?\.db$")
+
+
+def backup_order(name):
+    """(time, same-second counter) of a timestamped backup name, or None for any other file."""
+    match = BACKUP_NAME.match(name)
+    if not match:
+        return None
+    return datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc), int(match.group(2) or 0)
 
 
 def backup_target(directory, now, label=""):
@@ -920,7 +928,7 @@ def integrity(target):
         check.close()
 
 
-def backup(conn, directory=None, now=None, label="", strict=True, rotate_after=True):
+def backup(conn, directory=None, now=None, label="", strict=True):
     """Copy the live database with the online backup API to <backups>/theseus-YYYYmmddTHHMMSSZ.db, run integrity_check
     on the copy and rotate. A labelled copy (pre-restore) is never rotated; strict=False keeps a copy that fails the
     check instead of deleting it. Returns {path, size, integrity, removed}."""
@@ -940,24 +948,27 @@ def backup(conn, directory=None, now=None, label="", strict=True, rotate_after=T
         temporary.unlink(missing_ok=True)
         raise StoreError(f"the backup failed integrity_check: {'; '.join(found[:5])}")
     os.replace(temporary, target)
-    record = {"path": str(target), "time": iso(now), "size": target.stat().st_size, "integrity": "; ".join(found[:5])}
-    if not label:
-        set_meta(conn, "backup.last", json.dumps(record))
-    record["removed"] = rotate(directory) if rotate_after and not label else []
-    return record
+    return {"path": str(target), "time": iso(now), "size": target.stat().st_size, "integrity": "; ".join(found[:5]),
+            "removed": [] if label else rotate(directory)}
+
+
+def last_backup(directory=None):
+    """{path, time, size} of the newest timestamped backup file, or None. Read from the directory rather than the
+    database, so a restored database still reports the copies that exist."""
+    directory = Path(directory) if directory else backup_dir()
+    found = sorted((backup_order(p.name), p) for p in directory.glob("theseus-*.db") if backup_order(p.name))
+    if not found:
+        return None
+    (moment, _), newest = found[-1]
+    return {"path": str(newest), "time": iso(moment.timestamp()), "size": newest.stat().st_size}
 
 
 def rotation(names, daily=7, weekly=4):
     """The backup file names to keep: the newest of each of the `daily` most recent days and of each of the `weekly`
     most recent ISO weeks that have a backup. Names that are not plain timestamped backups are ignored (kept)."""
-    stamped = []
-    for name in names:
-        match = BACKUP_NAME.match(name)
-        if match:
-            stamped.append((datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ"), name))
-    stamped.sort(reverse=True)
+    stamped = sorted(((backup_order(name), name) for name in names if backup_order(name)), reverse=True)
     keep, days, weeks = set(), [], []
-    for moment, name in stamped:
+    for (moment, _), name in stamped:
         day, week = moment.date(), moment.isocalendar()[:2]
         if day not in days and len(days) < daily:
             days.append(day)
@@ -1020,14 +1031,13 @@ def check(conn, quick=False):
     tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' "
                                              "AND name NOT LIKE 'sqlite_%' ORDER BY name")]
     pragma = lambda name: conn.execute(f"PRAGMA {name}").fetchone()[0]
-    last = get_meta(conn, "backup.last")
     return {
         "path": target, "version": version(conn), "known": SCHEMA_VERSION,
         "integrity": None if quick else [row[0] for row in conn.execute("PRAGMA integrity_check")],
         "size": file_size(target), "wal": Path(f"{target}-wal").stat().st_size if Path(f"{target}-wal").exists() else 0,
         "page_size": pragma("page_size"), "pages": pragma("page_count"), "free_pages": pragma("freelist_count"),
         "rows": {} if quick else {t: conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] for t in tables},
-        "backup": json.loads(last) if last else None, "backups": str(backup_dir()),
+        "backup": last_backup(), "backups": str(backup_dir()),
         "maintained": get_meta(conn, "maintain.last"),
         "errors": {job: get_meta(conn, f"{job}.error") for job in ("backup", "maintain") if get_meta(conn, f"{job}.error")},
     }

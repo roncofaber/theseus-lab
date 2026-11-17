@@ -1,5 +1,6 @@
-"""Host store: schema and migrations, pool semantics identical to pools.py under concurrent processes, events and
-their activity bins, deliveries, samples and the idempotent import of the JSON state files."""
+"""Host store: schema and migrations with the version guard, pool semantics under concurrent processes, events and
+their activity bins, deliveries, samples, the importers and the one-time migration built on them, retention and
+maintenance, backups with rotation and restore."""
 import json
 import multiprocessing
 import os
@@ -7,6 +8,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -107,6 +109,16 @@ class SchemaTests(StoreCase):
     def test_ttls_match_the_file_based_pools(self):
         self.assertEqual((pools.CLAIM_TTL, pools.LEASE_TTL), (store.CLAIM_TTL, store.LEASE_TTL))
 
+    def test_a_database_newer_than_the_code_is_refused_with_a_clear_error(self):
+        self.conn.execute(f"PRAGMA user_version = {store.SCHEMA_VERSION + 1}")
+        with self.assertRaises(store.StoreError) as raised:
+            store.connect()
+        self.assertIn(f"schema version {store.SCHEMA_VERSION + 1}", str(raised.exception))
+        self.assertIn("upgrade theseus", str(raised.exception))
+
+    def test_a_fresh_database_uses_incremental_vacuum(self):
+        self.assertEqual(2, self.conn.execute("PRAGMA auto_vacuum").fetchone()[0])
+
 
 class ProjectAndAgentTests(StoreCase):
     def test_projects_upsert_keep_unset_fields_and_prune_by_missing_root_or_age(self):
@@ -138,6 +150,22 @@ class ProjectAndAgentTests(StoreCase):
         self.assertEqual(["a1"], [a["name"] for a in store.list_agents(self.conn, "first", include_disabled=False)])
         self.assertTrue(store.remove_agent(self.conn, "first", "a2"))
         self.assertFalse(store.remove_agent(self.conn, "first", "a2"))
+
+    def test_set_enabled_changes_only_the_flag(self):
+        store.upsert_agent(self.conn, "first", "a1", pane="%1", profile="codex", rooms=["clean"], source="theseus.toml")
+        self.assertTrue(store.set_enabled(self.conn, "first", "a1", False))
+        [agent] = store.list_agents(self.conn, "first")
+        self.assertEqual(("%1", "codex", ["clean"], False, "theseus.toml"),
+                         (agent["pane"], agent["profile"], agent["rooms"], agent["enabled"], agent["source"]))
+        self.assertTrue(store.set_enabled(self.conn, "first", "a1", True))
+        self.assertTrue(store.list_agents(self.conn, "first")[0]["enabled"])
+        self.assertFalse(store.set_enabled(self.conn, "first", "missing", False))
+        self.assertEqual(["a1"], [a["name"] for a in store.list_agents(self.conn)])
+
+    def test_prune_dry_run_lists_without_deleting(self):
+        store.upsert_project(self.conn, "gone", root=self.tmp / "missing")
+        self.assertEqual(["gone"], store.prune_projects(self.conn, dry_run=True))
+        self.assertEqual(["gone"], [p["name"] for p in store.list_projects(self.conn)])
 
     def test_coordinator_sessions_open_and_close(self):
         session = store.start_session(self.conn, "first", pane="%9", profile="claude-code")
@@ -390,6 +418,176 @@ class ImportTests(StoreCase):
         self.assertEqual([], store.import_registry(self.conn, self.tmp / "none.json"))
         self.assertEqual({"agents": 0, "events": 0}, store.import_project(self.conn, "first", self.tmp, self.tmp / "none"))
         self.assertEqual([], store.import_pool_state(self.conn, self.tmp / "none"))
+
+
+class MigrationTests(StoreCase):
+    def project(self):
+        data = self.tmp / "data"
+        (data / "queue").mkdir(parents=True)
+        (data / "queue/events.jsonl").write_text("".join(json.dumps(
+            {"time": f"2026-11-16T10:0{n}:00Z", "kind": "delivered", "agent": "a1", "task": f"t{n}"}) + "\n" for n in range(3)))
+        (data / "agents.json").write_text(json.dumps({"agents": [{"name": "a1", "pane": "%1", "provider": "codex"}]}))
+        return SimpleNamespace(name="first", root=self.tmp, data=data)
+
+    def reopen(self, conf=None):
+        store.READY.clear()
+        with (store.for_project(conf) if conf else store.for_host()) as conn:
+            return store.events(conn, "first"), store.list_agents(conn, "first")
+
+    def test_a_project_is_imported_once_and_later_lines_never_repeat(self):
+        conf = self.project()
+        events, agents = self.reopen(conf)
+        self.assertEqual((3, ["a1"]), (len(events), [a["name"] for a in agents]))
+        with store.for_project(conf) as conn:
+            store.add_event(conn, "first", "assigned", task="t9")
+            store.remove_agent(conn, "first", "a1")
+            self.assertIsNotNone(store.get_meta(conn, "agents:first"))
+        with open(conf.data / "queue/events.jsonl", "a") as handle:
+            handle.write(json.dumps({"time": "2026-11-16T11:00:00Z", "kind": "assigned", "task": "t9"}) + "\n")
+        for _ in range(2):
+            events, agents = self.reopen(conf)
+            self.assertEqual((4, []), (len(events), agents))
+        self.assertEqual(3, len(store.deliveries(self.conn, "first")))
+        self.assertTrue((conf.data / "agents.json").exists())
+
+    def test_host_files_are_imported_once(self):
+        now = time.time()
+        (self.tmp / "pool-state").mkdir()
+        (self.tmp / "pool-state/gw.json").write_text(json.dumps(
+            {"leases": {"second/b1": {"project": "second", "agent": "b1", "task": "t1", "seen": now}}, "claims": {}}))
+        live, other = self.tmp / "live", self.tmp / "other"
+        (self.tmp / "projects.json").write_text(json.dumps({"projects": {
+            str(live): {"name": "first", "data": "d1", "coordinator": "", "last_seen": now},
+            str(other): {"name": "first", "data": "d2", "coordinator": "", "last_seen": now}}}))
+        self.reopen()
+        self.assertEqual(["second/b1"], list(store.status(self.conn, "gw")["leases"]))
+        self.assertEqual(str(live), store.get_project(self.conn, "first")["root"])
+        self.assertEqual([("first", str(live), str(other))],
+                         [(c["name"], c["root"], c["other"]) for c in store.conflicts(self.conn)])
+        store.release(self.conn, "gw", "second", "b1")
+        self.reopen()
+        self.assertEqual({}, store.status(self.conn, "gw")["leases"], "a released slot is not imported again")
+
+
+class MaintenanceTests(StoreCase):
+    def test_trim_keeps_fourteen_days_of_samples_and_every_event_by_default(self):
+        now = time.time()
+        for days in (1, 13, 15, 40):
+            store.add_sample(self.conn, "first", "a1", "working", at=now - days * store.DAY)
+            store.add_event(self.conn, "first", "tick", at=now - days * store.DAY)
+        self.assertEqual({"samples": 2, "events": 0}, store.trim(self.conn, now))
+        self.assertEqual(2, len(store.samples(self.conn)))
+        self.assertEqual(4, len(store.events(self.conn)))
+
+    def test_retention_comes_from_store_toml(self):
+        (self.tmp / "store.toml").write_text("[retention]\nsamples_days = 2\nevents_days = 30\n")
+        now = time.time()
+        for days in (1, 13, 40):
+            store.add_sample(self.conn, "first", "a1", "working", at=now - days * store.DAY)
+            store.add_event(self.conn, "first", "tick", at=now - days * store.DAY)
+        self.assertEqual({"samples": 2, "events": 1}, store.trim(self.conn, now))
+        (self.tmp / "store.toml").write_text("[retention\n")
+        with self.assertRaises(store.StoreError):
+            store.settings()
+
+    def test_maintain_returns_free_pages_converts_old_files_and_records_the_run(self):
+        self.conn.execute("PRAGMA auto_vacuum = NONE")
+        self.conn.execute("VACUUM")
+        self.assertEqual(0, self.conn.execute("PRAGMA auto_vacuum").fetchone()[0])
+        with store.transaction(self.conn):
+            store.touch_project(self.conn, "first")
+            self.conn.executemany("INSERT INTO samples (project, agent, time, epoch, state) VALUES ('first', 'a', '', ?, 'x')",
+                                  [(n,) for n in range(20000)])
+        result = store.maintain(self.conn)
+        self.assertTrue(result["vacuumed"])
+        self.assertEqual(20000, result["removed"]["samples"])
+        self.assertEqual(2, self.conn.execute("PRAGMA auto_vacuum").fetchone()[0])
+        with store.transaction(self.conn):
+            self.conn.executemany("INSERT INTO samples (project, agent, time, epoch, state) VALUES ('first', 'a', '', ?, 'x')",
+                                  [(n,) for n in range(20000)])
+        result = store.maintain(self.conn)
+        self.assertFalse(result["vacuumed"])
+        self.assertGreater(result["freed_pages"], 0)
+        self.assertEqual(0, self.conn.execute("PRAGMA freelist_count").fetchone()[0])
+        self.assertIsNotNone(store.get_meta(self.conn, "maintain.last"))
+        self.assertEqual(0, Path(f"{self.db}-wal").stat().st_size)
+
+    def test_daily_runs_each_job_once_a_day_and_records_failures(self):
+        now = time.time()
+        lines = store.daily(self.conn, now=now)
+        self.assertEqual(["maintain", "backup"], [line.split(":")[0] for line in lines])
+        self.assertEqual(1, len(list((self.tmp / "backups").glob("theseus-*.db"))))
+        self.assertEqual([], store.daily(self.conn, now=now + 3600))
+        (self.tmp / "blocked").write_text("not a directory")
+        os.environ["THESEUS_BACKUPS"] = str(self.tmp / "blocked")
+        lines = store.daily(self.conn, now=now + store.DAY + 1)
+        self.assertIn("backup failed", lines[-1])
+        self.assertIn("backup", store.check(self.conn, quick=True)["errors"])
+        os.environ["THESEUS_BACKUPS"] = str(self.tmp / "backups")
+        store.daily(self.conn, now=now + 2 * store.DAY + 2)
+        self.assertEqual({}, store.check(self.conn, quick=True)["errors"])
+
+
+class BackupTests(StoreCase):
+    def test_backup_is_a_checked_single_file_copy(self):
+        store.add_event(self.conn, "first", "tick")
+        result = store.backup(self.conn, now=1_794_000_000)
+        copy = Path(result["path"])
+        self.assertEqual(self.tmp / f"backups/theseus-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(1_794_000_000))}.db", copy)
+        self.assertEqual("ok", result["integrity"])
+        self.assertFalse(Path(f"{copy}-wal").exists())
+        self.assertEqual([copy], list((self.tmp / "backups").iterdir()))
+        with store.opened(copy) as conn:
+            self.assertEqual(1, len(store.events(conn)))
+        again = store.backup(self.conn, now=1_794_000_000)
+        self.assertNotEqual(result["path"], again["path"])
+        self.assertEqual(again["path"], store.last_backup()["path"])
+
+    def test_rotation_keeps_seven_daily_and_four_weekly_copies(self):
+        start = datetime(2026, 9, 1, 3, 0, tzinfo=timezone.utc).timestamp()
+        moments = [datetime.fromtimestamp(start + n * 43200, timezone.utc) for n in range(80)]
+        names = [f"theseus-{m:%Y%m%dT%H%M%SZ}.db" for m in moments]
+        extra = ["theseus-20260901T000000Z-pre-restore.db", "notes.txt"]
+        keep = store.rotation(names + extra)
+        self.assertTrue(set(extra) <= keep)
+        kept = [m for m, name in zip(moments, names) if name in keep]
+        days = sorted({m.date() for m in moments})[-7:]
+        weeks = sorted({m.isocalendar()[:2] for m in moments})[-4:]
+        newest = lambda group: max(m for m in moments if group(m))
+        expected = {newest(lambda m, d=d: m.date() == d) for d in days}
+        expected |= {newest(lambda m, w=w: m.isocalendar()[:2] == w) for w in weeks}
+        self.assertEqual(sorted(expected), kept)
+        self.assertEqual(moments[-1], kept[-1])
+        directory = self.tmp / "backups"
+        directory.mkdir()
+        for name in names + extra[:1]:
+            (directory / name).write_text("")
+        removed = store.rotate(directory)
+        self.assertEqual(80 - len(kept), len(removed))
+        self.assertEqual(len(kept) + 1, len(list(directory.iterdir())))
+
+    def test_restore_checks_the_file_saves_the_current_database_and_loads_the_copy(self):
+        store.add_event(self.conn, "first", "kept")
+        saved = store.backup(self.conn)["path"]
+        store.add_event(self.conn, "first", "lost")
+        garbage = self.tmp / "garbage.db"
+        garbage.write_bytes(b"not a database" * 100)
+        for bad in (self.tmp / "missing.db", garbage):
+            with self.assertRaises(store.StoreError):
+                store.restore(self.conn, bad)
+        newer = self.tmp / "newer.db"
+        with store.opened(newer) as conn:
+            conn.execute(f"PRAGMA user_version = {store.SCHEMA_VERSION + 1}")
+        with self.assertRaises(store.StoreError):
+            store.restore(self.conn, newer)
+        self.assertEqual(["kept", "lost"], [e["kind"] for e in store.events(self.conn)])
+        result = store.restore(self.conn, saved)
+        self.assertEqual(["kept"], [e["kind"] for e in store.events(self.conn)])
+        self.assertIn("pre-restore", result["saved"])
+        with store.opened(result["saved"]) as conn:
+            self.assertEqual(["kept", "lost"], [e["kind"] for e in store.events(conn)])
+        with store.opened() as other:
+            self.assertEqual(["kept"], [e["kind"] for e in store.events(other)])
 
 
 class ConnectionTests(StoreCase):
