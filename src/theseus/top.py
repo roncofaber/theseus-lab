@@ -555,13 +555,26 @@ def render(state, width=120, height=None, ui=None):
     return "\n".join(frame.lines)
 
 
+def own_client():
+    """The tmux client displaying this dashboard's pane, or None; never another terminal's client."""
+    pane = os.environ.get("TMUX_PANE")
+    if not os.environ.get("TMUX") or not pane:
+        return None
+    session = subprocess.run(["tmux", "display-message", "-p", "-t", pane, "#{session_id}"], capture_output=True, text=True)
+    if session.returncode != 0 or not session.stdout.strip():
+        return None
+    clients = subprocess.run(["tmux", "list-clients", "-t", session.stdout.strip(), "-F", "#{client_name}"],
+                             capture_output=True, text=True).stdout.split()
+    return clients[0] if len(clients) == 1 else None
+
+
 def jump_to(pane):
-    if not os.environ.get("TMUX"):
-        return f"not inside tmux: run tmux switch-client -t {pane} from a tmux client"
-    result = subprocess.run(["tmux", "switch-client", "-t", pane], capture_output=True, text=True)
+    client = own_client()
+    if client is None:
+        return "jump needs theseus top in a tmux session with exactly one attached client"
+    result = subprocess.run(["tmux", "switch-client", "-c", client, "-t", pane], capture_output=True, text=True)
     if result.returncode != 0:
         return f"tmux: {result.stderr.strip()[:80]}"
-    subprocess.run(["tmux", "select-pane", "-t", pane], capture_output=True)
     return f"switched to {pane}"
 
 
