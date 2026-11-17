@@ -25,7 +25,7 @@ RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN = (f"\033[{c}m" for c in (31, 32, 33, 34
 ANSI = re.compile(r"\033\[[0-9;]*m")
 STATE_COLOR = {"working": GREEN, "quiet": YELLOW, "busy": CYAN, "free": YELLOW, "delivered": MAGENTA, "stalled": RED, "offline": RED,
                "disabled": DIM, "thrashing": RED}
-KIND_COLOR = {"delivered": MAGENTA, "partial": YELLOW, "blocked": RED, "stalled": RED, "error": RED, "assigned": GREEN,
+KIND_COLOR = {"relaunched": YELLOW, "delivered": MAGENTA, "partial": YELLOW, "blocked": RED, "stalled": RED, "error": RED, "assigned": GREEN,
               "nudged": YELLOW, "compacted": BLUE, "cleared": CYAN, "merged": CYAN, "completed": GREEN,
               "reopened": YELLOW, "released": YELLOW}
 QUEUE_COLOR = {"review": MAGENTA, "merged": CYAN, "working": GREEN, "ready": YELLOW, "blocked": DIM, "held": DIM}
