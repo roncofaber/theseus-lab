@@ -1080,6 +1080,21 @@ class TranscriptTests(Sandbox):
         self.assertIsNone(agents.context_use(conf, "small", None, None))
         del saved
 
+    def test_the_context_limit_follows_the_transcript_model(self):
+        from theseus import agents, profiles
+        from types import SimpleNamespace
+        table = {"context": {"claude-*": 1000000, "claude-haiku-4-5*": 200000, "lbl/cborg-coder-ultra": 229376}}
+        conf = SimpleNamespace(section=lambda name: table if name == "models" else {}, root=self.tmp)
+        original = profiles.resolve
+        profiles.resolve = lambda conf, name: {"context_limit": 123}
+        self.addCleanup(setattr, profiles, "resolve", original)
+        limit = lambda model: agents.context_use(conf, "p", {"tokens": 5, "model": model}, None)["limit"]
+        self.assertEqual(1000000, limit("claude-opus-5-5"))
+        self.assertEqual(200000, limit("claude-haiku-4-5"))
+        self.assertEqual(229376, limit("lbl/cborg-coder-ultra"))
+        self.assertEqual(123, limit("some-other-model"))
+        self.assertEqual(123, agents.context_use(conf, "p", None, 9)["limit"])
+
 
 class ColorFallbackTests(unittest.TestCase):
     def test_activity_categories_keep_distinct_ansi_colors_on_a_16_color_console(self):

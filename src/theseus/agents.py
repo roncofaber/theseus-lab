@@ -216,12 +216,16 @@ def supervised_pids(ttl=5.0):
 
 def context_use(conf, profile, transcript, hint):
     """{"tokens", "limit", "model", "source"} of the agent's context: the transcript's last answer, else the pane's
-    context hint, else None. The limit is the profile's context_limit."""
+    context hint, else None. The limit is the transcript model's window from [models] context, else the profile's
+    context_limit."""
     from . import profiles
     try:
         limit = int(profiles.resolve(conf, profile).get("context_limit") or profiles.CONTEXT_LIMIT)
     except (profiles.ProfileError, ValueError, TypeError):
         limit = profiles.CONTEXT_LIMIT
+    model_limit = profiles.model_context_limit(conf, (transcript or {}).get("model"))
+    if model_limit:
+        limit = model_limit
     if transcript and transcript.get("tokens"):
         return {"tokens": transcript["tokens"], "limit": limit, "model": transcript.get("model"), "source": "transcript"}
     if hint:

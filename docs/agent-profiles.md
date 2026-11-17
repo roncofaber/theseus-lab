@@ -83,7 +83,7 @@ A project section with the same name as a host profile overrides only the keys i
 | `resume` | Argument list that continues a stopped run with `{message}`; stored in each worker's `launch.json` for `theseus followup` |
 | `session` | `preassign` when the CLI accepts a session ID theseus chooses (`{session}`), `none` otherwise |
 | `model`, `model_flag` | The model; the item `{model_args}` expands to `[model_flag, model]` only when a model is set |
-| `context_limit` | The context window in tokens that `theseus top` measures an agent's context use against (200000) |
+| `context_limit` | The context window in tokens that the console measures an agent's context use against when its model is not in `[models] context` (200000) |
 | `permission_mode` | Substituted for `{permission_mode}` (Claude Code: `auto`, `acceptEdits`, `bypassPermissions`, ...) |
 | `env` | Extra environment for the run; `{model}` is substituted |
 | `retry` | Resume automatically after a retryable gateway error (Claude JSON output with status 429, 5xx or 529) |

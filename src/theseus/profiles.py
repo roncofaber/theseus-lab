@@ -151,6 +151,15 @@ PRESETS = {
 }
 ALIASES = {"claude": "claude-subagent"}
 CONTEXT_LIMIT = 200000
+
+
+def model_context_limit(conf, model):
+    """The context window of a model id from [models] context (exact id, else the longest matching `prefix*`)."""
+    table = (conf.section("models").get("context") or {}) if model else {}
+    if model in table:
+        return int(table[model])
+    matches = [key for key in table if key.endswith("*") and model.startswith(key[:-1])]
+    return int(table[max(matches, key=len)]) if matches else None
 DEFAULT = "claude-code"
 OVERRIDABLE = set(PRESETS["claude-code"]) | {"preset", "fallback", "pool", "mcp_servers", "mcp_flags", "extra_args"}
 INTERACTIVE_KEYS = set(CLAUDE_INTERACTIVE) | {"launch", "resume"}

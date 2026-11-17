@@ -203,3 +203,15 @@ theseus upgrade
 ```
 
 This updates the workflow skills, the Git hook and helper scripts, adds missing template files, and lists configuration keys added since the project was created. It never changes project-specific files.
+
+## Model context windows
+
+The console measures context use against the window of the model each session's transcript names. `[models] context` maps model ids to windows; a key ending in `*` matches by prefix and the longest match wins. The defaults cover current Claude models (1M, with 200K for Claude Haiku 4.5 and the 4.5 generation). Add gateway models in the host config, for example:
+
+```toml
+[models.context]
+"gateway/model-name" = 229376
+```
+
+A model not in the table falls back to the profile's `context_limit`.
+
