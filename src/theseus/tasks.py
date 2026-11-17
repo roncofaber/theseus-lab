@@ -282,7 +282,7 @@ def deliver(queue, task_id, handoff):
     queue.save(document)
     result = handoff_result(handoff)
     record(queue, "delivered" if result in ("delivered", None) else result, task,
-           f"handoff result {result or 'not stated'}; review and merge: theseus merge {task_id}")
+           f"handoff result {result or 'not stated'}")
     return f"{task_id} -> verification; the worker slot is free, dependents wait for the merge"
 
 

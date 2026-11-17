@@ -58,7 +58,16 @@ theseus agents add worker-1 %3 --profile claude-code
 
 `theseus queue wait` exits as soon as something needs the coordinator (a delivery, a stall, an error), so the coordinator can run it in the background and react. `theseus queue pause|resume` stops and restarts assignment, and a task with `hold` set is never assigned.
 
-**Dashboard.** `theseus top` shows what needs attention, host load, repository and verification state, each agent's state and resource use, the queue, and recent events. `--once` prints a single frame and `--json` prints machine-readable output.
+**Dashboard.** `theseus top` shows:
+- the milestone's progress;
+- anything that needs attention;
+- host load;
+- the repository, verification state and today's throughput (deliveries, completions, median time to handoff);
+- each agent's task, how long it has been on it, how long since its last file change, and its CPU and memory;
+- tasks waiting for review, verification or an agent;
+- recent events.
+
+Durations turn yellow and then red as they grow. Keys: `q` quits, `p` pauses or resumes the queue, space freezes the display, and `1` to `9` switches your tmux client to that agent's pane. `--once` prints a single frame and `--json` prints machine-readable output.
 
 ## Verification and pushing
 

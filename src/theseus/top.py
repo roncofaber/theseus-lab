@@ -1,7 +1,8 @@
 """theseus top: a live dashboard of the host, the agents, the queue, the repository and recent events.
 
 `theseus top [SECONDS]` refreshes in place; `--once` prints one frame (colors stripped when not a terminal); `--json`
-prints the snapshot. Every section has a fixed height, so rows never move between frames.
+prints the snapshot. Sections are sized to their content and the events list takes the remaining height. Keys: q quit,
+p pause or resume the queue, space freeze, 1-9 switch tmux to that agent's pane.
 """
 import json
 import os
@@ -28,7 +29,8 @@ KIND_COLOR = {"delivered": MAGENTA, "partial": YELLOW, "blocked": RED, "stalled"
               "nudged": YELLOW, "compacted": BLUE, "cleared": CYAN, "merged": CYAN, "completed": GREEN,
               "reopened": YELLOW, "released": YELLOW}
 QUEUE_COLOR = {"review": MAGENTA, "merged": CYAN, "working": GREEN, "ready": YELLOW, "blocked": DIM, "held": DIM}
-ROWS = {"issues": 2, "agents": 6, "queue": 8, "events": 12}
+ROWS = {"events": 12}
+SLOW, VERY_SLOW, QUIET_WARN = 3600, 7200, 20 * 60
 _CPU_PREVIOUS = {}
 
 
@@ -203,6 +205,54 @@ def posted_label(stamp):
     return moment.strftime("%H:%M") if moment.date() == datetime.now().astimezone().date() else moment.strftime("%b %d")
 
 
+def milestone_progress(conf):
+    """(done, total) for the current milestone: merged or completed tasks over all tasks of that milestone."""
+    queue = t.Queue(conf)
+    current = queue.milestone()
+    if not current:
+        return None
+    in_scope = [x for x in queue.all() if x.get("milestone") in (None, "", current)
+                and (x.get("milestone") == current or x.get("status") != "completed")]
+    done = sum(1 for x in in_scope if x.get("status") in ("merged", "completed"))
+    return done, len(in_scope)
+
+
+def today_stats(history):
+    """Deliveries and completions since local midnight, and the median minutes from assignment to delivery."""
+    midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    assigned, handoffs, delivered, completed = {}, [], 0, 0
+    for record in history:
+        try:
+            moment = datetime.fromisoformat(record["time"].replace("Z", "+00:00"))
+        except (ValueError, AttributeError, KeyError):
+            continue
+        if record["kind"] == "assigned":
+            assigned[record.get("task")] = moment
+        elif record["kind"] in ("delivered", "partial", "blocked") and moment >= midnight:
+            delivered += 1
+            start = assigned.get(record.get("task"))
+            if start:
+                handoffs.append((moment - start).total_seconds())
+        elif record["kind"] == "completed" and moment >= midnight:
+            completed += 1
+    handoffs.sort()
+    median = handoffs[len(handoffs) // 2] if handoffs else None
+    return {"delivered": delivered, "completed": completed, "medianHandoff": median}
+
+
+def merge_resets(history):
+    """Fold a compacted or cleared event into the assignment that follows it for the same agent."""
+    out = []
+    for record in history:
+        previous = out[-1] if out else None
+        if (record["kind"] == "assigned" and previous and previous["kind"] in ("compacted", "cleared")
+                and previous.get("agent") == record.get("agent")):
+            out[-1] = {**record, "reset": "compact" if previous["kind"] == "compacted" else "clear"}
+        else:
+            out.append(record)
+    return out
+
+
 def snapshot(conf, sample=False):
     states = ag.states(conf)
     if sample:
@@ -218,7 +268,8 @@ def snapshot(conf, sample=False):
         "blocked": {x["id"]: x["reasons"] for x in summary["blocked"]},
         "times": task_times(conf),
         "paused": wq.paused(conf), "git": git_state(conf), "verification": verification_state(conf),
-        "events": wq.events(conf, ROWS["events"]),
+        "events": merge_resets(wq.events(conf, 200)),
+        "today": today_stats(wq.events(conf)), "progress": milestone_progress(conf),
     }
 
 
@@ -329,21 +380,59 @@ def issues(state):
     return found
 
 
-def render(state, width=120):
-    width = max(100, min(width, 180))
+def aged(seconds, warn, alarm):
+    text = duration(seconds)
+    if seconds is None:
+        return text
+    color = RED if seconds >= alarm else YELLOW if seconds >= warn else ""
+    return f"{color}{text}{R if color else ''}"
+
+
+def column(text, width):
+    return text + " " * max(0, width - visible(text))
+
+
+def progress_text(progress):
+    if not progress or not progress[1]:
+        return ""
+    done, total = progress
+    filled = round(10 * done / total)
+    return f" {GREEN}{'█' * filled}{DIM}{'░' * (10 - filled)}{R} {done}/{total} done"
+
+
+def day_label(stamp):
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone().strftime("%a %b %d")
+    except (ValueError, AttributeError):
+        return None
+
+
+def render(state, width=120, height=None, ui=None):
+    ui = ui or {}
+    width = max(80, min(width, 180))
     frame = Frame(width)
     found = issues(state)
-    left = (f" {B}{MAGENTA}theseus top{R} {DIM}·{R} {B}{state['project']}{R} {DIM}· milestone{R} "
-            f"{B}{state['milestone'] or '-'}{R} ")
+    wide, medium, roomy = width >= 125, width >= 110, width >= 100
+
     status = f" {GREEN}{B}all clear{R} " if not found else f" {YELLOW}{B}{len(found)} to act on{R} "
-    frame.top(left, f" {DIM}{socket.gethostname()} {datetime.now():%a %H:%M:%S}{R} {DIM}│{R}{status}")
-    frame.row()
-    frame.fixed(found, ROWS["issues"], "nothing needs the coordinator")
+    if state["paused"]:
+        status = f" {YELLOW}{B}QUEUE PAUSED{R} {DIM}│{R}" + status
+    if ui.get("frozen"):
+        status = f" {CYAN}{B}FROZEN{R} {DIM}│{R}" + status
+    left = (f" {B}{MAGENTA}theseus top{R} {DIM}·{R} {B}{state['project']}{R} {DIM}·{R} "
+            f"{B}{state['milestone'] or 'no milestone'}{R}{progress_text(state.get('progress'))} ")
+    clock = f" {DIM}{socket.gethostname()} {datetime.now():%a %H:%M:%S}{R} {DIM}│{R}" if medium else ""
+    frame.top(left, clock + status)
+
+    if found:
+        frame.rule("ACTION NEEDED")
+        for line in found:
+            frame.row(line)
 
     host = state["host"]
     mem_used = host["memTotal"] - host["memAvailable"]
     swap_used = host["swapTotal"] - host["swapFree"]
-    load_fraction = host["load"][0] / host["cpus"]
+    load_fraction = host["load"][0] / host["cpus"] if host["cpus"] else 0
     frame.rule("HOST")
     frame.row(f"{B}CPU {R} {bar(load_fraction)} {load_fraction * 100:5.1f}%   load {host['load'][0]:.2f} "
               f"{host['load'][1]:.2f} {host['load'][2]:.2f} on {host['cpus']} threads")
@@ -353,11 +442,9 @@ def render(state, width=120):
         gpu = host["gpus"][0]
         frame.row(f"{B}GPU {R} {bar(gpu['util'] / 100)} {gpu['util']:5.1f}%   {size(gpu['memUsed'])} of {size(gpu['memTotal'])}, "
                   f"{gpu['temp']:.0f} C  {DIM}{gpu['name']}{R}")
-    else:
-        frame.row(f"{B}GPU {R} {DIM}no NVIDIA GPU reported{R}")
 
     gstate, verification = state["git"], state["verification"]
-    frame.rule("REPOSITORY AND VERIFICATION")
+    frame.rule("PROJECT")
     ahead = "no remote" if gstate["ahead"] is None else f"{gstate['ahead']} ahead of remote"
     dirty = f"{YELLOW}{gstate['dirty']} dirty{R}" if gstate["dirty"] else f"{GREEN}clean{R}"
     frame.row(f"{B}{gstate['branch']}{R} {cut(gstate['head'], width - 70)}   {dirty} {DIM}·{R} {gstate['worktrees']} worktrees "
@@ -369,57 +456,128 @@ def render(state, width=120):
     else:
         last_text = f"{YELLOW}never{R}"
     over = verification["limit"] and (verification["unverified"] or 0) > verification["limit"]
-    frame.row(f"last full verification {last_text}   {RED if over else ''}{verification['unverified']} unverified code commits"
-              f"{R} {DIM}(limit {verification['limit'] or '-'}){R}")
+    frame.row(f"verification {last_text}   {RED if over else ''}{verification['unverified']} unverified code commits"
+              f"{R if over else ''} {DIM}(limit {verification['limit'] or '-'}){R}")
+    today = state.get("today") or {}
+    median = today.get("medianHandoff")
+    frame.row(f"today {B}{today.get('delivered', 0)}{R} delivered {DIM}·{R} {B}{today.get('completed', 0)}{R} completed "
+              f"{DIM}·{R} median time to handoff {B}{duration(median) if median is not None else '-'}{R}")
 
     total = sum(a.get("rss") or 0 for a in state["agents"])
+    times = state.get("times", {})
     frame.rule("AGENTS", f"{DIM}{len(state['agents'])} registered · {size(total)} resident in total{R}")
-    frame.header(f"  {'AGENT':<16}  {'PANE':<6} {'STATE':<10} {'TASK':<30} {'ROOM':<6} {'IDLE':<6} {'UP':<7} "
-                 f"{'CPU':<6} {'MEM':<7} {'PROCS':<5}  NOTE")
+    task_w = max(12, min(28, width - 4 - 73 - (14 if roomy else 0) - (14 if wide else 0)))
+    head = f"  {'#':<1} {'AGENT':<16} {'PANE':<6} {'STATE':<10} {'TASK':<{task_w}} {'ROOM':<6} {'ON TASK':<8} {'QUIET':<6} "
+    if wide:
+        head += f"{'UP':<7} "
+    if roomy:
+        head += f"{'CPU':<5} {'MEM':<7} "
+    if wide:
+        head += f"{'PROCS':<5} "
+    frame.header(head + "NOTE")
     rows = []
-    for agent in state["agents"]:
+    for number, agent in enumerate(state["agents"], 1):
         color = STATE_COLOR.get(agent["state"], R)
-        note = f"{RED}dirty context{R}" if agent.get("tainted") else ""
+        note = f"{RED}dirty{R}" if agent.get("tainted") else ""
         cpu = "-" if agent.get("cpu") is None else f"{agent['cpu']:.0f}%"
-        idle = "-" if agent.get("idleMinutes") is None else f"{agent['idleMinutes']}m"
-        rows.append(f"{color}●{R} {B}{cut(agent['name'], 16):<16}{R}  {agent['pane']:<6} {color}{agent['state']:<10}{R} "
-                    f"{cut(agent.get('task') or '-', 30):<30} {agent.get('room') or '-':<6} {idle:<6} "
-                    f"{duration(agent.get('uptime')):<7} {cpu:<6} {size(agent.get('rss')):<7} {str(agent.get('procs') or '-'):<5}  {note}")
-    frame.fixed(rows, ROWS["agents"], "no registered agents: theseus agents add NAME PANE")
+        quiet_seconds = None if agent.get("idleMinutes") is None else agent["idleMinutes"] * 60
+        on_task = age(times.get(agent.get("task"), (None, None))[1]) if agent.get("task") else None
+        key = str(number) if number <= 9 else " "
+        line = (f"{color}●{R} {DIM}{key}{R} {B}{cut(agent['name'], 16):<16}{R} {agent['pane']:<6} {color}{agent['state']:<10}{R} "
+                f"{cut(agent.get('task') or '-', task_w):<{task_w}} {agent.get('room') or '-':<6} "
+                f"{column(aged(on_task, SLOW, VERY_SLOW), 8)} {column(aged(quiet_seconds, QUIET_WARN, 2 * QUIET_WARN), 6)} ")
+        if wide:
+            line += f"{duration(agent.get('uptime')):<7} "
+        if roomy:
+            line += f"{cpu:<5} {size(agent.get('rss')):<7} "
+        if wide:
+            line += f"{str(agent.get('procs') or '-'):<5} "
+        rows.append(line + note)
+    frame.fixed(rows, max(len(rows), 1), "no registered agents: theseus agents add NAME PANE")
 
     queue = state["queue"]
-    counts = (f"{YELLOW}ready {len(queue['ready'])}{R} {DIM}·{R} {GREEN}working {len(queue['in_progress'])}{R} {DIM}·{R} "
-              f"{MAGENTA}review {len(queue['review'])}{R} {DIM}·{R} {CYAN}merged {len(queue['merged'])}{R} {DIM}·{R} "
+    counts = (f"{GREEN}working {len(queue['in_progress'])}{R} {DIM}·{R} {MAGENTA}review {len(queue['review'])}{R} {DIM}·{R} "
+              f"{CYAN}merged {len(queue['merged'])}{R} {DIM}·{R} {YELLOW}ready {len(queue['ready'])}{R} {DIM}·{R} "
               f"{DIM}blocked {len(queue['blocked'])} · held {len(queue['held'])}{R}")
-    frame.rule("QUEUE", counts + (f"  {YELLOW}{B}PAUSED{R}" if state["paused"] else ""))
-    frame.header(f"{'STATUS':<9} {'TASK':<36} {'ROOM':<6} {'FOR':<7} {'POSTED':<7} NEXT STEP")
+    frame.rule("WAITING", counts)
+    frame.header(f"{'STATUS':<8} {'TASK':<34} {'ROOM':<6} {'FOR':<7} " + (f"{'POSTED':<7} " if medium else "") + "NEXT STEP")
     rows = []
-    for key, label in (("review", "review"), ("merged", "merged"), ("in_progress", "working"), ("ready", "ready"),
-                       ("blocked", "blocked"), ("held", "held")):
+    for key, label in (("review", "review"), ("merged", "merged"), ("ready", "ready"), ("blocked", "blocked"), ("held", "held")):
         color = QUEUE_COLOR[label]
         for task_id in queue[key]:
             detail = ", ".join(state["blocked"].get(task_id, [])) if key == "blocked" else {
                 "review": "theseus merge", "merged": "verify, then theseus tasks complete", "held": "hold set",
-                "ready": "next free agent",
-                "in_progress": next((f"with {a['name']}" for a in state["agents"] if a.get("task") == task_id), "")}.get(key, "")
-            posted, since = state["times"].get(task_id, (None, None))
-            rows.append(f"{color}{label:<9}{R} {cut(task_id, 36):<36} {state['rooms'].get(task_id) or '-':<6} "
-                        f"{duration(age(since)):<7} {posted_label(posted):<7} {DIM}{detail}{R}")
-    frame.fixed(rows, ROWS["queue"], "queue empty: write task records (theseus tasks add)")
+                "ready": "next free agent"}[key]
+            posted, since = times.get(task_id, (None, None))
+            waiting = age(since)
+            shown = aged(waiting, SLOW, VERY_SLOW) if key in ("review", "merged") else duration(waiting)
+            rows.append(f"{color}{label:<8}{R} {cut(task_id, 34):<34} {state['rooms'].get(task_id) or '-':<6} {column(shown, 7)} "
+                        + (f"{posted_label(posted):<7} " if medium else "") + f"{DIM}{detail}{R}")
+    if rows:
+        frame.fixed(rows, len(rows))
+    elif queue["in_progress"]:
+        frame.row(f"{DIM}nothing waiting; {len(queue['in_progress'])} task(s) in progress (see AGENTS){R}")
+    else:
+        frame.row(f"{DIM}queue empty: write task records (theseus tasks add){R}")
 
-    frame.rule("EVENTS", f"{DIM}newest first, last {ROWS['events']}{R}")
+    footer = 2
+    events_rows = ROWS["events"] if height is None else max(4, height - len(frame.lines) - 4 - footer)
+    frame.rule("EVENTS", f"{DIM}newest first{R}")
     frame.header(f"{'TIME':<8} {'KIND':<10} {'AGENT':<18} {'TASK':<30} DETAIL")
-    rows = []
-    for record in reversed(state["events"][-ROWS["events"]:]):
+    rows, last_day = [], day_label(datetime.now(timezone.utc).isoformat())
+    for record in reversed(state["events"]):
+        if len(rows) >= events_rows:
+            break
+        day = day_label(record["time"])
+        if day and day != last_day:
+            rows.append(f"{DIM}── {day} {'─' * 20}{R}")
+            last_day = day
         color = KIND_COLOR.get(record["kind"], R)
         detail = str(record.get("detail") or "")
-        if detail.startswith("/"):
+        if record["kind"] == "assigned" and ":" in detail and "/" in detail:
+            detail = "worktree " + Path(detail.split(":", 1)[1].strip()).name
+        elif detail.startswith("/"):
             detail = "worktree " + Path(detail).name
+        if record["kind"] in ("delivered", "partial", "blocked"):
+            detail = re.sub(r";?\s*review and merge: theseus merge \S+", "", detail).strip() or "ready to merge"
+        if record.get("reset"):
+            detail = f"after {record['reset']} · {detail}"
         rows.append(f"{local_clock(record['time'])} {color}{record['kind']:<10}{R} {cut(record['agent'] or '-', 18):<18} "
                     f"{cut(record['task'] or '-', 30):<30} {DIM}{cut(detail, width - 75)}{R}")
-    frame.fixed(rows, ROWS["events"], "no events yet")
-    frame.bottom()
+    frame.fixed(rows[:events_rows], events_rows, "no events yet")
+    frame.row()
+    keys = "q quit · p pause/resume queue · space freeze"
+    if state["agents"]:
+        keys += f" · 1-{min(len(state['agents']), 9)} jump to agent pane"
+    message = ui.get("message")
+    frame.row(f"{DIM}{keys}{R}" + (f"   {YELLOW}{message}{R}" if message else ""))
+    frame.lines.append(f"{DIM}└{'─' * (width - 2)}┘{R}")
     return "\n".join(frame.lines)
+
+
+def jump_to(pane):
+    if not os.environ.get("TMUX"):
+        return f"not inside tmux: run tmux switch-client -t {pane} from a tmux client"
+    result = subprocess.run(["tmux", "switch-client", "-t", pane], capture_output=True, text=True)
+    if result.returncode != 0:
+        return f"tmux: {result.stderr.strip()[:80]}"
+    subprocess.run(["tmux", "select-pane", "-t", pane], capture_output=True)
+    return f"switched to {pane}"
+
+
+def handle_key(conf, key, state, ui):
+    if key in ("q", "Q", "\x03"):
+        return False
+    if key in ("p", "P"):
+        ui["message"] = wq.set_paused(conf, not wq.paused(conf))
+    elif key == " ":
+        ui["frozen"] = not ui.get("frozen")
+        ui["message"] = "frozen; space to resume" if ui["frozen"] else ""
+    elif key.isdigit() and key != "0" and state:
+        index = int(key) - 1
+        if index < len(state["agents"]):
+            ui["message"] = jump_to(state["agents"][index]["pane"])
+    return True
 
 
 def main(conf, interval=5, once=False, as_json=False):
@@ -430,22 +588,42 @@ def main(conf, interval=5, once=False, as_json=False):
         frame = render(snapshot(conf, sample=True), shutil.get_terminal_size((120, 50)).columns)
         print(frame if sys.stdout.isatty() else ANSI.sub("", frame))
         return 0
-    previous, size_seen = [], None
+    import select
+    import termios
+    import tty
+    stdin = sys.stdin.fileno()
+    interactive = sys.stdin.isatty()
+    saved = termios.tcgetattr(stdin) if interactive else None
+    previous, size_seen, state, ui, next_refresh = [], None, None, {}, 0.0
     try:
+        if interactive:
+            tty.setcbreak(stdin)
         sys.stdout.write("\033[?1049h\033[?25l\033[2J")
         while True:
             terminal = shutil.get_terminal_size((120, 50))
-            lines = render(snapshot(conf), terminal.columns).splitlines()[: terminal.lines]
+            if state is None or (not ui.get("frozen") and time.monotonic() >= next_refresh):
+                state = snapshot(conf)
+                next_refresh = time.monotonic() + interval
+            lines = render(state, terminal.columns, terminal.lines, ui).splitlines()[: terminal.lines]
             if terminal != size_seen:
                 previous, size_seen = [], terminal
                 sys.stdout.write("\033[2J")
             sys.stdout.write(repaint(previous, lines))
             sys.stdout.flush()
             previous = lines
-            time.sleep(interval)
+            wait = max(0.1, next_refresh - time.monotonic()) if not ui.get("frozen") else 1.0
+            ready = select.select([stdin], [], [], wait)[0] if interactive else time.sleep(wait)
+            if ready:
+                key = os.read(stdin, 1).decode(errors="ignore")
+                if not handle_key(conf, key, state, ui):
+                    return 0
+                if key in ("p", "P"):
+                    next_refresh = 0.0
     except KeyboardInterrupt:
         return 0
     finally:
+        if saved is not None:
+            termios.tcsetattr(stdin, termios.TCSADRAIN, saved)
         sys.stdout.write("\033[?25h\033[?1049l")
         sys.stdout.flush()
 

@@ -223,7 +223,13 @@ class QueueTests(Sandbox):
         self.theseus("queue", "tick")
         flat = " ".join(self.theseus("top", "--once").stdout.split())
         self.assertIn("POSTED", flat)
-        self.assertRegex(flat, r"working visible-task - 0m \d\d:\d\d with worker-a")
+        self.assertRegex(flat, r"1 worker-a %1 working visible-task - 0m")
+        self.assertRegex(flat, r"ready second-task - 0m \d\d:\d\d next free agent")
+        self.assertIn("after compact", flat)
+        self.assertRegex(flat, r"M1 \S+ 0/2 done")
+        narrow = self.theseus("top", "--once", env={**self.env, "COLUMNS": "84"}).stdout
+        self.assertTrue(all(len(line) <= 84 for line in narrow.splitlines()))
+        self.assertNotIn("~ │", narrow.split("AGENTS")[1].split("WAITING")[0])
 
 
 
