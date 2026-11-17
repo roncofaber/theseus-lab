@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - `theseus top` is now an interactive Textual dashboard over every project on the host: a Host tab (projects, pools, merged events) and one tab per project (agents, waiting tasks, events, activity sparklines), with `/` filtering, `p` to pause or resume a queue, `r` to refresh and Enter on an agent to switch your tmux client to its pane. It runs outside any project too.
 - Host registry (`~/.local/share/theseus/projects.json`, `THESEUS_REGISTRY` overrides) filled by every command that loads a project configuration, and `theseus projects` to list it.
 - `theseus top --host --once` and `--host --json` for a plain host summary, and `theseus top --interval SECONDS`.
+- Host store (`theseus.store`): one SQLite database per machine for projects, agents, events, pool leases and claims, deliveries and agent-state samples, with importers for the existing JSON state. Not yet used by the commands.
 
 ### Changed
 
