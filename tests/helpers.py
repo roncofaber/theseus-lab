@@ -1,6 +1,7 @@
 """Shared fixtures: every test runs against temporary data, scratch and worktree roots, a temporary host database,
-backup directory and host configuration (THESEUS_CONFIG, XDG_CONFIG_HOME, XDG_DATA_HOME) and a throwaway Git identity, so nothing touches the user's real projects, host store, tmux server or
-model gateway."""
+backup directory and host configuration (THESEUS_CONFIG, XDG_CONFIG_HOME, XDG_DATA_HOME), a throwaway tmux socket
+for supervised agents (THESEUS_TMUX_PATH, with THESEUS_TMUX_GUARD refusing the default private socket) and a throwaway
+Git identity, so nothing touches the user's real projects, host store, tmux servers or model gateway."""
 import os
 import subprocess
 import sys
@@ -30,10 +31,28 @@ def isolate_session():
         "THESEUS_DB": str(session / "xdg-data/theseus/theseus.db"),
         "THESEUS_CONFIG": str(session / "xdg-config/theseus/config.toml"),
         "THESEUS_DB_GUARD": os.pathsep.join(sorted(map(str, fenced))),
+        "THESEUS_TMUX_GUARD": "1",
+        "THESEUS_TMUX_PATH": str(short_dir() / "s"),
     })
+    os.environ.pop("THESEUS_TMUX_SOCKET", None)
     import atexit
     import shutil
     atexit.register(shutil.rmtree, session, True)
+    atexit.register(drop_tmux, Path(os.environ["THESEUS_TMUX_PATH"]))
+
+
+def short_dir():
+    """A private directory with a short path for a throwaway tmux socket (Unix socket paths stop near 108 bytes)."""
+    return Path(tempfile.mkdtemp(prefix="th-", dir="/tmp"))
+
+
+def drop_tmux(socket):
+    """Kill the throwaway tmux server on socket, if any, before removing its directory (never the reverse, which
+    leaves the server running on a deleted socket)."""
+    import shutil
+    if socket.exists():
+        subprocess.run(["tmux", "-S", str(socket), "kill-server"], capture_output=True)
+    shutil.rmtree(socket.parent, ignore_errors=True)
 
 
 if "THESEUS_DB_GUARD" not in os.environ:
@@ -45,6 +64,8 @@ def base_env(root):
            if not key.startswith(("THESEUS_", "GIT_")) and key not in ("JAVA_HOME", "GHIDRA_INSTALL_DIR")}
     env.update({
         "THESEUS_DB_GUARD": os.environ["THESEUS_DB_GUARD"],
+        "THESEUS_TMUX_GUARD": "1",
+        "THESEUS_TMUX_PATH": os.environ["THESEUS_TMUX_PATH"],
         "THESEUS_DATA": str(root / "data"),
         "THESEUS_SCRATCH": str(root / "scratch"),
         "THESEUS_WORKTREES": str(root / "worktrees"),
@@ -75,6 +96,9 @@ class Sandbox(unittest.TestCase):
         self.tmp = Path(self._tmp.name)
         (self.tmp / "gitconfig").write_text("[init]\n\tdefaultBranch = main\n")
         self.env = base_env(self.tmp)
+        socket = short_dir() / "s"
+        self.addCleanup(drop_tmux, socket)
+        self.env["THESEUS_TMUX_PATH"] = str(socket)
         self.project = self.tmp / "project"
         self.saved_environ = dict(os.environ)
         os.environ.update({k: v for k, v in self.env.items() if k.startswith(("THESEUS_", "GIT_", "XDG_"))})

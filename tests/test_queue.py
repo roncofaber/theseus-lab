@@ -369,5 +369,47 @@ class QueueTests(Sandbox):
 
 
 
+class WakeTests(Sandbox):
+    """`theseus queue wait` sleeps until the earlier of its interval and the next pending wake time, so a gateway resend
+    fires within a second or two of its scheduled time instead of on the next interval boundary."""
+
+    def setUp(self):
+        super().setUp()
+        self.scaffold()
+        from theseus import config, workqueue
+        self.conf = config.load(root=self.project)
+        self.wq = workqueue
+        saved = workqueue.tick
+        workqueue.tick = lambda conf, assign=True: []
+        self.addCleanup(setattr, workqueue, "tick", saved)
+
+    def test_wait_wakes_for_a_gateway_resend_before_the_interval(self):
+        from theseus import store
+        now = [1000.0]
+        slept = []
+
+        def sleep(seconds):
+            slept.append(round(seconds, 2))
+            now[0] += seconds
+
+        with store.for_project(self.conf) as conn:
+            store.put_gateway_retry(conn, self.conf.name, "worker-a", phase="waiting", next_epoch=1007.0, pool="p")
+        status = self.wq.wait(self.conf, timeout=100, interval=60, clock=lambda: now[0], sleep=sleep)
+        self.assertEqual(1, status)
+        self.assertEqual(7.5, slept[0])
+        self.assertEqual(60, slept[1])
+        self.assertEqual(100, round(sum(slept), 2))
+
+    def test_an_overdue_or_missing_wake_time_keeps_the_interval(self):
+        from theseus import store
+        with store.for_project(self.conf) as conn:
+            store.put_gateway_retry(conn, self.conf.name, "worker-a", phase="waiting", next_epoch=900.0, pool="p")
+        self.assertEqual(30.0, self.wq.next_sleep(self.conf, 30, 1000.0))
+        with store.for_project(self.conf) as conn:
+            store.put_gateway_retry(conn, self.conf.name, "worker-a", phase="waiting", next_epoch=1010.0, pool="p")
+        self.assertEqual(10.5, self.wq.next_sleep(self.conf, 30, 1000.0))
+        self.assertEqual(5.0, self.wq.next_sleep(self.conf, 5, 1000.0))
+
+
 if __name__ == "__main__":
     unittest.main()

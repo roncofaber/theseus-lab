@@ -3,7 +3,7 @@
 The database lives at ~/.local/share/theseus/theseus.db (XDG_DATA_HOME is respected; THESEUS_DB overrides the path).
 THESEUS_DB_GUARD lists paths (files or directories, separated like PATH) the store must never open, so a test harness fails loudly instead of
 touching the real host database. It holds the projects this host runs, coordinator sessions, registered agents, queue events, pool leases and claims,
-deliveries, periodic agent-state samples and gateway errors, retry episodes and pauses. Task records stay in each project's tasks.json in Git; the optional task
+deliveries, periodic agent-state samples, gateway errors, retry episodes and pauses, and the runs of supervised agents (agent_runs). Task records stay in each project's tasks.json in Git; the optional task
 index here is a read-only copy for cross-project queries. There is no daemon: every short-lived process opens the file
 with connect(), and each write runs in its own BEGIN IMMEDIATE transaction so concurrent processes serialize on it.
 """
@@ -177,7 +177,43 @@ MIGRATIONS = [
         "ALTER TABLE gateway_pools ADD COLUMN cap_cut INTEGER",
         "ALTER TABLE gateway_pools ADD COLUMN cap_until REAL",
     ],
+    [
+        lambda conn: add_columns(conn, "agents", AGENT_SUPERVISOR_COLUMNS),
+        """CREATE TABLE IF NOT EXISTS agent_runs (
+            id INTEGER PRIMARY KEY,
+            project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+            agent TEXT NOT NULL,
+            gen INTEGER NOT NULL,
+            intent TEXT NOT NULL,
+            profile TEXT,
+            launch_hash TEXT,
+            session_id TEXT,
+            resume INTEGER NOT NULL DEFAULT 0,
+            pid INTEGER,
+            started TEXT NOT NULL,
+            started_epoch REAL NOT NULL,
+            ready_epoch REAL,
+            ended TEXT,
+            ended_epoch REAL,
+            exit_status INTEGER,
+            exit_signal TEXT,
+            stop_reason TEXT)""",
+        "CREATE INDEX IF NOT EXISTS agent_runs_agent ON agent_runs(project, agent, started_epoch)",
+    ],
 ]
+AGENT_SUPERVISOR_COLUMNS = [("managed", "INTEGER NOT NULL DEFAULT 0"), ("server", "TEXT"), ("target", "TEXT"),
+                            ("session_id", "TEXT"), ("slot", "INTEGER"), ("desired", "TEXT NOT NULL DEFAULT 'up'"),
+                            ("phase", "TEXT"), ("phase_epoch", "REAL")]
+
+
+def add_columns(conn, table, columns):
+    """ALTER TABLE ADD COLUMN for each column the table lacks, so a migration runs over a partly migrated file."""
+    present = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+    for name, declaration in columns:
+        if name not in present:
+            conn.execute(f'ALTER TABLE "{table}" ADD COLUMN {name} {declaration}')
+
+
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -302,7 +338,7 @@ def migrate(conn):
             raise StoreError(f"{database_name(conn)} has schema version {current}, newer than this theseus knows")
         for number, statements in enumerate(MIGRATIONS[current:], current + 1):
             for statement in statements:
-                conn.execute(statement)
+                statement(conn) if callable(statement) else conn.execute(statement)
             conn.execute(f"PRAGMA user_version = {number}")
 
 
@@ -416,6 +452,7 @@ def agent_row(row):
     record = dict(row)
     record["rooms"] = json.loads(record["rooms"]) if record["rooms"] else None
     record["enabled"] = bool(record["enabled"])
+    record["managed"] = bool(record.get("managed"))
     return record
 
 
@@ -452,6 +489,95 @@ def set_enabled(conn, project, name, enabled):
     with transaction(conn):
         return conn.execute("UPDATE agents SET enabled = ? WHERE project = ? AND name = ?",
                             (int(bool(enabled)), project, name)).rowcount == 1
+
+
+AGENT_FIELDS = ("pane", "profile", "rooms", "enabled", "managed", "server", "target", "session_id", "slot", "desired",
+                "phase", "phase_epoch")
+
+
+def update_agent(conn, project, name, **fields):
+    """Change some columns of one agent's row; False when it is not registered. phase also stamps phase_epoch."""
+    unknown = set(fields) - set(AGENT_FIELDS)
+    if unknown:
+        raise StoreError(f"unknown agent field(s): {', '.join(sorted(unknown))}")
+    if "phase" in fields and "phase_epoch" not in fields:
+        fields["phase_epoch"] = time.time()
+    if "rooms" in fields:
+        fields["rooms"] = json.dumps(list(fields["rooms"])) if fields["rooms"] else None
+    for key in ("enabled", "managed"):
+        if key in fields:
+            fields[key] = int(bool(fields[key]))
+    if not fields:
+        return True
+    with transaction(conn):
+        sets = ", ".join(f"{key} = ?" for key in fields)
+        return conn.execute(f"UPDATE agents SET {sets} WHERE project = ? AND name = ?",
+                            [*fields.values(), project, name]).rowcount == 1
+
+
+RUN_FIELDS = ("pid", "ready_epoch", "ended", "ended_epoch", "exit_status", "exit_signal", "stop_reason", "session_id",
+              "launch_hash")
+
+
+def add_run(conn, project, agent, intent, profile=None, launch_hash=None, session_id=None, resume=False, at=None):
+    """Open the next generation of a managed agent and return its row."""
+    text, epoch = stamp(at)
+    with transaction(conn):
+        touch_project(conn, project)
+        gen = (conn.execute("SELECT MAX(gen) FROM agent_runs WHERE project = ? AND agent = ?",
+                            (project, agent)).fetchone()[0] or 0) + 1
+        cursor = conn.execute("""INSERT INTO agent_runs (project, agent, gen, intent, profile, launch_hash, session_id, resume,
+                                 started, started_epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                              (project, agent, gen, intent, profile, launch_hash, session_id, int(bool(resume)), text, epoch))
+    return dict(conn.execute("SELECT * FROM agent_runs WHERE id = ?", (cursor.lastrowid,)).fetchone())
+
+
+def update_run(conn, run_id, **fields):
+    unknown = set(fields) - set(RUN_FIELDS)
+    if unknown:
+        raise StoreError(f"unknown run field(s): {', '.join(sorted(unknown))}")
+    if not fields:
+        return
+    with transaction(conn):
+        conn.execute(f"UPDATE agent_runs SET {', '.join(f'{key} = ?' for key in fields)} WHERE id = ?",
+                     [*fields.values(), run_id])
+
+
+def close_run(conn, run_id, stop_reason, exit_status=None, exit_signal=None, at=None):
+    """End a run once: a run that already ended keeps its first ending, and a stop_reason set when a stop was planned
+    wins over the one given here. Returns whether this call ended it."""
+    text, epoch = stamp(at)
+    with transaction(conn):
+        return conn.execute("""UPDATE agent_runs SET ended = ?, ended_epoch = ?, stop_reason = COALESCE(stop_reason, ?),
+                               exit_status = ?, exit_signal = ? WHERE id = ? AND ended IS NULL""",
+                            (text, epoch, stop_reason, exit_status, exit_signal, run_id)).rowcount == 1
+
+
+def runs(conn, project, agent=None, limit=None, open_only=False, since=None):
+    """Runs newest first."""
+    sql, args = "SELECT * FROM agent_runs WHERE project = ?", [project]
+    if agent is not None:
+        sql += " AND agent = ?"
+        args.append(agent)
+    if open_only:
+        sql += " AND ended IS NULL"
+    if since is not None:
+        sql += " AND COALESCE(ended_epoch, started_epoch) >= ?"
+        args.append(since)
+    sql += " ORDER BY gen DESC, id DESC"
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+    return [dict(row) for row in conn.execute(sql, args)]
+
+
+def run_of(conn, project, agent, gen):
+    row = conn.execute("SELECT * FROM agent_runs WHERE project = ? AND agent = ? AND gen = ?", (project, agent, gen)).fetchone()
+    return dict(row) if row else None
+
+
+def last_run(conn, project, agent):
+    found = runs(conn, project, agent, limit=1)
+    return found[0] if found else None
 
 
 EVENT_COLUMNS = "id, project, time, epoch, kind, agent, task, detail"

@@ -34,6 +34,10 @@ Decisions behind the package layout, for contributors. User documentation starts
 
 - The citation index has configurable kinds. Native ports cite addresses; a device-protocol port cites captures (`cap_<hash>@<frame>`), and the fold check protects both the same way.
 
+## Supervised agents
+
+`theseus.supervisor` starts and supervises long-running agents on a private tmux server; `theseus.tmux` is the only module that runs tmux, and every command for the private server names its socket (a guard test checks this). There is still no daemon: `theseus agents up` and the queue tick reconcile, and a tmux `pane-died` hook records crashes and kicks a one-agent reconcile. Runs live in the host store (`agent_runs`). A supervised agent's address in the registry is its session target `=project--agent:`, which names no pane on the user's own server, so a caller that forgets the socket fails instead of typing into an unrelated pane. The design, the research behind it and the verification spikes are in [design/agent-supervisor.md](design/agent-supervisor.md).
+
 ## Host store
 
 - One SQLite database per machine, `~/.local/share/theseus/theseus.db` (`XDG_DATA_HOME` is respected, `THESEUS_DB` overrides the path), managed by `src/theseus/store.py` with the standard library `sqlite3` module only. It is the runtime source of truth for host-level and runtime state that spans projects or changes every few seconds: the projects this host runs (name, main-checkout root, data directory, coordinator, last seen), coordinator sessions, registered agents, queue events, pool leases and claims, deliveries and periodic agent-state samples for activity and utilization graphs.

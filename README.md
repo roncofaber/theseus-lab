@@ -39,7 +39,8 @@ A project is an ordinary Git repository with a `theseus.toml`, an `AGENTS.md` th
 - Linux (macOS works with reduced process monitoring)
 - Python 3.11 or newer, Git, Bash
 - A coding agent CLI, for example [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-- Optional: `tmux` (long-running agents and the queue), `jq`, `shellcheck`
+- `tmux` (3.2 or newer; tested with 3.4): theseus runs its long-running agents in tmux and supervises them on a private tmux server of its own
+- Optional: `jq`, `shellcheck`
 
 ## Installation
 
@@ -48,6 +49,8 @@ uv tool install git+https://github.com/roncofaber/theseus-lab
 # or
 pipx install git+https://github.com/roncofaber/theseus-lab
 ```
+
+Install tmux with your system package manager first (`apt install tmux`, `dnf install tmux`, `brew install tmux`); theseus needs it for long-running agents and starts its own private server (`tmux -L theseus`), separate from your tmux sessions.
 
 Check the installation:
 

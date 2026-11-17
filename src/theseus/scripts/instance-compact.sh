@@ -18,6 +18,6 @@ else
     [[ -n "$template" ]] || { echo "$pane: the agent profile has no compact command" >&2; exit 1; }
     command="${template//\{keep\}/$keep}"
 fi
-tmux send-keys -t "$pane" -l "$command" && sleep 0.3 && tmux send-keys -t "$pane" Enter
+tmux_at "$pane" send-keys -t "$pane" -l "$command" && sleep 0.3 && tmux_at "$pane" send-keys -t "$pane" Enter
 for _ in $(seq 1 60); do sleep "${THESEUS_COMPACT_POLL:-5}"; pane_busy "$pane" || break; done
 echo "$pane: ${command%% *} done"

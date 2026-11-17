@@ -346,7 +346,7 @@ def recover(conf, agent, task, fresh, reason, text=None):
                 return False, f"{clear}: {detail}"
             timeout, poll = ag.send_settings(conf)
             deadline = time.monotonic() + timeout
-            while ag.pane_busy(conf, agent["pane"], profile) and time.monotonic() < deadline:
+            while ag.pane_busy(conf, agent["pane"], profile, server=ag.where(agent)[0]) and time.monotonic() < deadline:
                 time.sleep(poll)
         ok, detail = ag.send_verified(conf, agent, restart_prompt(conf, task, reason), task_id, profile=profile)
         return ok, (f"fresh context ({clear or 'no clear command'} and a restart prompt): {detail}")

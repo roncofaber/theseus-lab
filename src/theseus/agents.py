@@ -7,7 +7,6 @@ from the queue. A project's <data>/agents.json, the registry before the store, i
 """
 import os
 import re
-import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +56,10 @@ def entry(row):
         record["rooms"] = row["rooms"]
     if row["source"]:
         record["source"] = row["source"]
+    if row.get("managed"):
+        record.update({"managed": True, "server": row.get("server"), "target": row.get("target"),
+                       "session_id": row.get("session_id"), "slot": row.get("slot"), "desired": row.get("desired"),
+                       "phase": row.get("phase"), "profile": row["profile"]})
     return record
 
 
@@ -119,12 +122,24 @@ def set_enabled(conf, name, enabled):
     return f"{name} {'enabled' if enabled else 'disabled: it finishes its current task and gets no new work'}"
 
 
+def where(agent_or_pane, server=None):
+    """(server, target) of an agent record or pane: managed agents on their private server, the rest on the user's."""
+    from . import supervisor, tmux as tm
+    if server is not None:
+        return server, agent_or_pane["pane"] if isinstance(agent_or_pane, dict) else agent_or_pane
+    if isinstance(agent_or_pane, dict):
+        return supervisor.server_of(agent_or_pane), agent_or_pane["pane"]
+    return tm.resolve(agent_or_pane)
+
+
 def tmux(*args):
-    return subprocess.run(["tmux", *args], capture_output=True, text=True)
+    """tmux on the user's own server, for hand-made panes."""
+    from . import tmux as tm
+    return tm.Server.legacy().run(*args)
 
 
-def pane_alive(pane):
-    return tmux("display", "-p", "-t", pane, "#{pane_pid}").returncode == 0
+def on(server, *args):
+    return tmux(*args) if server is None or server.is_legacy else server.run(*args)
 
 
 def session_transcript(conf, agent):
@@ -139,11 +154,44 @@ def session_transcript(conf, agent):
         return None
     if not directory:
         return None
-    address = tmux("display", "-p", "-t", agent["pane"], "#{window_id}.#{pane_id}").stdout.strip()
+    server, pane = where(agent)
+    pids, exclude = None, ()
+    if server.is_legacy:
+        address = tmux("display", "-p", "-t", pane, "#{window_id}.#{pane_id}").stdout.strip()
+        exclude = supervised_pids()
+    else:
+        from . import top, tmux as tm
+        text = server.display(pane, "#{window_id}.#{pane_id}" + tm.SEP + "#{pane_pid}") or ""
+        address, _, pid = text.partition(tm.SEP)
+        pids = set(top.descendants(top.process_table(), int(pid))) | {int(pid)} if pid.isdigit() else set()
     try:
-        return transcripts.pane_transcript(directory, address)
+        return transcripts.pane_transcript(directory, address, pids, exclude)
     except OSError:
         return None
+
+
+_SUPERVISED_PIDS = {}
+
+
+def supervised_pids(ttl=5.0):
+    """Process ids in the private server's panes (cached briefly), so a hand-made pane whose window and pane ids
+    happen to equal a supervised pane's never borrows that agent's transcript."""
+    from . import supervisor, top, tmux as tm
+    cached = _SUPERVISED_PIDS.get("pids")
+    if cached and time.monotonic() - cached[0] < ttl:
+        return cached[1]
+    found = set()
+    try:
+        panes = supervisor.server().list_panes(("pane_pid",))
+    except (tm.TmuxError, supervisor.SupervisorError, OSError):
+        panes = []
+    if panes:
+        table = top.process_table()
+        for pane in panes:
+            if pane["pane_pid"].isdigit():
+                found |= set(top.descendants(table, int(pane["pane_pid"])))
+    _SUPERVISED_PIDS["pids"] = (time.monotonic(), found)
+    return found
 
 
 def context_use(conf, profile, transcript, hint):
@@ -161,11 +209,25 @@ def context_use(conf, profile, transcript, hint):
     return None
 
 
-def pane_screen(pane):
-    return tmux("capture-pane", "-p", "-t", pane).stdout.splitlines()
+def pane_alive(pane, server=None):
+    server, pane = where(pane, server)
+    if server.is_legacy:
+        # tmux 3.4 exits 0 with empty output for a pane that does not exist.
+        result = tmux("display", "-p", "-t", pane, "#{pane_pid}")
+        return result.returncode == 0 and bool(result.stdout.strip())
+    return server.display(pane, "#{pane_dead}") == "0"
 
 
-def pane_busy(conf, pane, profile=None, screen=None):
+def pane_screen(pane, server=None):
+    """The pane's visible lines without the blank rows below the last output."""
+    server, pane = where(pane, server)
+    lines = (on(server, "capture-pane", "-p", "-t", pane).stdout or "").splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+
+def pane_busy(conf, pane, profile=None, screen=None, server=None):
     from . import profiles
     try:
         pattern = profiles.instance_env(conf, profile)["THESEUS_BUSY_PATTERN"]
@@ -173,11 +235,11 @@ def pane_busy(conf, pane, profile=None, screen=None):
         pattern = conf.section("instances").get("busy_pattern") or ""
     if not pattern:
         return False
-    screen = pane_screen(pane) if screen is None else screen
+    screen = pane_screen(pane, server) if screen is None else screen
     return any(pattern in line for line in screen[-3:])
 
 
-def pane_stall(conf, pane, profile=None, screen=None):
+def pane_stall(conf, pane, profile=None, screen=None, server=None):
     """The first of the profile's stall patterns anywhere on the visible screen, or None."""
     from . import profiles
     try:
@@ -186,7 +248,7 @@ def pane_stall(conf, pane, profile=None, screen=None):
         return None
     if not patterns:
         return None
-    text = "\n".join(pane_screen(pane) if screen is None else screen)
+    text = "\n".join(pane_screen(pane, server) if screen is None else screen)
     return next((pattern for pattern in patterns if pattern in text), None)
 
 
@@ -198,9 +260,11 @@ def send_settings(conf):
     return (10.0 if timeout in (None, "") else float(timeout)), float(poll)
 
 
-def input_holds(screen, text, pattern=None, lines=8):
+def input_holds(screen, text, pattern=None, lines=8, placeholder=None):
     """Whether the pane's input line still holds the start of text (typed but never submitted). With the profile's
-    input_pattern the last matching line in the bottom lines is the input line; without one, any bottom line counts."""
+    input_pattern the last matching line in the bottom lines is the input line; without one, any bottom line counts.
+    A long text arrives as a paste that the agent may show as a placeholder (Claude Code: [Pasted text #N]); with the
+    profile's paste_placeholder such an input line counts as holding the text."""
     wanted = " ".join(text.split())[:40]
     if not wanted:
         return False
@@ -211,8 +275,30 @@ def input_holds(screen, text, pattern=None, lines=8):
         if not held:
             return False
         content = " ".join(held[-1].split())
+        if placeholder and re.match(placeholder, content):
+            return True
         return bool(content) and (wanted.startswith(content[:40]) or content.startswith(wanted))
+    if placeholder and any(re.search(placeholder, line) for line in bottom):
+        return True
     return any(wanted[:20] in " ".join(line.split()) for line in bottom)
+
+
+def input_empty(screen, pattern, lines=8):
+    """Whether the input line (the profile's input_pattern) shows nothing; None when no input line is found."""
+    if not pattern:
+        return None
+    regex = re.compile(pattern)
+    held = [m.group(1) for m in (regex.match(line) for line in screen[-lines:]) if m]
+    return None if not held else not held[-1].strip()
+
+
+def clear_input(server, pane, key, input_pattern, attempts=12):
+    """Press the clear key until the input line is empty: one press of Claude Code's C-u clears only the last visual
+    line of a wrapped input."""
+    for _ in range(attempts):
+        on(server, "send-keys", "-t", pane, key)
+        if input_empty(pane_screen(pane, server), input_pattern) is not False:
+            return
 
 
 def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, record=True, sleep=time.sleep):
@@ -222,9 +308,10 @@ def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, 
     a failure records a send_failed event unless record is False. Profiles without a busy marker are sent unverified."""
     from . import profiles
     from . import workqueue
-    pane = agent["pane"]
+    server, pane = where(agent)
     profile = profile or workqueue.launched(conf, agent)
     settings = profiles.interactive(conf, profile)
+    placeholder = settings.get("paste_placeholder")
     try:
         busy_pattern = profiles.instance_env(conf, profile)["THESEUS_BUSY_PATTERN"]
     except profiles.ProfileError:
@@ -233,10 +320,10 @@ def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, 
     input_pattern = settings.get("input_pattern")
 
     def submitted():
-        screen = pane_screen(pane)
+        screen = pane_screen(pane, server)
         if expect_busy:
             return any(busy_pattern in line for line in screen[-3:]), screen
-        return not input_holds(screen, text, input_pattern), screen
+        return not input_holds(screen, text, input_pattern, placeholder=placeholder), screen
 
     def wait():
         deadline = time.monotonic() + timeout
@@ -247,20 +334,23 @@ def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, 
             sleep(poll)
 
     if settings.get("clear_input"):
-        tmux("send-keys", "-t", pane, settings["clear_input"])
-    typed = tmux("send-keys", "-t", pane, "-l", text)
+        if server.is_legacy:
+            tmux("send-keys", "-t", pane, settings["clear_input"])
+        else:
+            clear_input(server, pane, settings["clear_input"], input_pattern)
+    typed = tmux("send-keys", "-t", pane, "-l", text) if server.is_legacy else server.send_literal(pane, text)
     if typed.returncode != 0:
         detail = f"tmux send-keys failed: {(typed.stderr or '').strip()[:120]}"
     else:
         sleep(0.3)
-        tmux("send-keys", "-t", pane, "Enter")
+        on(server, "send-keys", "-t", pane, "Enter")
         if expect_busy and not busy_pattern:
             return True, "sent (unverified: the profile has no busy marker)"
         ok, screen = wait()
         if ok:
             return True, "sent"
-        if input_holds(screen, text, input_pattern):
-            tmux("send-keys", "-t", pane, "Enter")
+        if input_holds(screen, text, input_pattern, placeholder=placeholder):
+            on(server, "send-keys", "-t", pane, "Enter")
             ok, screen = wait()
             if ok:
                 return True, "sent after a second Enter"
@@ -333,7 +423,9 @@ def handoff_final(conf, handoff):
 
 
 def state(conf, agent):
-    """Live state: offline, busy, working, delivered, thrashing, gateway_error, stalled, quiet, free (plus disabled).
+    """Live state: offline, busy, working, delivered, thrashing, gateway_error, stalled, quiet, free (plus disabled);
+    supervised agents (theseus.supervisor) also starting, blocked (a startup dialog needs a human), failed (restart
+    budget exhausted) and waiting (the agent CLI's own status says it waits for input, such as a permission prompt).
     An idle pane whose bottom lines show a gateway error of its profile while it holds a task is gateway_error, with the
     parsed error in "gateway" (theseus.gateway); "contextTokens" is the profile's context hint when shown. A handoff counts
     as delivered only once the pane is idle and the handoff is final (handoff_final). A pane that shows one of the profile's
@@ -348,11 +440,27 @@ def state(conf, agent):
     info = {"name": agent["name"], "pane": pane, "provider": agent.get("provider", ""), "enabled": agent.get("enabled", True),
             "task": task["id"] if task else None, "room": (task or {}).get("room"), "idleMinutes": None,
             "tainted": rooms.ledger(conf)["tainted"].get(agent["name"]) if rooms.enabled(conf) else None}
-    if not pane_alive(pane):
+    server, _ = where(agent)
+    if agent.get("managed"):
+        info.update({"managed": True, "phase": agent.get("phase"), "session": agent.get("session_id")})
+        if agent.get("phase") == "failed":
+            info["state"] = "failed"
+            return info
+    if not pane_alive(pane, server):
         info["state"] = "offline"
         return info
-    screen = pane_screen(pane)
+    if agent.get("managed") and agent.get("phase") in ("starting", "blocked"):
+        info["state"] = agent["phase"]
+        return info
+    screen = pane_screen(pane, server)
     busy = pane_busy(conf, pane, agent.get("provider"), screen)
+    waiting = None
+    if agent.get("managed"):
+        status = managed_status(conf, agent, server)
+        if status:
+            busy = status.get("status") == "busy" or busy
+            if status.get("status") == "waiting":
+                waiting = status.get("waitingFor") or "input"
     info["busy"] = busy
     info["contextTokens"] = gateway.context_tokens(conf, agent.get("provider"), screen)
     transcript = session_transcript(conf, agent)
@@ -368,6 +476,9 @@ def state(conf, agent):
         if handoff and handoff.exists() and not busy and handoff_final(conf, handoff):
             info["state"] = "delivered"
             info["result"] = t.handoff_result(handoff)
+        elif waiting and not busy:
+            info["state"] = "waiting"
+            info["waiting"] = waiting
         elif stall := pane_stall(conf, pane, agent.get("provider"), screen):
             info["state"] = "thrashing"
             info["stall"] = stall
@@ -381,9 +492,21 @@ def state(conf, agent):
             info["state"] = "stalled" if busy_detectable(conf, agent.get("provider")) else "quiet"
         else:
             info["state"] = "working"
+    elif waiting and not busy:
+        info["state"] = "waiting"
+        info["waiting"] = waiting
     else:
         info["state"] = "busy" if busy else ("free" if info["enabled"] else "disabled")
     return info
+
+
+def managed_status(conf, agent, server):
+    """The agent CLI's own status entry (Claude Code: `claude agents --json`) for a managed agent, or None."""
+    from . import supervisor, workqueue
+    pid = server.display(agent["pane"], "#{pane_pid}")
+    if not pid or not pid.isdigit():
+        return None
+    return supervisor.status_of(conf, workqueue.launched(conf, agent), pid)
 
 
 def states(conf):

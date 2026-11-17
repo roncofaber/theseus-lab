@@ -23,7 +23,7 @@ Workers run under an agent profile (`theseus agents profiles`; `workers.default`
 | --- | --- | --- |
 | Headless (profiles with a headless command) | `theseus dispatch ID [--provider PROFILE]`; keep `theseus wait` running in the background | `theseus followup NAME MSG` (profiles with resume) / `theseus stop NAME` |
 | Subagent (`claude-subagent`, opt in with a capacity) | `theseus dispatch ID --provider claude-subagent`, then launch a subagent whose prompt says to read and follow the printed `prompt.md` | your agent's own messaging and stop tools |
-| Persistent instances in tmux | `theseus agents add NAME PANE --profile PROFILE`, then the queue | `theseus instance send|compact|restart` |
+| Persistent instances in tmux | supervised: `[agents]` in `theseus.local.toml`, `theseus agents up`; hand-made: `theseus agents add NAME PANE --profile PROFILE`; then the queue | `theseus instance send|compact|restart`, `theseus agents ls|restart|attach|down` |
 
 `theseus tasks stats` compares profiles (results, minutes to handoff, follow-ups). Size capacity to your plan's rate limits.
 
@@ -33,7 +33,7 @@ With agents registered (`theseus agents`), the queue does dispatch for you: writ
 
 ## Persistent instance rounds
 
-Instances are long-lived worker sessions in tmux panes listed in `[[instances.panes]]`. They follow `.agents/skills/theseus-worker/instance-brief.md`.
+Instances are long-lived worker sessions in tmux panes: supervised ones that theseus starts on its private tmux server (`[agents] managed = true`; `theseus agents ls` shows them, `theseus agents attach NAME` opens one, crashes restart on their own and `blocked` or `failed` agents raise an `error` event), or hand-made panes listed in `[[instances.panes]]`. PANE below also accepts an agent name. They follow `.agents/skills/theseus-worker/instance-brief.md`.
 
 1. `theseus instance compact PANE` between tasks (a session cannot compact itself). `theseus instance restart PANE` resumes the same session in a fresh process, which is how instances pick up a new MCP server, skill or setting (for example after `theseus setup rea`).
 2. `theseus instance assign TASK INSTANCE SUFFIX` creates the worktree and branch and commits the assignment.

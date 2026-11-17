@@ -56,12 +56,15 @@ def alive(pid):
     return Path(f"/proc/{pid}").exists()
 
 
-def session_of(directory, address):
+def session_of(directory, address, pids=None, exclude=()):
     """(session id, cwd) of the newest live client whose tmux field ends with address ("@<window>.%<pane>"), or None.
-    The window id makes a pane id from another tmux server (or a test's fake one) unlikely to match."""
+    The window id makes a pane id from another tmux server (or a test's fake one) unlikely to match. The tmux field
+    does not name the server, so pids (the pane's process tree) narrows the match to one server and exclude drops
+    clients known to run on another one."""
     if not address or "@" not in address:
         return None
-    matches = [entry for entry in sessions(directory) if entry[2].endswith(address) and alive(entry[3])]
+    matches = [entry for entry in sessions(directory) if entry[2].endswith(address) and alive(entry[3])
+               and (pids is None or entry[3] in pids) and entry[3] not in exclude]
     if not matches:
         return None
     best = max(matches, key=lambda entry: entry[4])
@@ -132,7 +135,7 @@ def read(path):
     return state
 
 
-def pane_transcript(directory, address):
+def pane_transcript(directory, address, pids=None, exclude=()):
     """read() of the transcript of the session running in the tmux pane at address, or None."""
-    found = session_of(directory, address)
+    found = session_of(directory, address, pids, exclude)
     return read(transcript_path(directory, *found)) if found else None

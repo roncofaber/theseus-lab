@@ -90,6 +90,8 @@ DEFAULTS = {
     "rooms": {"enabled": False, "taint": "until-clear", "clean_instances": [], "dirty_instances": [], "dirty_paths": [],
               "dirty_data": [], "spec_paths": []},
     "consumers": {},
+    "agents": {"managed": False, "name": "{project}-{profile}-{n}", "cwd": "root", "resume": "task", "counts": {},
+               "extra": []},
 }
 
 ENV_OVERRIDES = {"THESEUS_DATA": ("paths", "data"), "THESEUS_SCRATCH": ("paths", "scratch"),
@@ -247,7 +249,8 @@ class Config:
         }
         if self.original:
             env["THESEUS_ORIGINAL"] = ":".join(str(p) for p in self.original)
-        from . import profiles, tools
+        from . import profiles, tmux, tools
+        env["THESEUS_TMUX_FLAG"], env["THESEUS_TMUX_SOCKET"] = tmux.configured()
         try:
             env.update(profiles.instance_env(self))
         except profiles.ProfileError:

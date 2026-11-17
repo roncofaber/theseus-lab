@@ -2,7 +2,7 @@
 
 Everything specific to one user or machine lives here rather than in the package or a project: host-wide agent profiles
 ([workers.<name>]), pools ([pools.<name>]), host store retention and backups ([store]), the gateway circuit breaker
-([gateway]), tool locations ([tools.paths])
+([gateway]), the private tmux server of supervised agents ([supervisor]), tool locations ([tools.paths])
 and host defaults for project keys a project leaves unset ([defaults]). Layers, lowest to highest: package presets and
 defaults, this file, the project's theseus.toml, its theseus.local.toml, then THESEUS_* variables and command line flags.
 
@@ -14,12 +14,16 @@ import tomllib
 from pathlib import Path
 
 NAME = "config.toml"
-SECTIONS = ("workers", "pools", "store", "tools", "defaults", "gateway")
+SECTIONS = ("workers", "pools", "store", "tools", "defaults", "gateway", "supervisor")
 DEFAULT_KEYS = ("workers.default", "workers.retries", "limits.heavy_runs", "paths.data", "paths.scratch", "paths.worktrees",
                 "instances.idle_minutes", "instances.handoff_settle_seconds", "instances.send_verify_seconds", "queue.interval",
                 "re.clients", "gateway.attempts", "gateway.backoff", "gateway.slow_codes", "gateway.slow_factor",
                 "gateway.resend", "gateway.clear_tokens", "gateway.fresh_after_errors", "gateway.screen_lines",
-                "gateway.stagger_seconds", "gateway.recovery_seconds")
+                "gateway.stagger_seconds", "gateway.recovery_seconds", "agents.counts", "agents.resume", "agents.cwd")
+TABLE_KEYS = ("agents.counts",)
+SUPERVISOR_DEFAULTS = {"socket": "theseus", "size": "220x50", "history_limit": 50000, "detach_key": "C-q", "max_agents": 12,
+                       "env_passthrough": [], "launch_shell": "exec", "ready_seconds": 90,
+                       "restart": {"backoff_seconds": [5, 30, 120, 600], "max_crashes": 5, "window_minutes": 30}}
 GATEWAY_DEFAULTS = {"breaker_errors": 3, "breaker_window_minutes": 10, "strong_codes": [530], "parallel_cap_step": 1,
                     "parallel_cap_minutes": 10}
 POOL_KEYS = ("max", "priority")
@@ -118,11 +122,23 @@ def store_sources(defaults):
     return found
 
 
+def supervisor():
+    """The host's [supervisor] table over SUPERVISOR_DEFAULTS."""
+    merged = copy.deepcopy(SUPERVISOR_DEFAULTS)
+    for key, value in (read().get("supervisor") or {}).items():
+        if key == "restart" and isinstance(value, dict):
+            merged["restart"].update(value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
 def flatten(table, prefix=""):
+    """Dotted keys of a nested table; a table named in TABLE_KEYS stays one value."""
     items = {}
     for key, value in table.items():
         name = f"{prefix}{key}"
-        if isinstance(value, dict) and value:
+        if isinstance(value, dict) and value and name not in TABLE_KEYS:
             items.update(flatten(value, name + "."))
         else:
             items[name] = value
@@ -179,6 +195,14 @@ def validate(data, file, profile_problems, tool_names=None):
             continue
         if tool_names is not None:
             errors += [f"{file}: [tools.paths] unknown tool {tool}; known: {', '.join(tool_names)}" for tool in value if tool not in tool_names]
+    for key, value in (data.get("supervisor") or {}).items():
+        if key not in SUPERVISOR_DEFAULTS:
+            errors.append(f"{file}: [supervisor] unknown key {key}; known: {', '.join(SUPERVISOR_DEFAULTS)}")
+        elif key == "restart":
+            errors += [f"{file}: [supervisor.restart] unknown key {name}; known: {', '.join(SUPERVISOR_DEFAULTS['restart'])}"
+                       for name in (value if isinstance(value, dict) else {}) if name not in SUPERVISOR_DEFAULTS["restart"]]
+        elif key == "launch_shell" and value not in ("exec", "login"):
+            errors.append(f"{file}: [supervisor] launch_shell must be \"exec\" or \"login\"")
     for key in flatten(data.get("defaults") or {}):
         if key not in DEFAULT_KEYS:
             warnings.append(f"{file}: [defaults] {key} is not a host default and is ignored; known: {', '.join(DEFAULT_KEYS)}")

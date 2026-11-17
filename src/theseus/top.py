@@ -17,6 +17,7 @@ from pathlib import Path
 
 from . import agents as ag
 from . import gitutil as g
+from . import tmux as tm
 from . import tasks as t
 from . import workqueue as wq
 
@@ -133,11 +134,15 @@ def agent_processes(states):
     now = time.time()
     for info in states:
         info.update({"rss": None, "cpu": None, "uptime": None, "procs": 0})
-        result = subprocess.run(["tmux", "display", "-p", "-t", info["pane"], "#{pane_pid}"], capture_output=True, text=True)
+        server, target = tm.resolve(info["pane"])
+        result = server.run("display", "-p", "-t", target, "#{pane_pid}")
         if result.returncode != 0 or not result.stdout.strip().isdigit():
             continue
         shell = int(result.stdout.strip())
-        agent_pids = [pid for pid, values in table.items() if values[0] == shell]
+        if not server.is_legacy:
+            agent_pids = [shell] if shell in table else []
+        else:
+            agent_pids = [pid for pid, values in table.items() if values[0] == shell]
         if not agent_pids:
             continue
         pids = [pid for agent in agent_pids for pid in descendants(table, agent)]
@@ -791,16 +796,18 @@ def own_client():
     pane = os.environ.get("TMUX_PANE")
     if not os.environ.get("TMUX") or not pane:
         return None
-    session = subprocess.run(["tmux", "display-message", "-p", "-t", pane, "#{session_id}"], capture_output=True, text=True)
+    if tm.private_tmux(os.environ.get("TMUX")):
+        return None
+    session = tmux("display-message", "-p", "-t", pane, "#{session_id}")
     if session.returncode != 0 or not session.stdout.strip():
         return None
-    clients = subprocess.run(["tmux", "list-clients", "-t", session.stdout.strip(), "-F", "#{client_name}"],
-                             capture_output=True, text=True).stdout.split()
+    clients = tmux("list-clients", "-t", session.stdout.strip(), "-F", "#{client_name}").stdout.split()
     return clients[0] if len(clients) == 1 else None
 
 
 def tmux(*args):
-    return subprocess.run(["tmux", *args], capture_output=True, text=True)
+    """tmux on the user's own server (jumps and the way back)."""
+    return tm.Server.legacy().run(*args)
 
 
 def back_option(client):
@@ -825,7 +832,14 @@ def return_hint(origin, pane):
 
 def jump_to(pane):
     """Switch this dashboard's own tmux client to pane, remember the dashboard pane for `theseus top --back` and tell
-    the client how to return."""
+    the client how to return. A supervised agent's pane lives on the private server, so it opens in a new window of
+    the user's tmux instead."""
+    if tm.is_address(pane):
+        from . import supervisor
+        target = pane[1:-1]
+        ok, message = supervisor.open_window({"name": target.split("--", 1)[1], "target": target, "managed": True,
+                                              "server": None})
+        return message
     client = own_client()
     if client is None:
         return "jump needs theseus top in a tmux session with exactly one attached client"
@@ -861,13 +875,15 @@ def go_back():
 
 def capture(pane, lines=200):
     """The visible text and the last lines of pane's history with colors (escape sequences), or '' when it fails."""
-    result = tmux("capture-pane", "-p", "-e", "-J", "-t", pane, "-S", f"-{lines}")
+    server, target = tm.resolve(pane)
+    result = server.run("capture-pane", "-p", "-e", "-J", "-t", target, "-S", f"-{lines}")
     return result.stdout if result.returncode == 0 else ""
 
 
 def send_keys(pane, *keys):
     """Press tmux keys (Enter, Escape, C-c) in pane; returns '' or tmux's error."""
-    result = tmux("send-keys", "-t", pane, *keys)
+    server, target = tm.resolve(pane)
+    result = server.run("send-keys", "-t", target, *keys)
     return "" if result.returncode == 0 else result.stderr.strip()[:80]
 
 

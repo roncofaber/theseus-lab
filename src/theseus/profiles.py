@@ -10,7 +10,10 @@ A profile describes one agent CLI:
 - interactive: the persistent-instance behavior in a tmux pane (launch, resume, busy marker, stall patterns, gateway
   error patterns and the idle marker shown after one, the context-size hint, the input line and the key that empties it,
   extra environment, compact and clear commands, where session records live, whether the agent can message the
-  coordinator).
+  coordinator) and, for agents theseus supervises itself (theseus.supervisor), the exit command, the flag that
+  preassigns a session ID, a status command that lists sessions as JSON (Claude Code: `claude agents --json`), the
+  screen text of a ready prompt, the startup dialogs that need a human and the placeholder the input line shows for a
+  long paste.
 
 Placeholders: {command} {prompt} {message} {session} {model} {permission_mode} {keep} {agent}; an item "{model_args}" expands to
 [model_flag, model] when a model is set and to nothing otherwise. Presets marked verified: false follow the CLI's
@@ -51,6 +54,13 @@ CLAUDE_INTERACTIVE = {
     "clear": "/clear",
     "sessions_dir": "~/.claude/sessions",
     "messaging": True,
+    "exit": "/exit",
+    "session_flag": "--session-id",
+    "status_command": ["claude", "agents", "--json"],
+    "ready_pattern": "",
+    "startup_dialogs": ["Is this a project you created or one you trust", "Yes, I trust this folder",
+                        "New MCP server found"],
+    "paste_placeholder": r"\[Pasted text #\d+",
 }
 
 PRESETS = {
@@ -307,6 +317,30 @@ def interactive_launch(conf, profile, agent=None):
     prefix = "env " + " ".join(shlex.quote(f"{k}={v}") for k, v in variables.items()) if variables else ""
     extra = shlex.join(extra_args(profile, agent=agent))
     return " ".join(filter(None, [prefix, fill(template, values), shlex.join(mcp_args(conf, profile)), extra]))
+
+
+def interactive_argv(conf, profile, agent, session=None, resume=False):
+    """(argv, env) that start a supervised instance: the launch command of interactive_launch as an argument list
+    without the env prefix, then the session arguments: the resume template with session when resume is set,
+    otherwise interactive.session_flag and session when the profile preassigns one. env is the profile's env and
+    interactive.env, which the caller applies to its own process, never to a command line."""
+    interactive = profile.get("interactive") or {}
+    template = conf.section("instances").get("launch") or interactive.get("launch") or profile.get("command") or ""
+    values = {"command": profile.get("command") or "", "permission_mode": profile.get("permission_mode") or "",
+              "agent": shlex.quote(agent)}
+    template = EMPTY_OPTION.sub(lambda m: "" if m.group(1) in values and not values[m.group(1)] else m.group(0), template)
+    argv = shlex.split(fill(template, values)) + mcp_args(conf, profile) + extra_args(profile, agent=agent)
+    if not argv:
+        raise ProfileError(f"profile {profile.get('name')} has no launch command")
+    if session and resume:
+        template = interactive.get("resume") or ""
+        if not template:
+            raise ProfileError(f"profile {profile.get('name')} cannot resume a session (no interactive.resume)")
+        argv = shlex.split(fill(template, {"launch": shlex.join(argv), "session": shlex.quote(session)}))
+    elif session and interactive.get("session_flag") and profile.get("session") == "preassign":
+        argv += [interactive["session_flag"], session]
+    variables = {**env(profile), **{k: str(v) for k, v in (interactive.get("env") or {}).items()}}
+    return argv, variables
 
 
 def stall_patterns(conf, profile_name=None):

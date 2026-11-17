@@ -100,7 +100,7 @@ def script(name):
 
 def registered_profile(conf, agent):
     from . import profiles
-    return agent.get("provider") or profiles.default_name(conf)
+    return agent.get("provider") or agent.get("profile") or profiles.default_name(conf)
 
 
 def launched(conf, agent):
@@ -171,9 +171,17 @@ def reset(conf, agent, kind):
 
 def relaunch(conf, agent, profile):
     """Restart the agent's pane onto another profile, resuming its session, and record the profile it now runs."""
-    result = run_script(conf, "instance-restart.sh", [agent["pane"]], agent, profile=profile)
-    if result.returncode != 0:
-        return False, (result.stderr or result.stdout).strip()
+    if agent.get("managed"):
+        from . import supervisor
+        ok, detail = supervisor.relaunch(conf, agent, profile)
+        if not ok:
+            return False, detail
+        output = detail
+    else:
+        result = run_script(conf, "instance-restart.sh", [agent["pane"]], agent, profile=profile)
+        if result.returncode != 0:
+            return False, (result.stderr or result.stdout).strip()
+        output = result.stdout.strip()
     registered = registered_profile(conf, agent)
     state = runtime(conf)
     entry = state.setdefault(agent["name"], {})
@@ -183,7 +191,7 @@ def relaunch(conf, agent, profile):
         entry["launched"] = profile
     save_runtime(conf, state)
     where = f"back onto its profile {profile}" if profile == registered else f"onto profile {profile}"
-    return True, f"{where}: {result.stdout.strip()}"
+    return True, f"{where}: {output}"
 
 
 def assign_and_send(conf, agent, task):
@@ -255,6 +263,7 @@ def tick(conf, assign=True):
     with locked(conf):
         from . import gateway
         from . import pools
+        recorded.extend(supervise(conf))
         registered = ag.agents(conf)
         pool_names = {a["name"]: pools.pool_of(conf, a.get("provider")) for a in registered}
         for pool in set(filter(None, pool_names.values())):
@@ -292,7 +301,24 @@ def tick(conf, assign=True):
                 if state.get(name, {}).get("thrashing") != task_id:
                     state.setdefault(name, {}).update({"thrashing": task_id, "nudged": task_id})
                     save_runtime(conf, state)
-                    recorded.append(event(conf, "stalled", name, task_id, f"thrashing: the pane shows {info['stall']!r}; not nudged"))
+                    if agent.get("managed"):
+                        from . import supervisor
+                        try:
+                            ok, detail = supervisor.thrashing_restart(conf, agent, task_id)
+                        except Exception as error:
+                            ok, detail = False, str(error)
+                        recorded.append(event(conf, "restarted" if ok else "error", name, task_id, detail))
+                    else:
+                        recorded.append(event(conf, "stalled", name, task_id, f"thrashing: the pane shows {info['stall']!r}; not nudged"))
+            elif info["state"] in ("blocked", "failed", "waiting") and info["task"]:
+                kind = f"{info['state']}:{info.get('waiting') or ''}"
+                state = runtime(conf)
+                if state.get(name, {}).get("attention") != f"{task_id}:{kind}":
+                    state.setdefault(name, {})["attention"] = f"{task_id}:{kind}"
+                    save_runtime(conf, state)
+                    detail = (f"waiting for {info['waiting']}" if info["state"] == "waiting"
+                              else f"the agent is {info['state']}; theseus agents ls")
+                    recorded.append(event(conf, "stalled", name, task_id, detail))
             if info.get("busy") and info["state"] in ("working", "busy"):
                 gateway.observe(conf, agent, info)
             samples.append((name, info["state"], info["task"]))
@@ -355,6 +381,57 @@ def tick(conf, assign=True):
     return recorded
 
 
+def supervise(conf):
+    """For a project whose agents theseus supervises: reconcile them (never waiting for a slow start), refresh their
+    session ids and send the restart prompt an agent restarted fresh with a task is owed. Returns the events."""
+    from . import supervisor
+    if not supervisor.managed(conf):
+        return []
+    before = events(conf, 1)
+    start = before[-1]["id"] if before else 0
+    try:
+        supervisor.reconcile(conf)
+        supervisor.refresh_sessions(conf)
+    except Exception as error:
+        event(conf, "error", None, None, f"supervisor: {error}")
+    state = runtime(conf)
+    for name, entry in list(state.items()):
+        task_id = entry.get("restart_prompt") if isinstance(entry, dict) else None
+        if not task_id:
+            continue
+        rec = supervisor.record(conf, name)
+        if not rec or rec.get("phase") != "ready":
+            continue
+        task = t.Queue(conf).index().get(task_id)
+        entry.pop("restart_prompt", None)
+        save_runtime(conf, state)
+        if not task or task.get("status") != "in_progress":
+            continue
+        from . import gateway
+        ok, detail = ag.send_verified(conf, ag.entry(rec), gateway.restart_prompt(conf, task, "a restart on a fresh session"),
+                                      task_id)
+        event(conf, "nudged" if ok else "error", name, task_id,
+              "restart prompt after a fresh restart" + ("" if ok else f" not submitted: {detail}"))
+    return events(conf, after_id=start)
+
+
+def wake_times(conf, now=None):
+    """Epochs strictly after now when something in this project becomes due: gateway resends and supervised agent
+    restarts after their backoff."""
+    from . import supervisor
+    now = time.time() if now is None else now
+    found = []
+    with store.for_project(conf) as conn:
+        found += [row["next_epoch"] for row in conn.execute(
+            "SELECT next_epoch FROM gateway_retries WHERE project = ? AND phase = 'waiting' AND next_epoch IS NOT NULL",
+            (conf.name,))]
+    try:
+        found += supervisor.wake_times(conf, now)
+    except Exception:
+        pass
+    return sorted(epoch for epoch in found if epoch > now)
+
+
 def housekeeping():
     """The store's daily maintenance and backup; a failure is recorded in the store and never stops the queue."""
     try:
@@ -373,7 +450,7 @@ def run(conf, interval=30, once=False):
             sys.stdout.flush()
         if once:
             return
-        time.sleep(interval)
+        time.sleep(next_sleep(conf, interval, time.time()))
 
 
 def still_open(conf, record):
@@ -384,13 +461,26 @@ def still_open(conf, record):
     return bool(task) and task.get("status") == "verification"
 
 
-def wait(conf, timeout=10800, interval=30, drive=True):
+WAKE_SLACK = 0.5
+
+
+def next_sleep(conf, interval, now):
+    """Seconds until the next tick: the interval, or less when a gateway resend or an agent restart falls due
+    sooner (plus a little slack so the tick finds it due)."""
+    pending = wake_times(conf, now)
+    if pending:
+        return max(0.0, min(float(interval), pending[0] - now + WAKE_SLACK))
+    return float(interval)
+
+
+def wait(conf, timeout=10800, interval=30, drive=True, clock=time.time, sleep=time.sleep):
     """Block until an event that needs the coordinator appears after the call started; print it and return 0.
-    With drive, also run ticks meanwhile so the queue makes progress without a separate runner."""
+    With drive, also run ticks meanwhile so the queue makes progress without a separate runner; it sleeps until the
+    next interval or the earliest pending gateway resend or agent restart, whichever comes first."""
     latest = events(conf, 1)
     start = latest[-1]["id"] if latest else 0
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = clock() + timeout
+    while clock() < deadline:
         if drive:
             tick(conf)
         new = events(conf, after_id=start)
@@ -399,7 +489,8 @@ def wait(conf, timeout=10800, interval=30, drive=True):
             for record in new:
                 print(f"{record['time']} {record['kind']:<10} {record['agent'] or '-':<18} {record['task'] or '-'} {record['detail']}")
             return 0
-        time.sleep(interval)
+        now = clock()
+        sleep(min(next_sleep(conf, interval, now) if drive else float(interval), max(0.0, deadline - now)))
     print(f"queue wait: nothing needed the coordinator within {timeout}s")
     return 1
 

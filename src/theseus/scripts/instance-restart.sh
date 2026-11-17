@@ -15,6 +15,7 @@ sessions=${THESEUS_AGENT_SESSIONS:-$HOME/.claude/sessions}
 launch=${THESEUS_AGENT_LAUNCH:-claude}
 resume_template=${THESEUS_RESUME_TEMPLATE:-"{launch} --resume {session}"}
 missing=${THESEUS_RESUME_MISSING-No conversation found with session ID}
+[[ "$pane" != =*--*: ]] || { echo "$pane is a supervised agent; theseus agents restart NAME restarts it" >&2; exit 2; }
 [[ -n "$sessions" && -d "$sessions" ]] || { echo "$pane: the agent profile records no sessions; restart is unsupported" >&2; exit 1; }
 shell_pid=$(tmux display -p -t "$pane" '#{pane_pid}') || { echo "$pane: no such pane" >&2; exit 1; }
 agent() { for pid in $(pgrep -P "$shell_pid"); do [[ -f "$sessions/$pid.json" ]] && { echo "$pid"; return; }; done; }

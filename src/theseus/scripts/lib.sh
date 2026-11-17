@@ -34,8 +34,21 @@ worker_alive() {
     (( start <= recorded + 2 && start >= recorded - 120 ))
 }
 
+# tmux_at PANE ARGS...: tmux for the server PANE lives on. A supervised agent's address (=project--agent:) is on the
+# private server named by THESEUS_TMUX_FLAG and THESEUS_TMUX_SOCKET, always passed explicitly; any other pane is on
+# the user's own server, called exactly as before.
+tmux_at() {
+    local pane=$1
+    shift
+    if [[ "$pane" == =*--*: ]]; then
+        env -u TMUX -u TMUX_PANE tmux "${THESEUS_TMUX_FLAG:?run through the theseus CLI}" "${THESEUS_TMUX_SOCKET:?}" "$@"
+    else
+        tmux "$@"
+    fi
+}
+
 # pane_busy PANE: true while the agent in the tmux pane is working (its status line shows the busy pattern).
 pane_busy() {
     [[ -n "${THESEUS_BUSY_PATTERN:-}" ]] || return 1
-    tmux capture-pane -p -t "$1" 2>/dev/null | tail -3 | grep -qF -- "$THESEUS_BUSY_PATTERN"
+    tmux_at "$1" capture-pane -p -t "$1" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -3 | grep -qF -- "$THESEUS_BUSY_PATTERN"
 }
