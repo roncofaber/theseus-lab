@@ -240,7 +240,7 @@ Every theseus feature is driven by profile keys, never by a hard-coded agent. Th
 | Fresh-context recovery and the restart prompt | `clear` (the restart prompt itself needs nothing) | the restart prompt is sent without clearing the context |
 | Context reset between tasks | `compact`, `clear` | none |
 | Supervised agents: session ids, busy and waiting from the CLI | `session_flag`, `status_command`, `sessions_dir` | readiness and busy come from the screen (`ready_pattern`); a restart resumes only with `resume` |
-| Supervised stop and migrate | `exit` | the agent is stopped with a signal |
+| Supervised stop and migrate | `exit` | the agent is stopped with a signal; `theseus agents migrate` skips it |
 | Context use in the console | `sessions_dir` and the transcript format, else `context_pattern` | no context column |
 | Capability, task profiles, pools, queue, merge and verification | nothing | |
 

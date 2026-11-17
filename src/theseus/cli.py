@@ -698,9 +698,10 @@ def restart_agents(conf, names, fresh, with_task, prompt=None):
             supervisor.update(conf, name, desired="up")
             if (supervisor.record(conf, name) or {}).get("phase") == "failed":
                 supervisor.update(conf, name, phase=None)
-            if fresh and task:
-                workqueue.owe_prompt(conf, name, task["id"], "a fresh restart", prompt)
+            before = (supervisor.last_run(conf, name) or {}).get("gen")
             ok, detail = supervisor.restart(conf, name, fresh=fresh)
+            if fresh and task and (supervisor.last_run(conf, name) or {}).get("gen") != before:
+                workqueue.owe_prompt(conf, name, task["id"], "a fresh restart", prompt)
             if ok and fresh and task:
                 status, sent = workqueue.deliver_owed(conf, agents.entry(supervisor.record(conf, name)))
                 detail += (f"; restart prompt for {task['id']} {sent}" if status == "sent" else

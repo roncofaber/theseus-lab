@@ -305,6 +305,7 @@ def clear_input(server, pane, key, input_pattern, attempts=12):
 
 _BATCH = contextvars.ContextVar("theseus_send_batch", default=None)
 ENTER_PAUSE = 0.3
+DEFERRED = "typed; verifying"
 
 
 class Batch:
@@ -313,10 +314,16 @@ class Batch:
 
     def __init__(self, budget):
         self.items = []
-        self.deadline = time.monotonic() + max(0.0, float(budget))
+        self.budget = max(0.0, float(budget))
+        self.deadline = None
+
+    def start(self):
+        """Start the budget: when the tick turns to verifying, not while it still reconciles, resets or relaunches."""
+        if self.deadline is None:
+            self.deadline = time.monotonic() + self.budget
 
     def remaining(self):
-        return max(0.0, self.deadline - time.monotonic())
+        return self.budget if self.deadline is None else max(0.0, self.deadline - time.monotonic())
 
     def agents(self):
         return {item["agent"] for item in self.items}
@@ -426,7 +433,7 @@ def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, 
                "kind": kind, "enters": 1, "typed": now, "deadline": now + ctx["timeout"], "record": record, **extra}
     if not error and current is not None:
         current.items.append({**pending, "ctx": ctx, "entry": agent, "enter_at": time.monotonic() + ENTER_PAUSE})
-        return True, "typed; verifying"
+        return True, DEFERRED
     if error:
         result, detail = "failed", error
     else:

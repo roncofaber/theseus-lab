@@ -295,6 +295,7 @@ def tick(conf, assign=True):
                 pools.sync(conf, pool, held)
             waiting_on_pool = set()
             for agent in registered:
+                press_enter(sends, sends.items, wait=False)
                 info = ag.state(conf, agent)
                 name, task_id = agent["name"], info["task"]
                 if info["state"] == "delivered":
@@ -425,6 +426,7 @@ def supervise(conf):
 
 
 OWED_WAKE = 5.0
+OWED_WAKE_FOR = 900
 SEND_WORKERS = 16
 
 
@@ -483,7 +485,7 @@ def deliver_owed(conf, agent):
     reason = entry.get("reason") or "a restart"
     text = entry.get("text") or gateway.restart_prompt(conf, task, reason)
     ok, detail = ag.send_verified(conf, agent, text, task["id"], kind="prompt", reason=reason)
-    if ok and ag.batch() is not None:
+    if ok and detail == ag.DEFERRED:
         return "typed", detail
     if ok:
         prompt_confirmed(conf, name, task["id"], reason)
@@ -494,9 +496,6 @@ def deliver_owed(conf, agent):
 
 def prompt_confirmed(conf, name, task_id, reason):
     drop_owed(conf, name)
-    state = runtime(conf)
-    state.setdefault(name, {})["nudged"] = None
-    save_runtime(conf, state)
     return event(conf, "nudged", name, task_id, f"restart prompt after {reason}")
 
 
@@ -509,6 +508,7 @@ def prompt_failed(conf, name, task_id, detail):
     if not isinstance(entry, dict):
         return []
     entry["attempts"] = int(entry.get("attempts") or 0) + 1
+    entry["tried"] = time.time()
     limit = gateway.settings(conf)["attempts"]
     if entry["attempts"] < limit:
         save_runtime(conf, state)
@@ -520,10 +520,17 @@ def prompt_failed(conf, name, task_id, detail):
 
 
 def try_owed(conf, agent, info):
-    """Send the owed restart prompt once the agent is ready, idle and not still verifying another send."""
+    """Send the owed restart prompt once the agent is ready, idle and not still verifying another send. After an
+    unconfirmed try, the agent seen busy or its worktree changed counts as the prompt received: nothing else was typed
+    into it."""
     if agent.get("managed") and agent.get("phase") != "ready":
         return []
-    if info["state"] in ("offline", "starting", "blocked", "failed") or info.get("busy"):
+    if info["state"] in ("offline", "starting", "blocked", "failed"):
+        return []
+    entry = owed(conf, agent["name"]) or {}
+    if entry.get("attempts") and (info.get("busy") or (info.get("lastChange") or 0) > (entry.get("tried") or 0)):
+        return [prompt_confirmed(conf, agent["name"], entry["task"], entry.get("reason") or "a restart")]
+    if info.get("busy"):
         return []
     start = last_event_id(conf)
     deliver_owed(conf, agent)
@@ -587,9 +594,10 @@ def poll_send(item, sends):
         time.sleep(min(ctx["poll"], left))
 
 
-def press_enter(sends, items):
-    """Press Enter in every pane typed into this round, after one shared pause, and start their verification windows."""
-    due = [item for item in items if item.get("enter_at")]
+def press_enter(sends, items, wait=True):
+    """Press Enter in every pane typed into, after one shared pause (wait) or only where the pause is over, and start
+    their verification windows."""
+    due = [item for item in items if item.get("enter_at") and (wait or item["enter_at"] <= time.monotonic())]
     if not due:
         return
     time.sleep(max(0.0, max(item["enter_at"] for item in due) - time.monotonic()))
@@ -609,6 +617,7 @@ def verify_sends(conf, sends):
     are carried to the next tick. Returns the events."""
     from concurrent.futures import ThreadPoolExecutor
     found = []
+    sends.start()
     while True:
         waiting = [item for item in sends.items if "result" not in item]
         if not waiting:
@@ -661,7 +670,11 @@ def wake_times(conf, now=None):
     except Exception:
         pass
     for entry in runtime(conf).values():
-        if isinstance(entry, dict) and (entry.get("verify") or entry.get("restart_prompt")):
+        if not isinstance(entry, dict):
+            continue
+        prompt = entry.get("restart_prompt")
+        fresh = isinstance(prompt, dict) and now - float(prompt.get("since") or 0) < OWED_WAKE_FOR
+        if entry.get("verify") or fresh:
             found.append(now + OWED_WAKE)
     return sorted(epoch for epoch in found if epoch > now)
 
