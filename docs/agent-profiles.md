@@ -229,7 +229,7 @@ A state is a dict with:
 Adding a CLI means writing that module in its own record format, adding its name to `ADAPTERS`, and setting `transcript = "<name>"` in the preset's `interactive` table. The console redacts API keys, key hashes and email addresses in everything it shows from a transcript or the scrollback.
 ## What depends on the preset
 
-Every theseus feature is driven by profile keys, never by a hard-coded agent. The `claude-code` preset sets them all; the other presets set only `launch`, `compact`, `clear` and `messaging = false`, and degrade as follows until you add the missing keys to their `[workers.<name>.interactive]`:
+Every theseus feature is driven by profile keys, never by a hard-coded agent. The `claude-code` preset sets them all; the other presets set only `launch`, `compact`, `clear`, `transcript = "pane-history"` and `messaging = false`, and degrade as follows until you add the missing keys to their `[workers.<name>.interactive]`:
 
 | Feature | Needs | Without it |
 | --- | --- | --- |
@@ -241,7 +241,7 @@ Every theseus feature is driven by profile keys, never by a hard-coded agent. Th
 | Context reset between tasks | `compact`, `clear` | none |
 | Supervised agents: session ids, busy and waiting from the CLI | `session_flag`, `status_command`, `sessions_dir` | readiness and busy come from the screen (`ready_pattern`); a restart resumes only with `resume` |
 | Supervised stop and migrate | `exit` | the agent is stopped with a signal; `theseus agents migrate` skips it |
-| Context use in the console | `sessions_dir` and the transcript format, else `context_pattern` | no context column |
+| Context use, gateway error classification and the Conversation tab | `transcript` (an adapter, above) with `sessions_dir`, else `context_pattern` | context from the pane hint or none; errors classified from the screen; the Conversation tab shows the pane scrollback (`pane-history`) |
 | Capability, task profiles, pools, queue, merge and verification | nothing | |
 
 ## How delivery is detected

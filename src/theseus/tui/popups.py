@@ -303,7 +303,8 @@ class AgentScreen(Dialog):
         yield Button("Enter", id="key-enter", compact=True)
         yield Button("Escape", id="key-escape", compact=True)
         yield Button("Interrupt", id="interrupt", variant="error", compact=True)
-        yield Button("/compact", id="compact", compact=True)
+        if self.action_of("compact") is not None:
+            yield Button("Compact", id="compact", compact=True)
         if self.action_of("attach") is not None:
             yield Button("Attach (Enter)", id="attach", variant="primary", compact=True)
         if self.actions.jump is not None:
@@ -648,7 +649,7 @@ class AgentScreen(Dialog):
 
     @on(Button.Pressed, "#compact")
     def compact(self):
-        self.in_thread(self.actions.send, "/compact")
+        self.in_thread(self.actions.compact)
 
     @on(Button.Pressed, "#interrupt")
     def interrupt(self):

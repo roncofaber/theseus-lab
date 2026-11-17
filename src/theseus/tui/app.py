@@ -781,8 +781,9 @@ class TopApp(App):
                     ("Mouse", list(MOUSE_HELP)),
                     ("Agent popup", popups.binding_rows(popups.AgentScreen.BINDINGS,
                                                         lambda key: display(Binding(key, "")))
-                     + [("buttons", "Type into pane, Enter, Escape, Interrupt (asks first), /compact, Attach, Open tmux "
-                                    "pane, Restart, Stop, Start (supervised agents; each asks first)"),
+                     + [("buttons", "Type into pane, Enter, Escape, Interrupt (asks first), Compact (the profile's compact "
+                                    "command), Attach, Open tmux pane, Restart, Stop, Start (supervised agents; each asks "
+                                    "first)"),
                         ("tabs", "Live: the pane mirror and a send line; Conversation (c): the session transcript, "
                                  "tool calls folded to one line (click or Enter expands); Diff: the task worktree against its base, "
                                  "refreshed every 5 s while shown; Task: the record and its handoff; Events: this agent's"),
@@ -885,6 +886,7 @@ class TopApp(App):
             events=lambda: R.agent_events(state["events"], name),
             attach=(lambda: self.attach_fn(root, name)) if supervised else None,
             fit=self.fit_fn(root, name) if supervised else None,
+            compact=lambda: cli("instance", "compact", name),
             restart=(lambda: cli("agents", "restart", name)) if supervised else None,
             stop=(lambda: cli("agents", "down", name)) if supervised else None,
             start=(lambda: cli("agents", "up", name)) if supervised else None)
