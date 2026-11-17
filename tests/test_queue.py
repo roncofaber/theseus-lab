@@ -165,6 +165,30 @@ class QueueTests(Sandbox):
         self.assertEqual(1, self.theseus("queue", "log").stdout.count("stalled"))
         self.assertIn("thrashing", self.theseus("top", "--once").stdout)
 
+    def test_a_task_profile_limits_which_agents_take_it(self):
+        self.write("theseus.local.toml", '[workers.other-cli]\npreset = "claude-code"\ncommand = "other-cli"\n'
+                   '[workers.with-mcp]\npreset = "claude-code"\nmcp_servers = ["theseus"]\n')
+        self.assertNotEqual(0, self.theseus("tasks", "add", "bad-profile", "--role", "research", "--owned",
+                                            "docs/investigations/bad-profile.md", "--objective", "Do it.", "--contract",
+                                            "All variants.", "--accept", "Done.", "--profile", "nope", check=False).returncode)
+        self.add("other-task")
+        self.theseus("tasks", "profile", "other-task", "other-cli")
+        self.git("commit", "-q", "-am", "profile")
+        self.assertEqual("other-cli", json.loads(self.theseus("tasks", "show", "other-task").stdout)["profile"])
+        self.assertNotIn("assigned", self.theseus("queue", "tick").stdout, "a different command is never relaunched onto")
+        self.assertIn("needs profile other-cli", " ".join(self.theseus("top", "--once").stdout.split()))
+        from theseus import config as cfg, profiles
+        conf = cfg.load(root=self.project)
+        self.assertTrue(profiles.relaunch_compatible(conf, "claude-code", "with-mcp"))
+        self.assertFalse(profiles.relaunch_compatible(conf, "claude-code", "other-cli"))
+        self.theseus("agents", "add", "worker-b", "%2", "--profile", "other-cli")
+        out = self.theseus("queue", "tick").stdout
+        self.assertRegex(out, r"assigned\s+worker-b\s+other-task")
+        self.assertNotIn("relaunched", out)
+        self.theseus("tasks", "release", "other-task", "--reason", "test")
+        self.theseus("tasks", "profile", "other-task")
+        self.assertNotIn("profile", json.loads(self.theseus("tasks", "show", "other-task").stdout))
+
     def test_an_interim_handoff_while_busy_is_not_a_delivery(self):
         self.add("busy-task")
         self.theseus("queue", "tick")

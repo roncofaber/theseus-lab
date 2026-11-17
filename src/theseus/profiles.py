@@ -282,6 +282,26 @@ def instance_env(conf, profile_name=None, agent=None):
     }
 
 
+RELAUNCH_FREE = ("name", "label", "notes", "verified", "capacity", "mcp_servers", "env")
+
+
+def relaunch_compatible(conf, current, target):
+    """Whether an agent running profile current can switch to profile target with a relaunch in the same pane: the two
+    may differ only in MCP servers and environment (env, interactive.env); command, pool, model and every template
+    must match."""
+    def launch_key(name):
+        profile = resolve(conf, name)
+        for key in RELAUNCH_FREE:
+            profile.pop(key, None)
+        if isinstance(profile.get("interactive"), dict):
+            profile["interactive"].pop("env", None)
+        return profile
+    try:
+        return current == target or launch_key(current) == launch_key(target)
+    except ProfileError:
+        return False
+
+
 def detected():
     """Agent CLIs found on PATH, with the presets that use them."""
     found = []

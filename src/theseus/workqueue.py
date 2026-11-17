@@ -8,6 +8,10 @@ A tick looks at every registered agent and acts on its state:
   `stalled` event at once and no nudge, since typing more into that context only refills it;
 - free (enabled, no open task): if a ready task fits its room, the agent is reset (a full /clear when it carries dirty
   context into clean work, a /compact otherwise), the task is assigned on a fresh worktree, and its message is sent.
+A task with a "profile" goes only to agents registered with that profile, or to agents whose profile differs from it only in
+MCP servers or environment: those are relaunched onto it in their pane first (session resumed, a `relaunched` event),
+and back onto their registered profile before their next task that does not need it. The profile an agent currently
+runs is kept in the runtime state (`launched`).
 Tasks with "hold": true are never assigned by the queue; `theseus queue pause` stops all assignment. Events go to the
 host store (theseus.store); `theseus queue wait` blocks until one needs the coordinator. Each tick also writes one
 state sample per registered agent and, at most once a day across the host, runs the store's maintenance and backup.
@@ -88,16 +92,30 @@ def script(name):
     return str(resources.files("theseus") / "scripts" / name)
 
 
-def run_script(conf, name, args, agent=None):
+def registered_profile(conf, agent):
+    from . import profiles
+    return agent.get("provider") or profiles.default_name(conf)
+
+
+def launched(conf, agent):
+    """The profile the agent's pane currently runs: its registered profile unless the queue relaunched it."""
+    return runtime(conf).get(agent["name"], {}).get("launched") or registered_profile(conf, agent)
+
+
+def run_script(conf, name, args, agent=None, profile=None):
     from . import profiles
     env = {**conf.environment(), **os.environ}
     if agent is not None:
-        env.update(profiles.instance_env(conf, agent.get("provider"), agent["name"]))
+        env.update(profiles.instance_env(conf, profile or launched(conf, agent), agent["name"]))
     return subprocess.run(["bash", script(name), *args], cwd=conf.root, env=env, capture_output=True, text=True)
 
 
 def fits(conf, agent, task, info):
     """Whether this agent may take this task now, and the reset it needs first (None, 'compact' or 'clear')."""
+    from . import profiles
+    required = task.get("profile")
+    if required and not profiles.relaunch_compatible(conf, registered_profile(conf, agent), required):
+        return False, None
     allowed = agent.get("rooms")
     room = task.get("room")
     if allowed and room and room not in allowed:
@@ -143,6 +161,23 @@ def reset(conf, agent, kind):
     state.setdefault(agent["name"], {}).update({"needs_reset": False, "last_task": None})
     save_runtime(conf, state)
     return True, detail
+
+
+def relaunch(conf, agent, profile):
+    """Restart the agent's pane onto another profile, resuming its session, and record the profile it now runs."""
+    result = run_script(conf, "instance-restart.sh", [agent["pane"]], agent, profile=profile)
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout).strip()
+    registered = registered_profile(conf, agent)
+    state = runtime(conf)
+    entry = state.setdefault(agent["name"], {})
+    if profile == registered:
+        entry.pop("launched", None)
+    else:
+        entry["launched"] = profile
+    save_runtime(conf, state)
+    where = f"back onto its profile {profile}" if profile == registered else f"onto profile {profile}"
+    return True, f"{where}: {result.stdout.strip()}"
 
 
 def assign_and_send(conf, agent, task):
@@ -240,6 +275,13 @@ def tick(conf, assign=True):
             claimed.add(task["id"])
             ok = False
             try:
+                target = task.get("profile") or registered_profile(conf, agent)
+                if target != launched(conf, agent):
+                    ok, detail = relaunch(conf, agent, target)
+                    if not ok:
+                        recorded.append(event(conf, "error", name, task["id"], f"relaunch onto {target} failed: {detail}"))
+                        continue
+                    recorded.append(event(conf, "relaunched", name, task["id"], detail))
                 if needed:
                     ok, detail = reset(conf, agent, needed)
                     if not ok:

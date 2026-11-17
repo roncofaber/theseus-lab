@@ -66,9 +66,10 @@ Take the first action whose trigger holds, then loop. Occupied slots are never a
 
 ## Writing task records
 
-`theseus tasks add ID --role R --owned PATHS... --objective "..." --contract "..." --accept ITEMS... [--depends IDS] [--milestone M]`.
+`theseus tasks add ID --role R --owned PATHS... --objective "..." --contract "..." --accept ITEMS... [--depends IDS] [--milestone M] [--profile P]`.
 
 - Size for one worker session: one subsystem boundary, one report under `docs/investigations/`.
+- `--profile P` only when the task needs what that profile adds (an MCP server's session state); the queue relaunches a compatible agent onto it and back afterwards.
 - Acceptance items are observable: a focused command that passes, a named variation covered, an explicit unsupported result. At most six per record, 6 KB per record.
 - Never scope a task as a scenario slice; the scenario is one acceptance fixture of a general contract.
 - A change to an interface owns its consumers: `theseus tasks consumers ID` lists files outside `ownedPaths` that use names declared inside.

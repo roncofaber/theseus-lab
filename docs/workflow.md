@@ -53,7 +53,7 @@ theseus agents add worker-1 %3 --profile claude-code
 
 - When an agent's task is done, the task moves to review. A task counts as done when the agent is idle, its handoff states a result, and the handoff has stopped changing.
 - Before an agent takes its next task, its context is reset. Normally the queue compacts it; when it moves from reading original code to clean-room work, the queue clears it completely.
-- A free agent gets the next ready task that it is allowed to work on.
+- A free agent gets the next ready task that it is allowed to work on. A task that requires a profile (`theseus tasks add --profile NAME`, `theseus tasks profile ID NAME`) goes only to agents of that profile, or to agents the queue can relaunch onto it because their profiles differ only in MCP servers or environment (see [Agent profiles](agent-profiles.md#per-task-profiles)).
 - An agent that sits idle without a handoff gets one reminder, then is reported as stalled.
 - An agent whose pane shows one of its profile's stall patterns (Claude Code: "Autocompact is thrashing") is shown as `thrashing` and reported as stalled at once, without a reminder: more input only refills a context that no longer fits. Restart or clear it (`theseus instance restart PANE`, `theseus instance compact PANE --clear`) or split the task.
 

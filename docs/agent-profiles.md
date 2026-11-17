@@ -54,6 +54,7 @@ Use a variant per task with `theseus dispatch TASK --provider cheap-research`, o
 | `env` | Extra environment for the run; `{model}` is substituted |
 | `retry` | Resume automatically after a retryable gateway error (Claude JSON output with status 429, 5xx or 529) |
 | `capacity` | Concurrent active tasks under this profile |
+| `mcp_servers` | MCP servers the agent starts with, and only those (`--strict-mcp-config --mcp-config <data>/mcp/<profile>.json`, from `mcp_flags`); each is copied from your Claude Code configuration, and `theseus` is the theseus server. Unset: the client's own servers |
 | `pool` | A host-wide pool shared with other projects (see [Configuration](configuration.md#sharing-agents-between-projects)) |
 | `interactive.launch`, `interactive.resume` | How a persistent instance is started and resumed (`{launch}`, `{session}`) by `theseus instance restart`; the Claude Code presets launch `{command} --name {agent} --permission-mode {permission_mode}`, so a restarted agent keeps its name and permissions, and an option whose value is empty is left out |
 | `interactive.resume_missing` | Text the CLI prints when the session to resume no longer exists; `instance restart` then launches the agent fresh with the same launch line and says so |
@@ -90,6 +91,34 @@ env = { CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS = "10000" }
 ```
 
 The instance then starts as `env CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS=10000 claude-via-gateway --name worker-1 --permission-mode auto`. Restart running agents (`theseus instance restart PANE`) to apply a change.
+
+## Per-task profiles
+
+A task can require a profile: `theseus tasks add ID ... --profile NAME`, or `theseus tasks profile ID NAME` later (`theseus tasks profile ID` with no name clears it; no profile means any agent). The queue gives such a task only to:
+- an agent registered with that profile;
+- an agent whose registered profile differs from it only in `mcp_servers`, `env` or `interactive.env` (same command, pool, model and templates; `capacity` may differ). Before the task the queue restarts that agent's pane with the task profile's launch line, resuming its session, then compacts or clears it as usual, and records a `relaunched` event.
+
+The profile an agent currently runs is kept in the queue's runtime state, and the agent is switched back to its registered profile (another `relaunched` event) before its next task that does not require the special one. `theseus instance restart PANE` keeps whichever profile the agent currently runs. The task's assignment still records the agent's registered profile, so capacity counts it there. When no registered agent can take a task, the dashboard's waiting list says `needs profile NAME`.
+
+### Example: an MCP server only for the tasks that need it
+
+Every MCP tool schema an agent loads costs context on each request, and on a gateway without tool search a large server can take a third of the window before the agent reads anything. Keep the default profile lean and add a variant with the heavy server:
+
+```toml
+[workers.gateway]
+preset = "claude-code"
+command = "claude-via-gateway"
+mcp_servers = []                        # no MCP servers: the lean default
+pool = "gateway"
+
+[workers.gateway-rea]
+preset = "claude-code"
+command = "claude-via-gateway"
+mcp_servers = ["rea"]
+pool = "gateway"
+```
+
+Register agents with the lean profile and mark only the tasks that need REA's session state, such as long interactive decompilation work, with `--profile gateway-rea`. Everything else uses REA through its skill and command line (`rea <command>`, `theseus re rea ...`) and the indexed corpus (`theseus re show|callers|callees|find`), which cost no context until used.
 
 ## Adding an agent theseus does not know
 

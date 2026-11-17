@@ -168,7 +168,16 @@ def record_size(record):
     return len(json.dumps(record))
 
 
-def add(queue, task_id, role, owned, objective, contract, accept, depends=(), milestone=None, room=None, priority=0):
+def check_profile(queue, profile):
+    from . import profiles
+    try:
+        profiles.resolve(queue.conf, profile)
+    except profiles.ProfileError as error:
+        raise TaskError(str(error)) from error
+
+
+def add(queue, task_id, role, owned, objective, contract, accept, depends=(), milestone=None, room=None, priority=0,
+        profile=None):
     if not TASK_ID.fullmatch(task_id):
         raise TaskError(f"{task_id} is not a kebab-case task id")
     known = queue.index()
@@ -204,6 +213,9 @@ def add(queue, task_id, role, owned, objective, contract, accept, depends=(), mi
         if room not in ("clean", "dirty"):
             raise TaskError(f"room must be clean or dirty, not {room}")
         record["room"] = room
+    if profile:
+        check_profile(queue, profile)
+        record["profile"] = profile
     size = record_size(record)
     if size > TASK_RECORD_LIMIT:
         raise TaskError(f"record is {size} bytes; the limit is {TASK_RECORD_LIMIT}")
@@ -647,6 +659,20 @@ def set_priority(queue, task_id, priority):
         task.pop("priority", None)
     queue.save(document)
     return f"{task_id}: priority {int(priority)}"
+
+
+def set_profile(queue, task_id, profile):
+    """The agent profile a task needs (only its agents, or ones the queue can relaunch onto it, take it); empty: any."""
+    if profile:
+        check_profile(queue, profile)
+    document = queue.load()
+    task = queue.open_task(document, task_id)
+    if profile:
+        task["profile"] = profile
+    else:
+        task.pop("profile", None)
+    queue.save(document)
+    return f"{task_id}: {f'needs profile {profile}' if profile else 'any profile'}"
 
 
 def hold(queue, task_id, held):

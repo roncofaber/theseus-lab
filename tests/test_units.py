@@ -112,10 +112,10 @@ class InteractiveLaunchTests(Sandbox):
         self.scaffold()
         self.write("theseus.local.toml", '[workers.gateway]\npreset = "claude-code"\ncommand = "wrapped-claude"\n'
                    'model = "m1"\nmodel_flag = ""\npermission_mode = ""\nenv = { GW_MODEL = "{model}" }\n'
-                   '[workers.gateway.interactive]\nenv = { CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS = "10000", NOTE = "a b" }\n')
+                   '[workers.gateway.interactive]\nenv = { READ_LIMIT = "10000", NOTE = "a b" }\n')
         conf = cfg.load(root=self.project)
         env = profiles.instance_env(conf, "gateway", "it's-me")
-        self.assertEqual("env GW_MODEL=m1 CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS=10000 'NOTE=a b' wrapped-claude --name 'it'\"'\"'s-me'",
+        self.assertEqual("env GW_MODEL=m1 READ_LIMIT=10000 'NOTE=a b' wrapped-claude --name 'it'\"'\"'s-me'",
                          env["THESEUS_AGENT_LAUNCH"])
         self.assertEqual("{launch} --resume {session}", env["THESEUS_RESUME_TEMPLATE"])
         self.assertEqual("No conversation found with session ID", env["THESEUS_RESUME_MISSING"])

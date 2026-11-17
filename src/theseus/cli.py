@@ -29,10 +29,10 @@ def run_script(name, args, conf=None, pane=None):
     conf = conf or load()
     env = {**conf.environment(), **os.environ}
     if pane:
-        from . import agents, profiles
+        from . import agents, profiles, workqueue
         agent = next((a for a in agents.agents(conf) if a["pane"] == pane), None)
         if agent is not None:
-            env.update(profiles.instance_env(conf, agent.get("provider"), agent["name"]))
+            env.update(profiles.instance_env(conf, workqueue.launched(conf, agent), agent["name"]))
     return subprocess.run(["bash", script(name), *args], cwd=conf.root, env=env).returncode
 
 
@@ -128,7 +128,7 @@ def cmd_tasks(args):
     action = args.task_action
     if action == "add":
         emit(t.add(queue, args.id, args.role, args.owned, args.objective, args.contract, args.accept, args.depends, args.milestone,
-                   args.room, args.priority))
+                   args.room, args.priority, args.profile))
     elif action == "list":
         emit(t.list_tasks(queue, args.status, args.all, args.evidence))
     elif action == "ready":
@@ -151,6 +151,8 @@ def cmd_tasks(args):
         emit(t.note(queue, args.id, args.text))
     elif action == "priority":
         emit(t.set_priority(queue, args.id, args.value))
+    elif action == "profile":
+        emit(t.set_profile(queue, args.id, args.profile))
     elif action in ("hold", "release-hold"):
         emit(t.hold(queue, args.id, action == "hold"))
     elif action == "reopen":
@@ -605,6 +607,7 @@ def build_parser():
     p.add_argument("--milestone", help="milestone (default: the current one)")
     p.add_argument("--room", choices=("clean", "dirty"), help="clean-room separation (see [rooms] in theseus.toml)")
     p.add_argument("--priority", type=int, default=0, help="higher is assigned first among ready tasks (default 0)")
+    p.add_argument("--profile", help="agent profile the task needs (default: any); see theseus tasks profile")
     p = ts.add_parser("list", help="one line per task with readiness or blocking reasons")
     p.add_argument("--status", choices=("pending", "in_progress", "verification", "merged", "completed"))
     p.add_argument("--all", action="store_true", help="include archived tasks")
@@ -634,6 +637,10 @@ def build_parser():
     p = ts.add_parser("priority", help="set a task's priority (higher is assigned first; 0 removes it)")
     p.add_argument("id")
     p.add_argument("value", type=int)
+    p = ts.add_parser("profile", help="set the agent profile a task needs: agents registered with it take it, and agents whose "
+                                      "profile differs only in MCP servers or env are relaunched onto it first; no NAME: any")
+    p.add_argument("id")
+    p.add_argument("profile", nargs="?", default="")
     p = ts.add_parser("note", help="set the coordinator note carried in the task message")
     p.add_argument("id")
     p.add_argument("text")

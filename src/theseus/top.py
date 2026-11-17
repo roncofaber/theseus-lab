@@ -327,6 +327,7 @@ def snapshot(conf, sample=False, host=None):
         "eligible": eligibility(conf, states), "pools": pool_states(conf),
         "queue": {k: [x["id"] for x in v] for k, v in summary.items()},
         "rooms": {x["id"]: x.get("room") for v in summary.values() for x in v},
+        "profiles": {x["id"]: x["profile"] for v in summary.values() for x in v if x.get("profile")},
         "blocked": {x["id"]: x["reasons"] for x in summary["blocked"]},
         "times": task_times(conf),
         "priorities": {x["id"]: int(x.get("priority") or 0) for x in t.Queue(conf).load().get("tasks", []) if x.get("priority")},
@@ -506,6 +507,8 @@ def waiting_reason(state, key, task_id):
         return "paused", "queue paused"
     allowed = state.get("eligible", {}).get(task_id, [])
     if not allowed:
+        if state.get("profiles", {}).get(task_id):
+            return "none", f"needs profile {state['profiles'][task_id]}"
         room = state["rooms"].get(task_id)
         return "none", f"no eligible agent{f' for the {room} room' if room else ''}"
     free = {a["name"] for a in state["agents"] if a["state"] == "free"}

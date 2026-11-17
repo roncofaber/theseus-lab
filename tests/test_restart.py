@@ -7,6 +7,7 @@ import signal
 import subprocess
 import time
 import unittest
+from pathlib import Path
 
 from helpers import Sandbox
 
@@ -117,6 +118,59 @@ class RestartTests(RestartHarness):
         typed = self.typed()
         self.assertEqual(["/exit", f"{self.bin / 'claude'} --name worker-x --permission-mode auto --resume first-session",
                           f"{self.bin / 'claude'} --name worker-x --permission-mode auto"], typed)
+
+
+class ProfileRelaunchTests(RestartHarness):
+    """A task that needs a profile differing only in MCP servers relaunches the agent onto it, and the next task without
+    one switches it back, through the real instance-restart.sh against the fake pane."""
+
+    def setUp(self):
+        super().setUp()
+        claude, sessions = self.bin / "claude", self.sessions
+        self.write("theseus.local.toml", f'[workers.claude-code]\ncommand = "{claude}"\n'
+                   f'[workers.claude-code.interactive]\nsessions_dir = "{sessions}"\n'
+                   f'[workers.lean-mcp]\npreset = "claude-code"\ncommand = "{claude}"\nmcp_servers = ["theseus"]\n'
+                   f'[workers.lean-mcp.interactive]\nsessions_dir = "{sessions}"\nenv = {{ EXAMPLE_FLAG = "1" }}\n')
+        self.env.update({"THESEUS_COMPACT_POLL": "0.01", "THESEUS_TYPE_POLL": "0.01"})
+        for key in ("THESEUS_AGENT_LAUNCH", "THESEUS_AGENT_SESSIONS"):
+            self.env.pop(key)
+        self.theseus("tasks", "milestone", "M1")
+        self.git("commit", "-q", "-am", "milestone")
+        self.theseus("agents", "add", "worker-x", "%7")
+
+    def add(self, task_id, *extra):
+        self.theseus("tasks", "add", task_id, "--role", "research", "--owned", f"docs/investigations/{task_id}.md",
+                     "--objective", "Do it.", "--contract", "All variants.", "--accept", "Done.", *extra)
+        self.git("commit", "-q", "-am", f"queue {task_id}")
+
+    def launched(self):
+        path = self.tmp / "data/queue/agents-state.json"
+        return json.loads(path.read_text()).get("worker-x", {}).get("launched") if path.exists() else None
+
+    def test_relaunch_onto_the_task_profile_and_back(self):
+        self.add("needs-mcp", "--profile", "lean-mcp")
+        self.add("plain-task")
+        first = self.wait_for_agent()
+        out = self.theseus("queue", "tick", timeout=180).stdout
+        self.assertRegex(out, r"relaunched\s+worker-x\s+needs-mcp onto profile lean-mcp")
+        self.assertRegex(out, r"assigned\s+worker-x\s+needs-mcp")
+        self.assertEqual("lean-mcp", self.launched())
+        resume = [line for line in self.typed() if "--resume" in line]
+        mcp = self.tmp / "data/mcp/lean-mcp.json"
+        self.assertEqual([f"env EXAMPLE_FLAG=1 {self.bin / 'claude'} --name worker-x --permission-mode auto "
+                          f"--strict-mcp-config --mcp-config {mcp} --resume first-session"], resume)
+        second = self.wait_for_agent(exclude=(first,))
+        record = json.loads(self.theseus("tasks", "show", "needs-mcp").stdout)
+        handoff = Path(record["execution"]["logDir"]) / "handoff.md"
+        handoff.write_text("Task: needs-mcp\nResult: delivered\n")
+        os.utime(handoff, (time.time() - 120, time.time() - 120))
+        out = self.theseus("queue", "tick", timeout=180).stdout
+        self.assertRegex(out, r"relaunched\s+worker-x\s+plain-task back onto its profile claude-code")
+        self.assertRegex(out, r"assigned\s+worker-x\s+plain-task")
+        self.assertIsNone(self.launched())
+        resume = [line for line in self.typed() if "--resume" in line]
+        self.assertEqual(f"{self.bin / 'claude'} --name worker-x --permission-mode auto --resume first-session", resume[-1])
+        self.wait_for_agent(exclude=(first, second))
 
 
 if __name__ == "__main__":
