@@ -439,7 +439,20 @@ def issues(state):
         found.append(f"{YELLOW}●{R} {verification['unverified']} code commits since the last full verification")
     free = [a for a in state["agents"] if a["state"] == "free"]
     if free and not state["queue"]["ready"]:
-        found.append(f"{YELLOW}●{R} {len(free)} free agent(s) and no ready task: write task records")
+        blocking_pool = next((p for p in state.get("pools", []) if p["claims"] and state["project"] not in p["claims"]), None)
+        full_pool = next((p for p in state.get("pools", []) if p["max"] and p["active"] >= p["max"]), None)
+        held = state["queue"].get("held") or []
+        if blocking_pool:
+            found.append(f"{DIM}●{R} {len(free)} free agent(s) wait: pool {blocking_pool['pool']} is claimed by "
+                         f"{', '.join(blocking_pool['claims'])}")
+        elif full_pool:
+            found.append(f"{DIM}●{R} {len(free)} free agent(s) wait: pool {full_pool['pool']} is full "
+                         f"({full_pool['active']}/{full_pool['max']})")
+        elif held:
+            found.append(f"{YELLOW}●{R} {len(free)} free agent(s); {len(held)} task(s) held: "
+                         f"`theseus tasks release-hold ID` to start one")
+        else:
+            found.append(f"{YELLOW}●{R} {len(free)} free agent(s) and no ready task: write task records")
     return found
 
 
@@ -654,7 +667,7 @@ def render(state, width=120, height=None, ui=None):
               f"{CYAN}merged {B}{len(queue['merged'])}{R} {DIM}·{R} {YELLOW}ready {B}{len(queue['ready'])}{R} {DIM}·{R} "
               f"{DIM}blocked {len(queue['blocked'])} · held {len(queue['held'])}{R}")
     # Fixed heights per terminal size, never per content, so rows do not jump between refreshes.
-    footer = 3
+    footer = 2
     if height is None:
         waiting_rows, events_rows = ROWS["waiting"], ROWS["events"]
     else:
@@ -703,11 +716,6 @@ def render(state, width=120, height=None, ui=None):
                     f"{weight}{cut(record['task'] or '-', 30):<30}{R} {DIM}{cut(detail, width - 75)}{R}")
     frame.fixed(rows[:events_rows], events_rows, "no events yet")
     frame.row()
-    keys = "q quit · p pause/resume queue · space freeze"
-    if state["agents"]:
-        keys += f" · 1-{min(len(state['agents']), 9)} jump to agent pane"
-    message = ui.get("message")
-    frame.row(f"{DIM}{keys}{R}" + (f"   {YELLOW}{message}{R}" if message else ""))
     frame.lines.append(f"{DIM}└{'─' * (width - 2)}┘{R}")
     return "\n".join(frame.lines)
 

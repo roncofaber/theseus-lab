@@ -157,6 +157,15 @@ class HostSnapshotTests(HostCase):
         self.assertEqual(1, found["merged"][-2])
         self.assertEqual(0, sum(found["errors"]))
 
+    def test_a_worktree_never_registers_as_a_project(self):
+        from theseus import config as cfg
+        conf = cfg.load(root=self.project)
+        worktree = self.tmp / "wt-of-alpha"
+        self.git("commit", "-q", "--allow-empty", "-m", "base", cwd=self.project)
+        self.git("worktree", "add", "-q", "--detach", str(worktree), cwd=self.project)
+        self.assertFalse(registry.record(cfg.Config(worktree, conf.raw), now=10 ** 9))
+        self.assertNotIn(str(worktree), [e["root"] for e in registry.entries()])
+
     def test_jump_refuses_outside_tmux(self):
         self.assertIn("tmux session", top.jump_to("%1"))
 

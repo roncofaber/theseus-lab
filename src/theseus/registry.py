@@ -30,7 +30,18 @@ def read(file):
 
 
 def alive(root):
-    return (Path(root) / CONFIG_NAME).is_file()
+    return (Path(root) / CONFIG_NAME).is_file() and canonical(root) == str(Path(root))
+
+
+def canonical(root):
+    """The main checkout of a Git worktree, so a worker's worktree never registers as a project of its own."""
+    import subprocess
+    result = subprocess.run(["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                            capture_output=True, text=True)
+    if result.returncode != 0 or not result.stdout.strip():
+        return str(Path(root))
+    common = Path(result.stdout.strip())
+    return str(common.parent if common.name == ".git" else Path(root))
 
 
 def entries():
@@ -52,7 +63,9 @@ def record(conf, now=None):
     try:
         now = time.time() if now is None else now
         file = path()
-        root = str(conf.root)
+        root = canonical(conf.root)
+        if root != str(conf.root):
+            return False
         previous = read(file).get(root)
         if previous and now - previous.get("last_seen", 0) < THROTTLE:
             return False
