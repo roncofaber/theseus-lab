@@ -7,13 +7,22 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Added
 
 - `theseus top` is now an interactive Textual dashboard over every project on the host: a Host tab (projects, pools, merged events) and one tab per project (agents, waiting tasks, events, activity sparklines), with `/` filtering, `p` to pause or resume a queue, `r` to refresh and Enter on an agent to switch your tmux client to its pane. It runs outside any project too.
-- Host registry (`~/.local/share/theseus/projects.json`, `THESEUS_REGISTRY` overrides) filled by every command that loads a project configuration, and `theseus projects` to list it.
+- Host registry filled by every command that loads a project configuration, and `theseus projects` to list it.
 - `theseus top --host --once` and `--host --json` for a plain host summary, and `theseus top --interval SECONDS`.
-- Host store (`theseus.store`): one SQLite database per machine for projects, agents, events, pool leases and claims, deliveries and agent-state samples, with importers for the existing JSON state. Not yet used by the commands.
+- Host store (`theseus.store`): one SQLite database per machine (`~/.local/share/theseus/theseus.db`, `THESEUS_DB` overrides) is now the runtime source of truth for queue events, pool leases and claims, the agent registry, the project registry, deliveries and agent-state samples written by every queue tick. Task records stay in `tasks.json`.
+- One-time migration: the first command in a project imports its `agents.json` and `queue/events.jsonl`, and the first on the host imports the pool state files and `projects.json`; the old files are left in place.
+- `theseus db check|maintain|backup|restore FILE --yes|prune`: integrity and size report, retention trim with `ANALYZE`, optimize, incremental vacuum and WAL truncation, online backups with an integrity check and 7 daily plus 4 weekly rotation, restore that saves the current database first, and explicit removal of projects whose root is gone. The queue runs maintenance and a backup at most once a day. Retention and backups are configured in `~/.config/theseus/store.toml`.
+- `theseus doctor` shows the host store (path, schema version, size, last backup, last maintenance) and project names claimed by two roots.
 
 ### Changed
 
 - Textual (`textual>=8.2,<9`) is now a runtime dependency. `theseus top --once` and `--json` keep their output; the old ANSI refresh loop is retired.
+- The queue tick takes pool slots atomically (`store.acquire()`) and gives a slot back when the assignment fails, so concurrent queues never push a pool past its `max`.
+- Event records returned by `workqueue.events()` (and in `theseus top --json`) also carry `id`, `project` and `epoch`.
+
+### Deprecated
+
+- `<data>/queue/events.jsonl` is still appended as a plain-text audit trail but no longer read; it will stop being written in a later release. `<data>/agents.json`, the pool state files under `~/.local/share/theseus/pools/` and `~/.local/share/theseus/projects.json` are no longer written after their one-time import.
 
 ## [0.1.0] - 2026-11-16
 

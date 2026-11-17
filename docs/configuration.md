@@ -44,7 +44,36 @@ max = 4                                   # agents working a task at once, acros
 priority = ["laser-port", "game-port"]    # earlier projects win when the pool is full
 ```
 
-Each project's profile joins it with `pool = "gateway"` in `[workers.<profile>]`. Only agents working a task hold a slot; idle sessions cost nothing. When a project has ready work but the pool is full, it records a claim; lower-priority projects then start no new tasks, so their running tasks finish and the slots come back. `theseus pool` shows who holds each slot, and `theseus top` shows the pool on the PROJECT line.
+Each project's profile joins it with `pool = "gateway"` in `[workers.<profile>]`. Only agents working a task hold a slot; idle sessions cost nothing. When a project has ready work but the pool is full, it records a claim; lower-priority projects then start no new tasks, so their running tasks finish and the slots come back. `theseus pool` shows who holds each slot, and `theseus top` shows the pool on the PROJECT line. The slots themselves are kept in the host store.
+
+## Host store
+
+Runtime state shared by every project on the machine (projects, registered agents, queue events, pool slots, deliveries and agent-state samples) lives in one SQLite database, `~/.local/share/theseus/theseus.db`. Task records stay in each project's `tasks.json`. The first command run in a project imports its old `agents.json` and `queue/events.jsonl` once and leaves the files in place; `queue/events.jsonl` still receives a copy of every event as a deprecated audit trail. See [Design notes](architecture.md#host-store) for how it works.
+
+`~/.config/theseus/store.toml` is optional; these are the defaults:
+
+```toml
+[retention]
+samples_days = 14   # agent-state samples older than this are trimmed
+events_days = 0     # 0 keeps every event; a number trims older events
+
+[backups]
+directory = ""      # default: the backups directory next to the database
+daily = 7           # keep the newest backup of each of this many recent days
+weekly = 4          # and of each of this many recent ISO weeks
+```
+
+```sh
+theseus db                     # check: integrity, schema version, sizes, row counts, last backup and maintenance
+theseus db maintain            # trim by retention, ANALYZE, optimize, incremental vacuum, truncate the WAL
+theseus db backup              # online backup to the backups directory, integrity check, rotation
+theseus db restore FILE --yes  # back up the current database, then load FILE (refuses without --yes)
+theseus db prune [--yes]       # list (and with --yes delete) projects whose root is gone, with all their history
+```
+
+The work queue runs `maintain` and `backup` by itself at most once a day across the host, so a machine that runs a queue needs no cron job. `theseus doctor` shows the database path, schema version, size, last backup, last maintenance and any project name claimed by two different roots (give one of them a different `[project] name`).
+
+Environment overrides, mainly for tests: `THESEUS_DB` (database file), `THESEUS_BACKUPS` (backup directory), `THESEUS_STORE_CONFIG` (`store.toml`).
 
 ## External tools
 
