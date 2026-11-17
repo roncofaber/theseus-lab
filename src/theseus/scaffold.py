@@ -39,7 +39,11 @@ def render(text, values):
     return text
 
 
-def scaffold(target, name=None, force=False, init_git=True, hooks=True):
+def scaffold(target, name=None, force=False, init_git=True, hooks=True, adopt=False):
+    """Write the project template. adopt brings theseus into an existing repository: nothing is overwritten, files
+    that differ from the template get the theseus version under theseus-adopt/ for a manual merge, and the push hook
+    and generated indexes are left for the coordinator to switch."""
+    force = force and not adopt
     target = Path(target).resolve()
     target.mkdir(parents=True, exist_ok=True)
     name = name or target.name
@@ -59,7 +63,14 @@ def scaffold(target, name=None, force=False, init_git=True, hooks=True):
                 report.append(f"updated  .gitignore (added {', '.join(missing)})")
             continue
         if path.exists() and not force:
-            report.append(f"kept     {path.relative_to(target)} (exists; --force overwrites)")
+            rendered = render(source.read_text(), values)
+            if adopt and path.read_text(errors="replace") != rendered:
+                copy = target / "theseus-adopt" / destination(relative)
+                copy.parent.mkdir(parents=True, exist_ok=True)
+                copy.write_text(rendered)
+                report.append(f"kept     {path.relative_to(target)} (differs; theseus version in {copy.relative_to(target)})")
+            else:
+                report.append(f"kept     {path.relative_to(target)} (exists; --force overwrites)")
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(render(source.read_text(), values))
@@ -71,6 +82,13 @@ def scaffold(target, name=None, force=False, init_git=True, hooks=True):
         link.parent.mkdir(parents=True, exist_ok=True)
         os.symlink("../" + cfg.SKILLS, link)
         report.append("linked   .claude/skills -> ../.agents/skills")
+    if adopt:
+        report.append("adopt: generated indexes untouched; run `theseus docs index` once the docs layout is merged")
+        report.append("adopt: push hook unchanged; switch with `git config core.hooksPath tools/git-hooks` after a passing "
+                      "`theseus verify`")
+        if (target / "theseus-adopt").exists():
+            report.append("adopt: merge what you need from theseus-adopt/, then delete it")
+        return report
     conf = cfg.load(root=target)
     for written in docs.regenerate(conf):
         report.append(f"indexed  {written}")

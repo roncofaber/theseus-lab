@@ -19,6 +19,11 @@ REPORTS = "docs/investigations"
 TOPICS = "docs/topics"
 FOLDED = "docs/project/archive/investigations"
 CITATION_INDEX = "docs/re/citation-index.md"
+
+
+def citation_index(conf):
+    """The generated citation index path, [re] citation_index (default docs/re/citation-index.md)."""
+    return str(conf.section("re").get("citation_index") or CITATION_INDEX)
 SKILLS = ".agents/skills"
 WORKER_LOG = ".theseus"
 

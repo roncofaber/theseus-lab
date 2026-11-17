@@ -27,7 +27,7 @@ theseus config check             # validate
 | `[git]` | `base` (`HEAD`, or `origin/main` to fetch first), `remote`, `branch` |
 | `[verification]` | `code_paths`, `doc_paths` (changes there need no verification), `max_unverified_merges`, `max_unverified_hours` |
 | `[rooms]` | Clean-room mode: `enabled`, `taint` (`until-clear` or `permanent`), `clean_instances`, `dirty_instances`, `dirty_paths`, `dirty_data`, `spec_paths` |
-| `[re]` | `targets` (binaries to decompile: `name`, `path`, `sha256`), `clients` (agent clients for the REA server), `address_low`, `address_high` |
+| `[re]` | `targets` (binaries to decompile: `name`, `path`, `sha256`, and optionally `corpus` to point at an existing decompiled corpus), `citation_index` (default `docs/re/citation-index.md`), `clients` (agent clients for the REA server), `address_low`, `address_high` |
 | `[tools]` | `need`: external tools this project requires |
 | `[consumers]` | Per file extension, a pattern for the names a file declares (defaults cover common languages) |
 

@@ -40,6 +40,8 @@ git init -q && git add -A && git commit -qm "theseus scaffold"
 theseus check
 ```
 
+For an existing repository that used another workflow, run `theseus scaffold PATH --name NAME --adopt` instead: it overwrites nothing and puts the theseus versions of differing files under `theseus-adopt/` for a manual merge (see the theseus-setup skill).
+
 Point theseus at the original software, outside the repository, in the Git-ignored `theseus.local.toml`:
 
 ```toml

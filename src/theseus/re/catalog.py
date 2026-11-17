@@ -50,6 +50,8 @@ def target(conf, name=None):
 
 
 def directory(conf, entry):
+    if entry.get("corpus"):
+        return Path(cfg.expand(str(entry["corpus"]), conf.environment()))
     if not entry["sha256"]:
         raise CatalogError(f"target {entry['name']} has no sha256; record it before building a catalog")
     return conf.data / "re" / entry["sha256"][:16]
@@ -122,7 +124,7 @@ def find(conf, entry, pattern, what="all", case=False, limit=200):
     if base and what in ("all", "strings"):
         sources.append(("string", base / "strings.tsv"))
     if what in ("all", "index"):
-        sources.append(("index", conf.root / cfg.CITATION_INDEX))
+        sources.append(("index", conf.root / cfg.citation_index(conf)))
     lines, notes = [], []
     for label, path in sources:
         if not path.exists():

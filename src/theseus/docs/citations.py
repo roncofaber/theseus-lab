@@ -57,14 +57,14 @@ def snippet(line, evidence, limit):
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-def collect(root, citations):
+def collect(root, citations, index_path=cfg.CITATION_INDEX):
     rows = []
     docs = root / "docs"
     if not docs.is_dir():
         return rows
     for path in sorted(docs.rglob("*.md")):
         parts = path.relative_to(docs).parts
-        if path == root / cfg.CITATION_INDEX or (parts[:2] == ("project", "archive") and not archived(parts)):
+        if path == root / index_path or (parts[:2] == ("project", "archive") and not archived(parts)):
             continue
         old = archived(parts)
         relative = path.relative_to(root).as_posix() + (ARCHIVED_MARKER if old else "")
@@ -102,16 +102,16 @@ def render(rows):
 
 
 def write(conf):
-    path = conf.root / cfg.CITATION_INDEX
-    text = render(collect(conf.root, of(conf)))
+    path = conf.root / cfg.citation_index(conf)
+    text = render(collect(conf.root, of(conf), cfg.citation_index(conf)))
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists() or path.read_text() != text:
         path.write_text(text)
-    return [cfg.CITATION_INDEX]
+    return [cfg.citation_index(conf)]
 
 
 def check(conf):
-    path = conf.root / cfg.CITATION_INDEX
-    if not path.exists() or path.read_text() != render(collect(conf.root, of(conf))):
-        return [f"{cfg.CITATION_INDEX} is stale; run `theseus docs index`"]
+    path = conf.root / cfg.citation_index(conf)
+    if not path.exists() or path.read_text() != render(collect(conf.root, of(conf), cfg.citation_index(conf))):
+        return [f"{cfg.citation_index(conf)} is stale; run `theseus docs index`"]
     return []

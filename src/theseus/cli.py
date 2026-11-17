@@ -62,8 +62,12 @@ def guarded(function):
 
 def cmd_scaffold(args):
     from . import scaffold
-    emit(scaffold.scaffold(args.target, name=args.name, force=args.force, init_git=not args.no_git, hooks=not args.no_hooks))
-    print("next: fill AGENTS.md, MANIFEST.md and ROADMAP.md, configure theseus.toml, then `theseus check`")
+    emit(scaffold.scaffold(args.target, name=args.name, force=args.force, init_git=not args.no_git, hooks=not args.no_hooks,
+                           adopt=args.adopt))
+    if args.adopt:
+        print("next: merge theseus-adopt/ by hand, configure theseus.toml, then `theseus check` and `theseus verify`")
+    else:
+        print("next: fill AGENTS.md, MANIFEST.md and ROADMAP.md, configure theseus.toml, then `theseus check`")
 
 
 def resolved(conf):
@@ -478,6 +482,9 @@ def build_parser():
     p.add_argument("--force", action="store_true", help="overwrite existing files")
     p.add_argument("--no-git", action="store_true", help="do not run git init in a directory that is not a repository")
     p.add_argument("--no-hooks", action="store_true", help="do not set core.hooksPath to tools/git-hooks")
+    p.add_argument("--adopt", action="store_true",
+                   help="bring theseus into an existing repository: overwrite nothing, put differing template files in "
+                        "theseus-adopt/, leave the push hook and generated indexes alone")
     p.set_defaults(func=cmd_scaffold)
 
     p = sub.add_parser("upgrade", help="refresh theseus-owned files (generic skills, hook, helpers) from this version's templates")

@@ -50,7 +50,13 @@ cd PATH && git init -q && git add -A && git commit -qm "theseus scaffold"
 theseus check
 ```
 
-Existing repository: scaffold into a temporary directory, then copy `theseus.toml`, `AGENTS.md`, `.agents/skills/theseus-*`, `docs/project/`, `docs/investigations/TEMPLATE.md`, `tools/Supervisor/` and `tools/git-hooks/` into it, merge `AGENTS.md` with any existing agent contract, and run `theseus check`.
+Existing repository (adopting theseus after another workflow):
+
+```sh
+theseus scaffold PATH --name NAME --adopt
+```
+
+`--adopt` overwrites nothing. Files that differ from the theseus template (a live `docs/project/STATE.md`, `tasks.json`, your own `tools/Supervisor` tests with the same names) keep their content, and the theseus version is written under `theseus-adopt/` for a manual merge. Merge what you need (for Supervisor tests, keep your project budgets and add entries for the `theseus-*` skills), delete `theseus-adopt/`, and run `theseus check`. The push hook and generated indexes are left alone: switch the hook with `git config core.hooksPath tools/git-hooks` after a passing `theseus verify`, and run `theseus docs index` once your docs layout matches. An existing decompiled corpus can be reused instead of decompiling again: set `corpus = "<directory>"` on its `[[re.targets]]` entry. A citation index with another name is set with `[re] citation_index = "docs/re/<name>.md"`.
 
 **Ask** where the original software lives (installer, binaries, data) and record it in the Git-ignored `theseus.local.toml`:
 

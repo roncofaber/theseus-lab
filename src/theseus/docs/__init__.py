@@ -5,7 +5,7 @@ def generated_paths(conf):
     """Repository-relative paths of every generated index (what regenerate writes)."""
     from . import index
     from .. import config as cfg
-    return sorted({p.relative_to(conf.root).as_posix() for p in index.outputs(conf.root)} | {cfg.CITATION_INDEX})
+    return sorted({p.relative_to(conf.root).as_posix() for p in index.outputs(conf.root)} | {cfg.citation_index(conf)})
 
 
 def regenerate(conf):

@@ -86,8 +86,10 @@ def sync(conf, pool, held):
     now = time.time()
     with locked(pool) as state:
         prefix = f"{conf.name}/"
-        state["leases"] = {k: v for k, v in state["leases"].items() if not k.startswith(prefix)}
+        state["leases"] = {k: v for k, v in state["leases"].items() if not k.startswith(prefix) or v.get("until")}
         for agent, task in held.items():
+            if key(conf, agent) in state["leases"]:
+                continue
             state["leases"][key(conf, agent)] = {"project": conf.name, "agent": agent, "task": task, "seen": now}
 
 

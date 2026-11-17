@@ -27,6 +27,21 @@ class ScaffoldTests(Sandbox):
         self.theseus("docs", "check")
         self.assertEqual("tools/git-hooks", self.git("config", "core.hooksPath").stdout.strip())
 
+    def test_adopt_overwrites_nothing_and_parks_differing_template_files(self):
+        target = self.tmp / "existing"
+        self.write("docs/project/STATE.md", "# Live state\n", root=target)
+        self.write("tools/Supervisor/test_context_budget.py", "BUDGETS = {'mine': 1}\n", root=target)
+        self.git("init", "-q", cwd=target)
+        out = self.theseus("scaffold", str(target), "--name", "live", "--adopt", "--force", cwd=self.tmp).stdout
+        self.assertEqual("# Live state\n", (target / "docs/project/STATE.md").read_text())
+        self.assertEqual("BUDGETS = {'mine': 1}\n", (target / "tools/Supervisor/test_context_budget.py").read_text())
+        self.assertTrue((target / "theseus-adopt/docs/project/STATE.md").exists())
+        self.assertTrue((target / "theseus-adopt/tools/Supervisor/test_context_budget.py").exists())
+        self.assertTrue((target / "theseus.toml").exists())
+        self.assertIn("push hook unchanged", out)
+        hooks = self.git("config", "--get", "core.hooksPath", cwd=target, check=False).stdout.strip()
+        self.assertEqual("", hooks)
+
     def test_scaffold_keeps_existing_files_without_force(self):
         self.project.mkdir()
         self.write("AGENTS.md", "mine\n")
