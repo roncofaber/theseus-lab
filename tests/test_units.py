@@ -56,6 +56,16 @@ class ConfigTests(Sandbox):
         self.theseus("config", "check")
 
 
+class OwnershipTests(unittest.TestCase):
+    def test_directories_own_their_contents_with_or_without_a_slash(self):
+        self.assertTrue(t.is_owned("scripts/Campaign/FlickRuntime/World.cs", ["scripts/Campaign/FlickRuntime"]))
+        self.assertTrue(t.is_owned("scripts/Campaign/FlickRuntime/a/b.cs", ["scripts/Campaign/FlickRuntime/"]))
+        self.assertTrue(t.is_owned("src/x.py", ["src/x.py"]))
+        self.assertFalse(t.is_owned("scripts/Campaign/FlickRuntimeOther/World.cs", ["scripts/Campaign/FlickRuntime"]))
+        self.assertTrue(t.is_owned("src/a/b.c", ["src/*/b.c"]))
+        self.assertFalse(t.is_owned("src/a/c/b.c", ["src/*/b.c"]))
+
+
 class ProfileTests(Sandbox):
     def test_placeholders_fill_in_one_pass_and_variants_inherit(self):
         from theseus import profiles

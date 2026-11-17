@@ -414,6 +414,9 @@ def owned_pattern(pattern):
     body = "".join(parts)
     if pattern.endswith("/"):
         body += ".*"
+    elif "*" not in pattern:
+        # An owned directory written without a trailing slash still owns everything under it.
+        body += "(?:/.*)?"
     return re.compile(body + "$")
 
 
