@@ -203,6 +203,23 @@ def shell_scripts(base):
     return found
 
 
+def tracked_shell_scripts(root):
+    """Every shell script Git tracks in the repository, wherever it lives, plus everything under tools/ (new scripts
+    are not tracked yet)."""
+    root = Path(root)
+    found = shell_scripts(root / "tools")
+    listed = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, text=True)
+    if listed.returncode != 0:
+        return found
+    for name in sorted(filter(None, listed.stdout.split("\0"))):
+        path = root / name
+        if SKIPPED_DIRS.intersection(Path(name).parts[:-1]) or path.name in LOCAL_FILES:
+            continue
+        if path.is_file() and not path.is_symlink() and path not in found and is_shell_script(path):
+            found.append(path)
+    return sorted(found)
+
+
 def syntax_errors(paths):
     failures = []
     for path in paths:

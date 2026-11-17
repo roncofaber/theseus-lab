@@ -1,4 +1,4 @@
-"""Every shell script under tools/ (by .sh suffix or a bash/sh shebang) parses and passes shellcheck at warning
+"""Every shell script Git tracks (by .sh suffix or a bash/sh shebang) parses and passes shellcheck at warning
 severity. Without shellcheck the lint is skipped and reported as skipped."""
 from pathlib import Path
 import unittest
@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class ShellScriptTests(unittest.TestCase):
     def setUp(self):
-        self.scripts = rules.shell_scripts(ROOT / "tools")
+        self.scripts = rules.tracked_shell_scripts(ROOT)
 
     def test_hook_is_discovered(self):
         self.assertIn(ROOT / "tools/git-hooks/pre-push", self.scripts)
