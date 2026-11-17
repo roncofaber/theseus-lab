@@ -13,6 +13,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - One-time migration: the first command in a project imports its `agents.json` and `queue/events.jsonl`, and the first on the host imports the pool state files and `projects.json`; the old files are left in place.
 - `theseus db check|maintain|backup|restore FILE --yes|prune`: integrity and size report, retention trim with `ANALYZE`, optimize, incremental vacuum and WAL truncation, online backups with an integrity check and 7 daily plus 4 weekly rotation, restore that saves the current database first, and explicit removal of projects whose root is gone. The queue runs maintenance and a backup at most once a day. Retention and backups are configured in `~/.config/theseus/store.toml`.
 - `theseus doctor` shows the host store (path, schema version, size, last backup, last maintenance) and project names claimed by two roots.
+- `theseus top` dashboard look: boxed, titled sections in the plain dashboard's state colors; a stable accent color per project (tab label, section borders, host tables); project cards on the Host tab; one stacked activity bar chart per project tab (series per kind group, legend, time axis) and one for all projects on the Host tab; CPU, load, memory, swap and GPU meters with an in-memory CPU history and per-core view (`c`); CPU and memory bars per agent.
 
 ### Changed
 

@@ -2,14 +2,17 @@
 import asyncio
 import json
 import os
+import re
 import shutil
+import subprocess
+import sys
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from helpers import Sandbox
+from helpers import REPO, Sandbox
 
 from test_queue import FAKE_TMUX
 from theseus import config as cfg
@@ -179,13 +182,13 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
         """Wait for the first refresh to be applied and its tabs mounted (slow machines need more than one pause)."""
         from textual.widgets import TabbedContent, TabPane
         await self.app.workers.wait_for_complete()
-        ready = condition or (lambda: self.app.snap is not None
+        ready = condition or (lambda: "updated" in self.app.title
                               and len(list(self.app.query_one(TabbedContent).query(TabPane))) == 3)
         for _ in range(100):
             await pilot.pause(0.05)
             if ready():
                 return
-        self.fail("dashboard did not settle")
+        self.fail(f"dashboard did not settle: active={self.app.query_one(TabbedContent).active} focused={self.app.focused} title={self.app.title}")
 
     async def switch(self, pilot, key):
         await pilot.press(key)
@@ -201,7 +204,51 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             panes = list(self.app.query_one(TabbedContent).query(TabPane))
             self.assertEqual(["Host", "alpha", "beta"], [str(p._title) for p in panes])
-            self.assertEqual(2, self.rows("projects"))
+            await self.settle(pilot, lambda: len(self.app.active_view().cards()) == 2)
+            self.assertEqual(["alpha", "beta"], [card.project for card in self.app.active_view().cards()])
+
+    async def test_enter_or_a_click_on_a_project_card_opens_its_tab(self):
+        from textual.widgets import TabbedContent
+        from theseus.tui.app import pane_id
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.settle(pilot)
+            await self.settle(pilot, lambda: self.app.focused is next(iter(self.app.active_view().cards()), None))
+            await pilot.press("enter")
+            await self.settle(pilot, lambda: self.app.query_one(TabbedContent).active == pane_id(self.project))
+            await pilot.press("1")
+            await self.settle(pilot, lambda: self.app.query_one(TabbedContent).active == "tab-host")
+            card = self.app.query_one(f"#card-{pane_id(self.second)}")
+            await self.settle(pilot, lambda: self.app.screen.get_widget_at(card.region.x + 2, card.region.y + 1)[0] is card)
+            await pilot.click(card, offset=(2, 1))
+            await self.settle(pilot, lambda: self.app.query_one(TabbedContent).active == pane_id(self.second))
+
+    async def test_charts_show_every_project_and_kind_with_a_time_axis(self):
+        from theseus.tui.app import BarChart
+        self.event("alpha", "assigned", 5)
+        self.event("beta", "merged", 20, "t2")
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.settle(pilot)
+            await self.settle(pilot, lambda: self.app.query_one("#host-chart", BarChart).series)
+            host_chart = self.app.query_one("#host-chart", BarChart).render().plain
+            for word in ("■ alpha 1", "■ beta 1", "-12h", "now", "└"):
+                self.assertIn(word, host_chart)
+            await self.switch(pilot, "2")
+            await self.settle(pilot, lambda: self.app.active_view().query_one("#chart", BarChart).size.width > 0)
+            project_chart = self.app.active_view().query_one("#chart", BarChart).render().plain
+            self.assertIn("■ assigned 1", project_chart)
+            self.assertIn("■ errors/stalled 0", project_chart)
+
+    async def test_screen_has_only_allowed_glyphs_and_no_em_dash(self):
+        self.event("alpha", "assigned", 5)
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.settle(pilot)
+            for key in ("1", "2", "3"):
+                await pilot.press(key)
+                await pilot.pause()
+                screen = self.app.export_screenshot()
+                self.assertNotIn(chr(0x2014), screen)
+                self.assertIsNone(re.search("[" + chr(0x2600) + "-" + chr(0x27BF) + chr(0x1F300) + "-" + chr(0x10FFFF) + "]",
+                                            screen))
 
     async def test_opens_on_the_current_project_tab(self):
         from textual.widgets import TabbedContent
@@ -242,6 +289,108 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             await pilot.press("2", "a", "down", "enter")
             self.assertEqual(["%2"], self.jumps)
+
+
+class ChartTests(unittest.TestCase):
+    def project(self, name, assigned=0, delivered=0, merged=0, errors=0, available=True):
+        bins = lambda count: [0] * (host.BINS - 1) + [count]
+        activity = {"assigned": bins(assigned), "delivered": bins(delivered), "merged": bins(merged), "errors": bins(errors)}
+        return {"name": name, "root": f"/{name}", "available": available, "activity": activity if available else None}
+
+    def test_project_series_sum_every_group_per_bin_with_project_colors(self):
+        from theseus.tui import charts, theme
+        series = charts.project_series([self.project("alpha", 1, 2, 3, 1), self.project("beta", merged=2),
+                                        self.project("gone", available=False)])
+        self.assertEqual(["alpha", "beta"], [label for label, _, _ in series])
+        self.assertEqual([7, 2], [values[-1] for _, _, values in series])
+        self.assertEqual([0, 0], [sum(values[:-1]) for _, _, values in series])
+        self.assertEqual([theme.project_color("alpha"), theme.project_color("beta")], [style for _, style, _ in series])
+
+    def test_kind_series_keep_the_state_colors_and_order(self):
+        from theseus.tui import charts
+        series = charts.kind_series(self.project("alpha", 1, 2, 3, 4)["activity"])
+        self.assertEqual(["green", "magenta", "cyan", "red"], [style for _, style, _ in series])
+        self.assertEqual([1, 2, 3, 4], [values[-1] for _, _, values in series])
+        self.assertTrue(all(len(values) == host.BINS for _, _, values in charts.kind_series(None)))
+
+    def test_stacked_bars_draw_one_row_per_event_on_a_baseline_with_a_time_axis(self):
+        from theseus.tui import charts
+        series = [("a", "green", [0] * 46 + [1, 2]), ("b", "red", [0] * 46 + [2, 0])]
+        lines = [line.plain for line in charts.stacked_bars(series, 148, 8)]
+        self.assertEqual(8, len(lines))
+        self.assertTrue(all(len(line) <= 148 for line in lines))
+        plot = lines[:-2]
+        self.assertEqual([" "] * 4 + ["█"] * 2, [line[len(plot[0]) - 2] for line in plot])
+        self.assertEqual([" "] * 3 + ["█"] * 3, [line[len(plot[0]) - 5] for line in plot])
+        self.assertIn("└", lines[-2])
+        self.assertEqual(lines[-2].index("┴"), lines[-1].index("-12h"))
+        self.assertTrue(lines[-1].endswith("now"))
+        red = {span.style for span in charts.stacked_bars(series, 148, 8)[3].spans}
+        self.assertIn("red", red)
+
+    def test_narrow_charts_merge_bins_and_keep_every_event(self):
+        from theseus.tui import charts
+        values = list(range(host.BINS))
+        self.assertEqual(sum(values), sum(charts.merge_bins(values, 5)))
+        self.assertEqual(values[-5:], list(range(43, 48)))
+        self.assertEqual(sum(values[-5:]), charts.merge_bins(values, 5)[-1])
+        lines = charts.stacked_bars([("a", "green", values)], 30, 10)
+        self.assertTrue(all(len(line.plain) <= 30 for line in lines))
+        self.assertIn("now", lines[-1].plain)
+
+    def test_history_and_meters(self):
+        from theseus.tui import charts
+        lines = [line.plain for line in charts.history([0, 50, 100], 20, 5, seconds=60)]
+        self.assertEqual(5, len(lines))
+        self.assertTrue(lines[0].startswith("100%"))
+        self.assertEqual("█", lines[0].rstrip()[-1])
+        self.assertIn("-3m", lines[-1])
+        self.assertEqual("█████░░░░░", charts.meter(0.5, 10).plain)
+        self.assertEqual("░░░░", charts.meter(None, 4).plain)
+        self.assertEqual(4, len(charts.meter(2.0, 4).plain))
+
+    def test_project_colors_are_stable_across_processes(self):
+        from theseus.tui import theme
+        names = ["alpha", "beta", "gamma"]
+        here = [theme.project_color(name) for name in names]
+        script = f"from theseus.tui import theme; print([theme.project_color(n) for n in {names!r}])"
+        for seed in ("1", "2"):
+            env = {**os.environ, "PYTHONHASHSEED": seed, "PYTHONPATH": str(REPO / "src")}
+            out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, check=True).stdout
+            self.assertEqual(str(here), out.strip())
+        self.assertTrue(all(re.fullmatch("#[0-9a-f]{6}", color) for color in here))
+
+
+class ResourceTests(unittest.TestCase):
+    def test_ring_keeps_the_newest_samples_oldest_first(self):
+        from theseus.tui.resources import Ring
+        ring = Ring(3)
+        self.assertEqual(([], None, 0), (ring.values(), ring.latest(), len(ring)))
+        for value in range(5):
+            ring.push(value)
+        self.assertEqual([2, 3, 4], ring.values())
+        self.assertEqual([3, 4], ring.values(2))
+        self.assertEqual([], ring.values(0))
+        self.assertEqual((4, 3), (ring.latest(), len(ring)))
+
+    def test_cpu_sampler_reports_busy_percent_since_the_previous_read(self):
+        from theseus.tui.resources import CpuSampler
+        frames = iter(["cpu 100 0 100 800 0 0 0 0\ncpu0 50 0 50 400 0 0 0 0\ncpu1 50 0 50 400 0 0 0 0\n",
+                       "cpu 200 0 200 1400 0 0 0 0\ncpu0 150 0 50 400 0 0 0 0\ncpu1 50 0 150 800 0 0 0 0\n",
+                       "cpu 200 0 200 1400 0 0 0 0\n"])
+        sampler = CpuSampler(lambda: next(frames))
+        first = sampler.sample()
+        self.assertAlmostEqual(25.0, first["total"])
+        self.assertEqual([100.0, 20.0], [round(v, 1) for v in first["cores"]])
+        self.assertIsNone(sampler.sample())
+
+    def test_history_is_filled_by_refreshes_not_by_redraws(self):
+        from theseus.tui.app import TopApp
+        app = TopApp(interval=3600, snapshot_fn=lambda: None, sampler=SimpleNamespace(sample=lambda: {"total": 10.0, "cores": []}))
+        asyncio.run(app.finish(None, "boom", {"total": 10.0, "cores": []}))
+        asyncio.run(app.finish(None, "boom", {"total": 30.0, "cores": []}))
+        app.redraw()
+        self.assertEqual([10.0, 30.0], app.history.values())
 
 
 if __name__ == "__main__":
