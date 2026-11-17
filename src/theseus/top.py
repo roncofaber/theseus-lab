@@ -408,7 +408,7 @@ def coordinator_state(conf):
     """The coordinator session ([instances] coordinator, a Claude Code session name) as its CLI reports it: state,
     session id, pid, the tmux pane on the user's server that runs it, context use and last activity from its
     transcript. None when the project names no coordinator."""
-    from . import profiles, supervisor, transcripts
+    from . import adapters, profiles, supervisor
     name = conf.section("instances").get("coordinator") or ""
     if not name:
         return None
@@ -433,11 +433,11 @@ def coordinator_state(conf):
         if pid.isdigit() and info["pid"] in descendants(table, int(pid)):
             info["pane"] = pane_id
             break
-    directory = settings.get("sessions_dir")
-    if directory and info["session"]:
-        path = transcripts.transcript_path(directory, info["session"], entry.get("cwd") or root)
+    adapter = adapters.load(adapters.name_of(settings))
+    path = adapter.session_file(conf, settings, info["session"], entry.get("cwd") or root) if adapter else None
+    if path:
         try:
-            state = transcripts.read(path)
+            state = adapter.read(path)
             info["lastActivity"] = path.stat().st_mtime
         except OSError:
             state = None

@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Added
 
+- Agent popup Conversation tab (`c`): the agent's conversation from its session record, natively scrollable, with user and assistant messages, each tool call and result folded to one line that a click or Enter expands, thinking left out; it follows new entries unless you scrolled up and is read incrementally in a worker. It comes from a transcript adapter chosen by the profile's new `interactive.transcript` key (`theseus.adapters`; `claude-code-jsonl` for the Claude Code presets). Profiles without an adapter show the pane's tmux scrollback (`pane-history`, the codex, opencode and gemini-cli presets) or no tab (`none`). Everything shown is redacted like gateway excerpts.
+- The mouse wheel over the pane mirror or the conversation scrolls only that view, never the popup or the screen behind it, also at its ends.
 - The console's pane mirror sizes a supervised agent's window on the private server to what the mirror shows while its popup is open (following a console resize after about 200 ms and fitting again after an attach), so the agent redraws without sideways scrolling; closing the popup, or quitting the console with it open, restores `[supervisor] size`. Hand-made panes on your own tmux server are never resized.
 - The test suite runs in parallel with pytest-xdist (`pip install -e ".[dev]"`, `python -m pytest -n auto`), in about 16 s on a 32-thread workstation instead of about 400 s; `python -m unittest discover -s tests` still runs it serially.
 - Context use is measured against the window of the model the session transcript names (`[models] context`, prefix keys with `*`); current Claude models default to 1M. Unknown models fall back to the profile's `context_limit`.
@@ -47,6 +49,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- The context meter and the gateway classification read transcripts through the profile's transcript adapter (`theseus.transcripts` moved to `theseus.adapters.claude_code`), so profiles of other CLIs fall back to the pane instead of being read as Claude Code transcripts.
 - An unknown top-level section in the host `config.toml` or a project's `theseus.toml` or `theseus.local.toml` is ignored with a warning on stderr, printed once per process, instead of stopping the command, so a long-running `theseus queue wait` or `queue run` survives a newer release adding a section; `theseus config check` still reports it as an error.
 - Console tables keep stable column widths that follow the window (fixed short columns, proportional flexible ones, optional columns dropping out when narrow); a cut cell ends in an ellipsis and never scrolls sideways. Panels and popups carry short labels only (no legends, hints or source prose); explanations live in the `?` help.
 - `theseus config check` warns when `theseus.toml` lists `[instances] panes`: pane ids belong in `theseus.local.toml`.
@@ -66,7 +69,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
-- Flaky supervisor tests: tmux 3.4 sometimes misses the SIGCHLD of a pane's process, so `pane-died` does not fire until the server reaps another child; the tests now let it reap with a `run-shell` job. In production such an exit is recorded and restarted by the next reconcile (queue tick or `theseus agents up`) instead of at once.
+- Flaky supervisor tests: tmux 3.4 can miss the SIGCHLD of a pane's process (seen on one Linux host, not on CI), so `pane-died` fires only once another SIGCHLD reaches the server; the tests now signal SIGCHLD to their private server while they wait.
 - A hand-made pane that no longer exists now shows as `offline`: tmux 3.4 exits 0 with empty output for `display-message` on a missing pane, which counted as alive.
 - Busy markers are looked for in the last three non-blank screen lines, so a pane with empty rows below its output is still seen working.
 

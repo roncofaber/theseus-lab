@@ -24,6 +24,7 @@ from . import rows as R
 
 HOST_TAB = "tab-host"
 HISTORY_SAMPLES = 720
+HISTORY_LINES = 5000
 MOUSE_HELP = (("click a row", "highlight it (click elsewhere or Escape clears the highlight)"),
               ("double-click a row", "open its details (agents: with a live mirror of the tmux pane)"),
               ("double-click PROJECT", "open the coordinator's mirror and send line"),
@@ -509,7 +510,7 @@ class TopApp(App):
 
     def __init__(self, interval=5.0, current=None, roots=(), snapshot_fn=None, jump_fn=None, loader=None, sampler=None,
                  capture_fn=None, send_fn=None, keys_fn=None, tmux_ok=None, mirror_seconds=1.0, cli_fn=None,
-                 attach_fn=None, diff_fn=None, color_system=None, fit_fn=None):
+                 attach_fn=None, diff_fn=None, color_system=None, fit_fn=None, conversation_fn=None):
         super().__init__()
         self.interval = interval
         self.current = str(Path(current).resolve()) if current else None
@@ -523,6 +524,7 @@ class TopApp(App):
         self.cli_fn = cli_fn or run_theseus
         self.attach_fn = attach_fn or attach_supervised
         self.fit_fn = fit_fn or supervised_fitter
+        self.conversation_fn = conversation_fn or conversation_reader
         self.diff_fn = diff_fn or task_diff
         self.color_system = color_system
         self.tmux_ok = (bool(os.environ.get("TMUX")) and shutil.which("tmux") is not None) if tmux_ok is None else tmux_ok
@@ -781,7 +783,8 @@ class TopApp(App):
                                                         lambda key: display(Binding(key, "")))
                      + [("buttons", "Type into pane, Enter, Escape, Interrupt (asks first), /compact, Attach, Open tmux "
                                     "pane, Restart, Stop, Start (supervised agents; each asks first)"),
-                        ("tabs", "Live: the pane mirror and a send line; Diff: the task worktree against its base, "
+                        ("tabs", "Live: the pane mirror and a send line; Conversation (c): the session transcript, "
+                                 "tool calls folded to one line (click or Enter expands); Diff: the task worktree against its base, "
                                  "refreshed every 5 s while shown; Task: the record and its handoff; Events: this agent's"),
                         ("type-through", "every key goes to the pane: text, Enter, Backspace, arrows, Tab, Ctrl-<key>;"
                                          " Ctrl-C asks first; Esc Esc or Ctrl-] leaves (the INSERT border)"),
@@ -876,6 +879,7 @@ class TopApp(App):
             keys=lambda *keys: self.keys_fn(pane, *keys) or f"{' '.join(keys)} → {agent.get('display') or name}",
             type=lambda *keys: self.keys_fn(pane, *keys),
             jump=(lambda: self.jump_fn(pane)) if (self.tmux_ok or supervised) and pane else None,
+            conversation=self.conversation_fn(root, name, pane, agent.get("transcript") or "none"),
             diff=(lambda: self.diff_fn(task)) if task else None,
             task=(lambda: task_sheet(task, view.project)) if task else None,
             events=lambda: R.agent_events(state["events"], name),
@@ -980,6 +984,49 @@ def supervised_fitter(root, name):
             found["rec"] = supervisor.record(cfg.load(root=root), name)
         return supervisor.fit(found["rec"], columns, rows)
     return fit
+
+
+def conversation_reader(root, name, pane=None, mode="none"):
+    """conversation(after) for an agent popup, None for a profile whose interactive.transcript is "none". It returns
+    (total entries read, the redacted entries after the first `after`, whether the record started over), or None
+    when nothing is found. A transcript adapter (theseus.adapters) supplies the entries; with "pane-history" the one
+    entry is the pane's tmux scrollback, sent again only when it changed. Runs in a worker thread."""
+    from .. import adapters, agents, gateway
+    if mode == adapters.NONE:
+        return None
+    loaded = {}
+
+    def history(after=0):
+        text = top.capture(pane, HISTORY_LINES) if pane else ""
+        if not text.strip():
+            return None
+        key = hash(text)
+        if loaded.get("history") == key:
+            return after, [], False
+        loaded["history"] = key
+        return after + 1, [{"kind": "history", "text": gateway.scrub(text)}], True
+
+    def conversation(after=0):
+        if "conf" not in loaded:
+            loaded["conf"] = cfg.load(root=root)
+        conf = loaded["conf"]
+        try:
+            state = agents.session_transcript(conf, agents.get(conf, name))
+        except agents.AgentError:
+            return None
+        if not state:
+            return None
+        total, entries = state["total"], state["entries"]
+        reset = total < after
+        fresh = total - (0 if reset else after)
+        shown = []
+        for entry in entries[-fresh:] if fresh > 0 else []:
+            entry = {**entry, "text": gateway.scrub(entry.get("text"))}
+            if entry.get("name"):
+                entry["name"] = gateway.scrub(entry["name"])
+            shown.append(entry)
+        return total, shown, reset
+    return history if mode == adapters.PANE_HISTORY else conversation
 
 
 def task_diff(task):

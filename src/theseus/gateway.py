@@ -22,8 +22,8 @@ gateway pool (the profile's pool, else the profile name) within breaker_window_m
 one error with a status in strong_codes, pause new assignments and resends on that pool until max(retry_after, the first backoff) has passed.
 
 Classification (classify): the status comes from `Request rejected (NNN)`, `API Error: NNN`, a Cloudflare title or the
-JSON body; the kind from the transcript's error field when Claude Code recorded the error there (the agent's session
-transcript is read before the pane), else from the status. A 429 is split into the key's parallel cap
+JSON body; the kind from the error kind the agent's transcript adapter reports (theseus.adapters; the session record
+is read before the pane, and profiles without an adapter use the pane alone), else from the status. A 429 is split into the key's parallel cap
 (max_parallel_requests) and model capacity (tokens or requests per minute, with the model name); a 5xx is named by
 Cloudflare's error_name or its status; a connection or server error mid-response is retryable without a status. Every
 error is stored with a short excerpt whose API keys, key hashes and email addresses are redacted.
@@ -63,11 +63,17 @@ REDACTIONS = ((re.compile(r"(api[_ -]?key\s*[:=]\s*)[^\s,.;]+", re.IGNORECASE), 
               (re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"), "[email]"))
 
 
-def redact(text, limit=240):
-    """A one-line excerpt of an error text without API keys, key hashes or email addresses."""
-    text = " ".join(str(text or "").split())
+def scrub(text):
+    """text without API keys, key hashes or email addresses, its lines kept."""
+    text = str(text or "")
     for pattern, replacement in REDACTIONS:
         text = pattern.sub(replacement, text)
+    return text
+
+
+def redact(text, limit=240):
+    """A one-line excerpt of an error text without API keys, key hashes or email addresses."""
+    text = scrub(" ".join(str(text or "").split()))
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
@@ -183,7 +189,7 @@ def label(info):
 def detect(conf, profile, screen, transcript_error=None):
     """The gateway error on the bottom of the screen, or None: parse() plus the pattern that matched, whether the
     profile's gateway_ready marker is showing and whether the error is fatal. transcript_error, the newest API error
-    the agent's session transcript recorded after its last answer ({"text", "error", "time"}), classifies the error
+    the agent's transcript adapter read after its last answer ({"text", "error", "time"}), classifies the error
     when the screen shows one: it holds the whole message even when the pane shows only the resend marker."""
     interactive = profiles.interactive(conf, profile)
     patterns = interactive.get("gateway_patterns") or []

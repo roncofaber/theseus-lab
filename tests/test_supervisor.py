@@ -409,7 +409,8 @@ class SupervisorTests(Sandbox):
         self.replace_config("status_command = []", f'status_command = []\nsessions_dir = "{sessions}"')
         self.git("commit", "-q", "-am", "sessions dir")
         self.up("demo-fake-1")
-        from theseus import agents, transcripts
+        from theseus import agents
+        from theseus.adapters import claude_code as transcripts
         rec = agents.get(self.conf(), "demo-fake-1")
         path = transcripts.transcript_path(sessions, rec["session_id"], str(self.project))
         path.parent.mkdir(parents=True)

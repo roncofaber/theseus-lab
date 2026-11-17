@@ -154,38 +154,14 @@ def on(server, *args):
 
 
 def session_transcript(conf, agent):
-    """The Claude Code transcript state (theseus.transcripts.read) of the session in the agent's pane, or None when
-    the profile has no sessions directory or no live client names the pane. A supervised agent's stored session id
-    (kept current from the agent CLI's status) names its transcript directly."""
-    from . import profiles
-    from . import transcripts
-    try:
-        directory = (conf.section("instances").get("sessions_dir")
-                     or profiles.interactive(conf, agent.get("provider")).get("sessions_dir"))
-    except profiles.ProfileError:
+    """The transcript state (theseus.adapters) of the session in the agent's pane, read by the adapter its profile
+    names in interactive.transcript, or None when the profile has none or the session is not found."""
+    from . import adapters
+    _, adapter, interactive = adapters.resolve(conf, agent.get("provider"))
+    if adapter is None:
         return None
-    if not directory:
-        return None
-    server, pane = where(agent)
-    if agent.get("managed") and agent.get("session_id"):
-        from . import supervisor
-        path = transcripts.transcript_path(directory, agent["session_id"], str(supervisor.cwd(conf)))
-        if path.exists():
-            try:
-                return transcripts.read(path)
-            except OSError:
-                return None
-    pids, exclude = None, ()
-    if server.is_legacy:
-        address = tmux("display", "-p", "-t", pane, "#{window_id}.#{pane_id}").stdout.strip()
-        exclude = supervised_pids()
-    else:
-        from . import top, tmux as tm
-        text = server.display(pane, "#{window_id}.#{pane_id}" + tm.SEP + "#{pane_pid}") or ""
-        address, _, pid = text.partition(tm.SEP)
-        pids = set(top.descendants(top.process_table(), int(pid))) | {int(pid)} if pid.isdigit() else set()
     try:
-        return transcripts.pane_transcript(directory, address, pids, exclude)
+        return adapter.session_state(conf, agent, interactive)
     except OSError:
         return None
 
@@ -456,6 +432,7 @@ def state(conf, agent):
     stall patterns (interactive.stall_patterns) while it holds a task is thrashing at once, busy or not, with the
     pattern in "stall". Without a busy marker for the agent's profile a long silence is reported as quiet, never stalled, so the
     queue does not type nudges into a working agent."""
+    from . import adapters
     from . import gateway
     from . import rooms
     from . import tasks as t
@@ -465,6 +442,7 @@ def state(conf, agent):
             "enabled": agent.get("enabled", True),
             "task": task["id"] if task else None, "room": (task or {}).get("room"), "idleMinutes": None,
             "tainted": rooms.ledger(conf)["tainted"].get(agent["name"]) if rooms.enabled(conf) else None}
+    info["transcript"] = adapters.resolve(conf, agent.get("provider"))[0]
     server, _ = where(agent)
     if agent.get("managed"):
         info.update({"managed": True, "phase": agent.get("phase"), "session": agent.get("session_id")})

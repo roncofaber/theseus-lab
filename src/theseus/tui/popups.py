@@ -20,6 +20,7 @@ MIRROR_LINES = 200
 DIFF_SECONDS = 5.0
 ESCAPE_SECONDS = 0.5
 FIT_SECONDS = 0.2
+CONVERSATION_ENTRIES = 300
 TMUX_KEYS = {"enter": "Enter", "backspace": "BSpace", "delete": "DC", "up": "Up", "down": "Down", "left": "Left",
              "right": "Right", "tab": "Tab", "shift+tab": "BTab", "home": "Home", "end": "End", "pageup": "PPage",
              "pagedown": "NPage", "insert": "IC"}
@@ -127,7 +128,69 @@ class Confirm(Outside, ModalScreen[bool]):
         self.dismiss(event.button.id == "yes")
 
 
-class Mirror(ScrollableContainer, can_focus=True):
+class Contained:
+    """The mouse wheel over this widget scrolls only it: at its ends, or with nothing to scroll, the wheel event stops
+    here instead of moving the popup or the screen behind it."""
+
+    def _on_mouse_scroll_down(self, event):
+        super()._on_mouse_scroll_down(event)
+        event.stop()
+
+    def _on_mouse_scroll_up(self, event):
+        super()._on_mouse_scroll_up(event)
+        event.stop()
+
+    def _on_mouse_scroll_left(self, event):
+        super()._on_mouse_scroll_left(event)
+        event.stop()
+
+    def _on_mouse_scroll_right(self, event):
+        super()._on_mouse_scroll_right(event)
+        event.stop()
+
+
+class Conversation(Contained, VerticalScroll):
+    """The agent's conversation from its session transcript, oldest first, following new entries at the bottom."""
+
+
+class Fold(Static, can_focus=True):
+    """One line that a click, Enter or Space expands to the full text and folds again."""
+
+    BINDINGS = [Binding("enter,space", "toggle", "Expand or fold", show=False)]
+
+    def __init__(self, summary, detail, **kwargs):
+        super().__init__(summary, **kwargs)
+        self.summary, self.detail, self.expanded = summary, detail, False
+
+    def action_toggle(self):
+        self.expanded = not self.expanded
+        self.set_class(self.expanded, "-open")
+        self.update(self.detail if self.expanded else self.summary)
+
+    def on_click(self, event):
+        event.stop()
+        self.action_toggle()
+
+
+def conversation_widget(entry):
+    """The widget of one conversation entry: user and assistant text in full, a tool call or result as a Fold."""
+    text = entry.get("text") or ""
+    if entry["kind"] == "history":
+        return Static(Text.from_ansi(text.rstrip("\n")), classes="turn history")
+    if entry["kind"] in ("user", "assistant"):
+        return Static(Text(text), classes=f"turn {entry['kind']}")
+    lines = text.splitlines() or [""]
+    if entry["kind"] == "tool":
+        head = f"▸ {entry.get('name') or 'tool'}  {' '.join(text.split())}"
+        style = "dim"
+    else:
+        head = f"  ↳ {'error: ' if entry.get('error') else ''}{lines[0].strip()}" + (f"  ({len(lines)} lines)" if len(lines) > 1 else "")
+        style = "red" if entry.get("error") else "dim"
+    return Fold(Text(head, style=style, no_wrap=True, overflow="ellipsis"), Text(text, style=style),
+                classes=f"fold {entry['kind']}")
+
+
+class Mirror(Contained, ScrollableContainer, can_focus=True):
     """The pane mirror. In type-through mode it forwards every key to the pane instead of the dashboard's bindings."""
 
     def on_key(self, event):
@@ -144,15 +207,18 @@ class Mirror(ScrollableContainer, can_focus=True):
     def visible_size(self):
         """Columns and rows of text the mirror shows: inside its border, less the vertical scrollbar but not the
         horizontal one, which goes away once the pane fits."""
-        region = self.content_region
+        region = self.region.shrink(self.styles.gutter)
         return region.width - self.styles.scrollbar_size_vertical, region.height
 
 
 class AgentScreen(Dialog):
     """An agent's details over tabs: Live (a mirror of its tmux pane, polled while shown, faster while typing through,
-    with a line to send whole lines, type-through mode for single keys and buttons for common keys), Diff (its task
-    worktree against the task's base, refreshed while shown), Task and Events. `actions` supplies capture(pane),
-    send(text), keys(*keys), type(*keys), jump() (None hides Open tmux pane) and optionally diff(), task(), events(),
+    with a line to send whole lines, type-through mode for single keys and buttons for common keys), Conversation (its
+    session transcript, read while shown), Diff (its task worktree against the task's base, refreshed while shown),
+    Task and Events. `actions` supplies capture(pane), send(text), keys(*keys), type(*keys), jump() (None hides Open
+    tmux pane) and optionally conversation(after) ((total, entries after the first `after`, reset) or None, entries
+    already redacted, in the form of theseus.adapters plus a "history" kind for plain scrollback; None hides the
+    tab), diff(), task(), events(),
     attach() (a callable run while the app is suspended, None for panes it cannot attach), restart(), stop(),
     start() (None hides them; each asks first) and fit(columns, rows) (None for panes it must not resize), which sizes
     the agent's window to the mirror while it is shown, follows the mirror's size fit_seconds after it changes and on
@@ -167,7 +233,8 @@ class AgentScreen(Dialog):
                 Binding("R", "lifecycle('restart')", "Restart the agent (asks first)"),
                 Binding("X", "lifecycle('stop')", "Stop the agent (asks first)"),
                 Binding("U", "lifecycle('start')", "Start the agent (asks first)"),
-                Binding("l", "show_tab('live')", "Live tab"), Binding("d", "show_tab('diff')", "Diff tab"),
+                Binding("l", "show_tab('live')", "Live tab"),
+                Binding("c", "show_tab('conversation')", "Conversation tab"), Binding("d", "show_tab('diff')", "Diff tab"),
                 Binding("t", "show_tab('task')", "Task tab"), Binding("v", "show_tab('events')", "Events tab")]
     DEFAULT_CSS = """
     AgentScreen > #dialog { height: 90%; }
@@ -181,6 +248,11 @@ class AgentScreen(Dialog):
     AgentScreen .sheet > Static { width: auto; }
     AgentScreen #mirror-text { width: auto; }
     AgentScreen.-typing #mirror { border: heavy $warning; border-title-color: $warning; border-title-style: bold; }
+    AgentScreen #conversation { height: 1fr; }
+    AgentScreen #conversation .turn { margin-top: 1; padding: 0 1; }
+    AgentScreen #conversation .user { border-left: thick $accent; }
+    AgentScreen #conversation .fold { padding: 0 1; }
+    AgentScreen #conversation .fold:focus { background: $boost; }
     """
 
     def __init__(self, title, body, pane, actions, poll=1.0, fast=0.25, fit_seconds=FIT_SECONDS):
@@ -202,6 +274,10 @@ class AgentScreen(Dialog):
         self.fit_timer = None
         self.fit_size = None
         self.fitted = False
+        self.fit_lock = threading.Lock()
+        self.conversation_timer = None
+        self.conversation_total = 0
+        self.conversation_busy = False
 
     def live_title(self):
         return f"{self.heading.split(' ', 1)[-1]} · live"
@@ -215,6 +291,9 @@ class AgentScreen(Dialog):
             with TabPane("Live", id="live"):
                 yield Mirror(Static(Text("…", style="dim"), id="mirror-text"), id="mirror")
                 yield Input(placeholder="send", id="send")
+            if self.action_of("conversation") is not None:
+                with TabPane("Conversation", id="conversation-tab"):
+                    yield Conversation(Static(Text("…", style="dim"), id="conversation-note"), id="conversation")
             for name, label in (("diff", "Diff"), ("task", "Task"), ("events", "Events")):
                 with TabPane(label, id=name):
                     yield ScrollableContainer(Static(Text("…", style="dim"), id=f"{name}-text"), classes="sheet")
@@ -267,17 +346,75 @@ class AgentScreen(Dialog):
     @on(TabbedContent.TabActivated, "#tabs")
     def tab_activated(self, event):
         active = event.pane.id
-        if self.diff_timer is not None:
-            self.diff_timer.stop()
-            self.diff_timer = None
-        if active == "diff":
+        for timer in (self.diff_timer, self.conversation_timer):
+            if timer is not None:
+                timer.stop()
+        self.diff_timer = self.conversation_timer = None
+        if active == "conversation-tab":
+            self.load_conversation()
+            self.conversation_timer = self.set_interval(self.poll_seconds, self.load_conversation)
+        elif active == "diff":
             self.load_sheet("diff")
             self.diff_timer = self.set_interval(DIFF_SECONDS, lambda: self.load_sheet("diff"))
         elif active in ("task", "events"):
             self.load_sheet(active)
 
     def action_show_tab(self, name):
-        self.query_one("#tabs", TabbedContent).active = name
+        if name == "conversation" and self.action_of("conversation") is None:
+            return
+        tabs = self.query_one("#tabs", TabbedContent)
+        if self.focused is not None and tabs in self.focused.ancestors:
+            self.set_focus(None)
+        tabs.active = "conversation-tab" if name == "conversation" else name
+
+    def load_conversation(self):
+        """Read what the transcript gained since the last read in a worker, then append it to the Conversation tab."""
+        source = self.action_of("conversation")
+        if source is None:
+            self.show_conversation(None, [], False, "-")
+            return
+        if self.conversation_busy:
+            return
+        self.conversation_busy = True
+        after = self.conversation_total
+
+        def run():
+            try:
+                found, note = source(after), None
+            except Exception as problem:
+                found, note = None, f"failed: {problem}"
+            total, entries, reset = found if found else (None, [], False)
+            if found is None and note is None:
+                note = "no transcript for this agent's session"
+            try:
+                self.app.call_from_thread(self.show_conversation, total, entries, reset, note)
+            except Exception:
+                self.conversation_busy = False
+        self.run_worker(run, thread=True, group="conversation", exclusive=True)
+
+    def show_conversation(self, total, entries, reset, note=None):
+        self.conversation_busy = False
+        try:
+            log = self.query_one("#conversation", Conversation)
+            placeholder = self.query_one("#conversation-note", Static)
+        except NoMatches:
+            return
+        if total is None:
+            placeholder.update(Text(note or "-", style="dim"))
+            return
+        at_bottom = log.scroll_y >= log.max_scroll_y - 1
+        if reset:
+            log.remove_children(".turn, .fold")
+        if entries:
+            log.mount_all([conversation_widget(entry) for entry in entries[-CONVERSATION_ENTRIES:]])
+        shown = list(log.query(".turn, .fold"))
+        for widget in shown[:max(0, len(shown) - CONVERSATION_ENTRIES)]:
+            widget.remove()
+        placeholder.display = not (total or entries)
+        placeholder.update(Text("no conversation yet", style="dim"))
+        self.conversation_total = total
+        if at_bottom and entries:
+            log.call_after_refresh(log.scroll_end, animate=False)
 
     def action_attach(self):
         attach = self.action_of("attach")
@@ -384,31 +521,38 @@ class AgentScreen(Dialog):
             columns, rows = self.query_one("#mirror", Mirror).visible_size()
         except NoMatches:
             return
-        if columns < 1 or rows < 1:
+        if columns < 1 or rows < 1 or not self.is_attached:
             return
         self.fit_size = (columns, rows)
         self.run_worker(self.refit, thread=True, group="fit", exclusive=True)
 
     def refit(self):
         """Size the pane to the mirror (a no-op when it already fits or a client is attached to it)."""
-        fit, size = self.action_of("fit"), self.fit_size
-        if fit is None or size is None:
+        fit = self.action_of("fit")
+        if fit is None:
             return
-        try:
-            fit(*size)
-            self.fitted = True
-        except Exception:
-            pass
+        with self.fit_lock:
+            if self.fit_size is None:
+                return
+            try:
+                fit(*self.fit_size)
+                self.fitted = True
+            except Exception:
+                pass
 
     def on_unmount(self):
         if self.fit_timer is not None:
             self.fit_timer.stop()
         fit = self.action_of("fit")
-        if fit is not None and self.fitted:
-            try:
-                fit(None, None)
-            except Exception:
-                pass
+        if fit is None:
+            return
+        with self.fit_lock:
+            self.fit_size = None
+            if self.fitted:
+                try:
+                    fit(None, None)
+                except Exception:
+                    pass
 
     def pump(self):
         """Send queued keys in order; consecutive literal text goes out as one send-keys -l."""

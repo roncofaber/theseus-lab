@@ -420,10 +420,13 @@ class DashboardBase(HostCase, unittest.IsolatedAsyncioTestCase):
         self.base = host.snapshot()
         self.extra = {}
         self.jumps, self.sent, self.keys, self.captures, self.fits = [], [], [], [], []
+        self.conversation = []
         # The terminal's color system is pinned: CI runners have no TERM or COLORTERM.
         self.app = TopApp(interval=3600, snapshot_fn=lambda: grown(self.base, **self.extra), tmux_ok=True,
                           color_system="truecolor",
                           fit_fn=lambda root, name: lambda columns=None, rows=None: self.fits.append((name, columns, rows)),
+                          conversation_fn=lambda root, name, pane=None, mode="none": None if mode == "none" else (
+                              lambda after=0: (len(self.conversation), list(self.conversation[after:]), False)),
                           mirror_seconds=0.05, jump_fn=lambda pane: self.jumps.append(pane) or f"jumped {pane}",
                           capture_fn=lambda pane: self.captures.append(pane) or "\033[32mready for input\033[0m\n> ",
                           send_fn=lambda conf, agent, text, expect_busy=True: self.sent.append(
@@ -460,7 +463,8 @@ class DashboardBase(HostCase, unittest.IsolatedAsyncioTestCase):
         old = self.app
         self.app = TopApp(interval=3600, snapshot_fn=old.snapshot_fn, tmux_ok=True, mirror_seconds=0.05,
                           jump_fn=old.jump_fn, capture_fn=old.capture_fn, send_fn=old.send_fn, keys_fn=old.keys_fn,
-                          color_system="truecolor", cli_fn=old.cli_fn, fit_fn=old.fit_fn)
+                          color_system="truecolor", cli_fn=old.cli_fn, fit_fn=old.fit_fn,
+                          conversation_fn=old.conversation_fn)
 
 
 class TopPolishTests(DashboardBase):
@@ -927,6 +931,9 @@ class ConsoleTests(DashboardBase):
         from textual.events import Resize
         from textual.geometry import Size
         from theseus.tui.popups import AgentScreen
+        width = [0]
+        plain = self.app.capture_fn
+        self.app.capture_fn = lambda pane: ("x" * width[0] + "\n") * 80 + "> " if width[0] else plain(pane)
         async with self.app.run_test(size=(170, 60)) as pilot:
             await self.start(pilot)
             await pilot.press("a", "enter")
@@ -937,17 +944,23 @@ class ConsoleTests(DashboardBase):
             first = mirror.visible_size()
             self.assertGreater(first[0], 100)
             self.assertGreater(first[1], 10)
+            for columns, scrolls in ((first[0], False), (first[0] + 1, True)):
+                width[0] = columns
+                await self.settle(pilot, lambda: mirror.virtual_size.width >= columns and mirror.max_scroll_y > 0)
+                self.assertEqual(scrolls, mirror.max_scroll_x > 0, f"a pane {columns} columns wide in {first}")
+            width[0] = 0
             popup.fit_seconds = 0.5
-            self.fits.clear()
-            for size in (Size(150, 50), Size(130, 45)):
-                self.app._driver._size = size
-                self.app.post_message(Resize(size, size))
-            await self.settle(pilot, lambda: mirror.visible_size() != first
+            self.app._driver._size = Size(150, 50)
+            self.app.post_message(Resize(Size(150, 50), Size(150, 50)))
+            await self.settle(pilot, lambda: mirror.visible_size() != first and popup.fit_timer is not None)
+            between = mirror.visible_size()
+            self.app._driver._size = Size(130, 45)
+            self.app.post_message(Resize(Size(130, 45), Size(130, 45)))
+            await self.settle(pilot, lambda: mirror.visible_size() not in (first, between)
                               and ("worker-a", *mirror.visible_size()) in self.fits)
             final = mirror.visible_size()
-            self.assertLess(final[0], first[0])
-            self.assertLessEqual({(columns, rows) for _, columns, rows in self.fits}, {first, final},
-                                 "only the size the mirror settled on is applied")
+            self.assertLess(final[0], between[0])
+            self.assertNotIn(("worker-a", *between), self.fits, "a size the mirror only passed through is not applied")
             await pilot.press("escape")
             await self.settle(pilot, lambda: len(self.app.screen_stack) == 1 and self.fits[-1] == ("worker-a", None, None))
             done = list(self.fits)
@@ -966,6 +979,63 @@ class ConsoleTests(DashboardBase):
             await pilot.press("a", "up", "enter")
             await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen) and self.fits[-1][1])
         self.assertEqual(("worker-a", None, None), self.fits[-1], "quitting with the popup open restores the size")
+
+    async def test_the_conversation_tab_folds_tool_calls_and_follows_new_entries_unless_scrolled_up(self):
+        from textual import events
+        from theseus.tui.popups import AgentScreen, Fold
+        def turn(n):
+            return [{"kind": "user", "text": f"question {n}"}, {"kind": "assistant", "text": f"answer {n}\nsecond line"},
+                    {"kind": "tool", "name": "Read", "text": '{\n "file_path": "f%d.py"\n}' % n},
+                    {"kind": "result", "text": "a\nb\nc", "error": n == 0}]
+        self.conversation.extend(turn(0))
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            await pilot.press("a", "enter")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen))
+            popup = self.app.screen
+            await pilot.press("c")
+            log = popup.query_one("#conversation")
+            await self.settle(pilot, lambda: len(log.query(".turn, .fold")) == 4)
+            texts = [str(w.render()) for w in log.query(".turn, .fold")]
+            self.assertIn("question 0", texts[0])
+            self.assertIn("answer 0", texts[1])
+            fold = log.query(Fold).first()
+            await self.settle(pilot, lambda: fold.region.height == 1)
+            self.assertIn("Read", str(fold.render()))
+            self.assertIn("f0.py", str(fold.render()))
+            await pilot.click(fold)
+            await self.settle(pilot, lambda: fold.expanded and fold.region.height == 3)
+            for n in range(1, 16):
+                self.conversation.extend(turn(n))
+            await self.settle(pilot, lambda: len(log.query(".turn, .fold")) == 64 and log.max_scroll_y > 0
+                              and log.scroll_y == log.max_scroll_y)
+            log.scroll_to(y=0, animate=False)
+            await self.settle(pilot, lambda: log.scroll_y == 0)
+            self.conversation.extend(turn(16))
+            await self.settle(pilot, lambda: len(log.query(".turn, .fold")) == 68)
+            await pilot.pause(0.1)
+            self.assertEqual(0, log.scroll_y, "a reader who scrolled up stays where they are")
+            for widget in (log, popup.query_one("#mirror")):
+                for kind, delta in ((events.MouseScrollUp, -1), (events.MouseScrollDown, 1)):
+                    event = kind(widget, 1, 1, 0, delta, 0, False, False, False)
+                    getattr(widget, f"_on_mouse_scroll_{'up' if delta < 0 else 'down'}")(event)
+                    self.assertTrue(event._stop_propagation, f"{kind.__name__} left {widget.id}")
+            await pilot.press("l")
+            await self.settle(pilot, lambda: popup.query_one("#tabs").active == "live")
+            self.assertIsNone(popup.conversation_timer, "the transcript is read only while its tab is shown")
+
+    async def test_a_profile_without_a_transcript_adapter_has_no_conversation_tab(self):
+        from theseus.tui.popups import AgentScreen
+        self.base["projects"][0]["snapshot"]["agents"][0]["transcript"] = "none"
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            await pilot.press("a", "enter")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen))
+            popup = self.app.screen
+            self.assertFalse(popup.query("#conversation-tab"))
+            await pilot.press("c")
+            await pilot.pause()
+            self.assertEqual("live", popup.query_one("#tabs").active)
 
     async def test_the_coordinator_opens_with_c_and_mirrors_its_pane(self):
         from theseus.tui.popups import AgentScreen
@@ -1047,7 +1117,7 @@ class TranscriptTests(Sandbox):
 
     def setUp(self):
         super().setUp()
-        from theseus import transcripts
+        from theseus.adapters import claude_code as transcripts
         transcripts.READS.clear()
         transcripts.SESSIONS.clear()
         self.sessions = self.tmp / "claude" / "sessions"
@@ -1062,7 +1132,7 @@ class TranscriptTests(Sandbox):
         return json.dumps(record) + "\n"
 
     def test_the_live_session_of_a_pane_and_its_transcript_path(self):
-        from theseus import transcripts
+        from theseus.adapters import claude_code as transcripts
         self.session("1", os.getpid(), "$5:@3.%9", 100)
         self.session("2", 2**22 + 12345, "$5:@3.%9", 200, session="dead")
         self.session("3", os.getpid(), "$5:@3.%10", 300, session="other")
@@ -1072,7 +1142,7 @@ class TranscriptTests(Sandbox):
                          transcripts.transcript_path(self.sessions, "abc-123", self.cwd))
 
     def test_the_reader_follows_appends_and_reports_context_and_api_errors(self):
-        from theseus import transcripts
+        from theseus.adapters import claude_code as transcripts
         path = self.tmp / "t.jsonl"
         usage = {"input_tokens": 2, "cache_read_input_tokens": 80000, "cache_creation_input_tokens": 7000}
         path.write_text(self.entry(type="user", message={"content": "go"})
@@ -1092,8 +1162,83 @@ class TranscriptTests(Sandbox):
         self.assertGreater(state["offset"], offset)
         self.assertEqual(state, transcripts.read(path))
 
+    def test_the_conversation_keeps_text_and_tool_calls_and_drops_thinking_sidechains_and_meta(self):
+        from theseus.adapters import claude_code as transcripts
+        path = self.tmp / "c.jsonl"
+        path.write_text(
+            self.entry(type="user", message={"content": "decode the frame"}, timestamp="t1")
+            + self.entry(type="user", isMeta=True, message={"content": "<command caveat>"})
+            + self.entry(type="assistant", message={"content": [
+                {"type": "thinking", "thinking": "private reasoning"},
+                {"type": "text", "text": "Reading the decoder."},
+                {"type": "tool_use", "id": "u1", "name": "Read", "input": {"file_path": "src/status.py"}}]})
+            + self.entry(type="user", message={"content": [
+                {"type": "tool_result", "tool_use_id": "u1", "content": [{"type": "text", "text": "line 1\nline 2"}]}]})
+            + self.entry(type="assistant", isSidechain=True, message={"content": [{"type": "text", "text": "subagent"}]})
+            + self.entry(type="user", message={"content": [{"type": "tool_result", "tool_use_id": "u2", "is_error": True,
+                                                            "content": "no such file"}]}))
+        state = transcripts.read(path)
+        self.assertEqual(5, state["total"])
+        self.assertEqual([("user", "decode the frame"), ("assistant", "Reading the decoder."), ("tool", None),
+                          ("result", "line 1\nline 2"), ("result", "no such file")],
+                         [(e["kind"], None if e["kind"] == "tool" else e["text"]) for e in state["entries"]])
+        self.assertEqual("Read", state["entries"][2]["name"])
+        self.assertIn('"file_path": "src/status.py"', state["entries"][2]["text"])
+        self.assertTrue(state["entries"][4]["error"])
+        self.assertNotIn("private reasoning", json.dumps(state["entries"]))
+        with open(path, "a") as handle:
+            handle.write(self.entry(type="assistant", message={"content": [{"type": "text", "text": "x" * 9000}]}))
+        state = transcripts.read(path)
+        self.assertEqual(6, state["total"])
+        self.assertIn("1000 more characters", state["entries"][-1]["text"])
+
+    def test_the_console_conversation_is_redacted_and_read_from_where_it_left_off(self):
+        from unittest import mock
+        from theseus import agents
+        from theseus.tui.app import conversation_reader
+        self.scaffold()
+        secret = "sk-ant-api03-abcdefghijklmnop"
+        state = {"total": 3, "entries": [{"kind": "user", "text": "first"},
+                                         {"kind": "assistant", "text": f"key {secret} for someone@example.org"},
+                                         {"kind": "result", "text": "ok"}]}
+        with mock.patch.object(agents, "get", return_value={"name": "w"}), \
+                mock.patch.object(agents, "session_transcript", return_value=state):
+            read = conversation_reader(self.project, "w", "%1", "claude-code-jsonl")
+            total, entries, reset = read(0)
+            self.assertEqual((3, False), (total, reset))
+            self.assertNotIn(secret, entries[1]["text"])
+            self.assertNotIn("someone@example.org", entries[1]["text"])
+            self.assertEqual(["ok"], [e["text"] for e in read(2)[1]])
+            self.assertEqual((3, 3, True), (read(5)[0], len(read(5)[1]), read(5)[2]))
+        with mock.patch.object(agents, "get", side_effect=agents.AgentError("gone")):
+            self.assertIsNone(conversation_reader(self.project, "w", "%1", "claude-code-jsonl")(0))
+
+    def test_pane_history_is_the_conversation_of_a_cli_without_a_transcript_adapter(self):
+        from unittest import mock
+        from theseus import adapters, profiles, top
+        from theseus.tui.app import conversation_reader
+        self.assertIsNone(conversation_reader(self.project, "w", "%1", "none"))
+        self.assertEqual({"claude-code": "claude-code-jsonl", "codex": "pane-history", "opencode": "pane-history",
+                          "gemini-cli": "pane-history"},
+                         {name: adapters.name_of(profiles.PRESETS[name]["interactive"])
+                          for name in ("claude-code", "codex", "opencode", "gemini-cli")})
+        self.assertIsNotNone(adapters.load("claude-code-jsonl"))
+        self.assertIsNone(adapters.load("pane-history"))
+        self.assertEqual(["interactive.transcript 'jsonl' is not an adapter; known: claude-code-jsonl, pane-history, none"],
+                         profiles.problems("x", {"interactive": {"transcript": "jsonl"}}))
+        screens = ["$ make\nkey sk-ant-abcdefghijklmn\n", "$ make\nkey sk-ant-abcdefghijklmn\n", "$ make\nok\n"]
+        with mock.patch.object(top, "capture", side_effect=lambda pane, lines: screens.pop(0)) as capture:
+            read = conversation_reader(self.project, "w", "%1", "pane-history")
+            total, entries, reset = read(0)
+            self.assertEqual((1, True), (total, reset))
+            self.assertEqual("history", entries[0]["kind"])
+            self.assertNotIn("sk-ant-abcdefghijklmn", entries[0]["text"])
+            self.assertEqual((1, [], False), read(1), "an unchanged scrollback is not sent again")
+            self.assertIn("ok", read(1)[1][0]["text"])
+            self.assertEqual(("%1", 5000), capture.call_args.args)
+
     def test_a_session_file_rewritten_in_place_is_read_again(self):
-        from theseus import transcripts
+        from theseus.adapters import claude_code as transcripts
         self.session("1", os.getpid(), "$5:@3.%9", 100)
         self.assertEqual("abc-123", transcripts.session_of(self.sessions, "@3.%9")[0])
         stamp = os.stat(self.sessions).st_mtime_ns
@@ -1102,7 +1247,7 @@ class TranscriptTests(Sandbox):
         self.assertEqual("after-clear-session", transcripts.session_of(self.sessions, "@3.%9")[0])
 
     def test_a_long_transcript_is_read_from_its_tail(self):
-        from theseus import transcripts
+        from theseus.adapters import claude_code as transcripts
         path = self.tmp / "long.jsonl"
         filler = self.entry(type="user", message={"content": "x" * 1000})
         usage = {"input_tokens": 5, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}

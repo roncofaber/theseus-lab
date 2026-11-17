@@ -53,6 +53,7 @@ CLAUDE_INTERACTIVE = {
     "compact": "/compact Keep only: {keep}; drop finished task details.",
     "clear": "/clear",
     "sessions_dir": "~/.claude/sessions",
+    "transcript": "claude-code-jsonl",
     "messaging": True,
     "exit": "/exit",
     "session_flag": "--session-id",
@@ -114,7 +115,8 @@ PRESETS = {
         "retry": False,
         "capacity": 2,
         "interactive": {"launch": "codex", "resume": "", "busy_pattern": "", "compact": "/compact", "clear": "/new",
-                        "sessions_dir": "", "messaging": False},
+                        "sessions_dir": "", "messaging": False,
+                        "transcript": "pane-history"},
     },
     "opencode": {
         "label": "OpenCode (opencode run)",
@@ -130,7 +132,8 @@ PRESETS = {
         "retry": False,
         "capacity": 2,
         "interactive": {"launch": "opencode", "resume": "", "busy_pattern": "", "compact": "/compact", "clear": "/new",
-                        "sessions_dir": "", "messaging": False},
+                        "sessions_dir": "", "messaging": False,
+                        "transcript": "pane-history"},
     },
     "gemini-cli": {
         "label": "Google Gemini CLI (gemini -p)",
@@ -146,7 +149,8 @@ PRESETS = {
         "retry": False,
         "capacity": 2,
         "interactive": {"launch": "gemini", "resume": "", "busy_pattern": "", "compact": "/compress", "clear": "/clear",
-                        "sessions_dir": "", "messaging": False},
+                        "sessions_dir": "", "messaging": False,
+                        "transcript": "pane-history"},
     },
 }
 ALIASES = {"claude": "claude-subagent"}
@@ -180,6 +184,11 @@ def problems(name, section):
     extra = section.get("extra_args")
     if extra is not None and not (isinstance(extra, list) and all(isinstance(item, str) for item in extra)):
         found.append("extra_args must be a list of strings")
+    if isinstance(interactive, dict) and "transcript" in interactive:
+        from . import adapters
+        if interactive["transcript"] not in adapters.NAMES:
+            found.append(f"interactive.transcript {interactive['transcript']!r} is not an adapter; known: "
+                         f"{', '.join(adapters.NAMES)}")
     preset = section.get("preset")
     if preset is not None and preset not in PRESETS:
         found.append(f"preset {preset!r} is not a preset; presets: {', '.join(sorted(PRESETS))}")

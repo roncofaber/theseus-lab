@@ -108,6 +108,7 @@ A project section with the same name as a host profile overrides only the keys i
 | `interactive.startup_dialogs` | Screen texts of startup questions only a human may answer (Claude Code: the folder trust question and a new MCP server); a supervised agent showing one is `blocked` and theseus never answers it |
 | `interactive.compact`, `interactive.clear` | Commands typed between tasks: compact (same room, or clean to dirty) and clear (dirty to clean); `{keep}` is what compaction keeps |
 | `interactive.sessions_dir` | Where the CLI records running sessions (needed by `instance restart`) |
+| `interactive.transcript` | The transcript adapter that reads the CLI's own record of a session (see [Transcript adapters](#transcript-adapters)): `claude-code-jsonl` (the Claude Code presets), `pane-history` (the codex, opencode and gemini-cli presets: the console shows the pane's tmux scrollback) or `none` |
 | `interactive.messaging` | Whether the agent can message the coordinator session; without it workers reply in their pane and the queue detects the handoff file |
 
 Placeholders: `{command}`, `{prompt}`, `{message}`, `{session}`, `{model}`, `{permission_mode}`, `{keep}`, `{launch}`, `{agent}` (the registered agent name, shell-quoted), and the list item `{model_args}`.
@@ -187,6 +188,30 @@ messaging = false
 ```
 
 The requirements for a worker agent are small: a non-interactive mode that takes the prompt as an argument, works in the current directory and exits when done. For persistent instances: a REPL in a tmux pane with commands to compact and clear its context, and a visible busy indicator. A profile that works well is worth contributing back as a preset.
+
+## Transcript adapters
+
+What theseus reads from a CLI's record of its own session goes through one adapter, named by the profile's `interactive.transcript`. The adapter supplies the context in use and the model for the console's context meter, the newest API errors for the gateway classification, and the conversation the agent popup's Conversation tab shows. Without one, the context meter falls back to `interactive.context_pattern`, gateway errors are read from the pane only, and the Conversation tab shows the pane's tmux scrollback (`pane-history`, for CLIs that print inline) or is hidden (`none`).
+
+| Adapter | Reads |
+| --- | --- |
+| `claude-code-jsonl` | Claude Code's JSONL transcript: the session of a supervised agent from its stored session id, of another pane from the client's `interactive.sessions_dir`; user and assistant text, tool calls and results (folded to one line in the console), never thinking |
+| `pane-history` | Nothing; the console shows the pane's scrollback (`capture-pane -S`) |
+| `none` | Nothing; no Conversation tab |
+
+An adapter is one module in `src/theseus/adapters/`, registered in `ADAPTERS` in `src/theseus/adapters/__init__.py`, with three functions:
+- `session_state(conf, agent, interactive)`: the state of the session running in the agent's pane, or None;
+- `session_file(conf, interactive, session, cwd)`: the record of a known session id started in `cwd` (the coordinator), or None;
+- `read(path)`: the state of that record, read incrementally and safe to call from several threads.
+
+A state is a dict with:
+- `tokens` and `model`: the context in use after the last answer and its model, or None;
+- `errors`: the newest API errors as `{"time", "error", "text"}`, where `error` is the CLI's own error kind or None;
+- `last`: `answer`, `error` or None, for the newest assistant entry;
+- `entries`: the newest conversation entries as `{"kind", "text", "time"}`, with `kind` one of `user`, `assistant`, `tool` (plus `name`) and `result` (plus `error`);
+- `total`: how many entries were ever read, so the console asks only for new ones.
+
+Adding a CLI means writing that module in its own record format, adding its name to `ADAPTERS`, and setting `transcript = "<name>"` in the preset's `interactive` table. The console redacts API keys, key hashes and email addresses in everything it shows from a transcript or the scrollback.
 
 ## How delivery is detected
 
