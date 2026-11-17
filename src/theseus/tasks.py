@@ -8,6 +8,7 @@ different claims.
 import datetime
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -393,9 +394,14 @@ def unintegrated_files(worktree, root, ref="HEAD"):
                 missing.append(name)
             continue
         path = Path(worktree) / name
-        if path.is_file() and not path.is_symlink():
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
         shown = subprocess.run(["git", "-C", str(root), "show", f"{ref}:{name}"], capture_output=True)
+        if path.is_symlink():
+            # Git stores a symlink as its target text, not the content it points to.
+            if shown.returncode != 0 or shown.stdout != os.readlink(path).encode():
+                missing.append(name)
+            continue
+        if path.is_file():
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if shown.returncode != 0 or hashlib.sha256(shown.stdout).hexdigest() != digest:
             if not change_present(worktree, root, name):
                 missing.append(name)

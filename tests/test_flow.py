@@ -1,6 +1,7 @@
 """End to end on a fresh scaffold: the scaffold's own Supervisor suite passes, then a task goes through add, assign,
 a simulated worker handoff, merge, observation, full verification, complete, archive and retire."""
 import json
+import os
 import unittest
 
 from helpers import Sandbox
@@ -198,6 +199,22 @@ class TaskFlowTests(Sandbox):
         self.git("commit", "-q", "-am", "another task changed the same file before the merge")
         self.theseus("merge", TASK)
         self.assertEqual("A = 10\n\n\n\nB = 20\n", (self.project / "src/capture/shared.py").read_text())
+        self.theseus("tasks", "complete", TASK, "--summary", "done", "--check", "manual", "--log", str(worktree / ".theseus/handoff.md"))
+
+    def test_a_delivered_symlink_counts_as_integrated(self):
+        self.add_task(owned=("src/capture/", f"docs/investigations/{TASK}.md"))
+        self.git("commit", "-q", "-am", "queue")
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        worktree = self.tmp / "worktrees/worker-1-a"
+        self.write("src/capture/tool.sh", "#!/bin/sh\necho tool\n", root=worktree)
+        (worktree / "src/capture/bin").mkdir(parents=True)
+        os.symlink("../tool.sh", worktree / "src/capture/bin/tool")
+        self.write(f"docs/investigations/{TASK}.md", f"# Link\n\nTask `{TASK}` on base x. Topic: `new`.\n", root=worktree)
+        self.write(".theseus/handoff.md", f"Task: {TASK}\nResult: delivered\n", root=worktree)
+        digest = __import__("hashlib").sha256((worktree / "src/capture/tool.sh").read_bytes()).hexdigest()
+        self.write(".theseus/changed.sha256", f"{digest}  src/capture/tool.sh\n{digest}  src/capture/bin/tool\n", root=worktree)
+        self.theseus("merge", TASK)
+        self.assertTrue((self.project / "src/capture/bin/tool").is_symlink())
         self.theseus("tasks", "complete", TASK, "--summary", "done", "--check", "manual", "--log", str(worktree / ".theseus/handoff.md"))
 
     def test_worker_patches_never_conflict_on_generated_indexes(self):
