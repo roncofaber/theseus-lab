@@ -30,15 +30,19 @@ def project_series(projects):
     return series
 
 
-def legend(series):
-    line = Text()
+def legend(series, width=None):
+    """Legend lines: a colored square, the label and the total of each series, wrapped to `width`."""
+    lines = [Text()]
     for label, style, values in series:
+        item = Text.assemble(("■ ", style), label, (f" {sum(values)}", "bold"))
+        line = lines[-1]
+        if line and width and len(line) + 3 + len(item) > width:
+            lines.append(Text())
+            line = lines[-1]
         if line:
             line.append("   ")
-        line.append("■ ", style=style)
-        line.append(label)
-        line.append(f" {sum(values)}", style="bold")
-    return line
+        line.append_text(item)
+    return lines
 
 
 def merge_bins(values, factor):
@@ -154,7 +158,8 @@ def history(values, width, height, style="green", maximum=100.0, seconds=None, s
     footer = Text(" " * label_width + "└", style=AXIS)
     covered = int(seconds * len(shown)) if seconds else 0
     span = "" if not covered else f"-{covered}s" if covered < 60 else f"-{covered // 60}m"
-    footer.append(f"{span:<{max(0, plot_width - 3)}}now"[:plot_width], style=AXIS)
+    fits = span and plot_width >= len(span) + 4
+    footer.append(f"{span:<{plot_width - 3}}now" if fits else f"{'now':>{plot_width}}"[:plot_width], style=AXIS)
     lines.append(footer)
     return lines
 

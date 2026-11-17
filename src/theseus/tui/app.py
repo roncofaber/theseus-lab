@@ -81,7 +81,8 @@ class BarChart(Widget):
     def render(self):
         if not self.series:
             return Text("no activity data", style="dim")
-        lines = [charts.legend(self.series), *charts.stacked_bars(self.series, self.size.width, self.size.height - 1)]
+        key = charts.legend(self.series, self.size.width)
+        lines = [*key, *charts.stacked_bars(self.series, self.size.width, self.size.height - len(key))]
         return Text("\n").join(lines)
 
 
@@ -104,7 +105,7 @@ class HistoryChart(Widget):
 class ProjectCard(Static, can_focus=True):
     """A project on the Host tab: its accent border, name and summary; Enter or a click opens its tab."""
 
-    BINDINGS = [Binding("enter", "open", "Open tab")]
+    BINDINGS = [Binding("enter", "open", "Open tab", key_display="Enter")]
 
     class Open(Message):
         def __init__(self, root):
@@ -212,6 +213,12 @@ class HostView(VerticalScroll):
     def cards(self):
         return list(self.query(ProjectCard))
 
+    async def sync_cards(self, projects):
+        if [card.root for card in self.cards()] != [item["root"] for item in projects]:
+            grid = self.query_one("#cards", ItemGrid)
+            await grid.remove_children()
+            await grid.mount(*[ProjectCard(item) for item in projects])
+
     def update(self, snap, text):
         state = snap["host"]
         meters = resource_text(state, self.cpu)
@@ -223,17 +230,12 @@ class HostView(VerticalScroll):
             cores.update(core_text(self.cpu, self.size.width - 4))
         self.query_one("#cpu-history", HistoryChart).refresh()
         self.query_one("#host-chart", BarChart).plot(charts.project_series(snap["projects"]))
-        grid = self.query_one("#cards", ItemGrid)
-        existing = self.cards()
-        if [card.root for card in existing] != [item["root"] for item in snap["projects"]]:
-            for card in existing:
-                card.remove()
-            grid.mount(*[ProjectCard(item) for item in snap["projects"]])
-            existing = None
         needle = text.strip().lower()
-        for card, item in zip(existing or self.cards(), snap["projects"]):
-            card.show(item)
-            card.display = not needle or needle in card.search
+        items = {item["root"]: item for item in snap["projects"]}
+        for card in self.cards():
+            if card.root in items:
+                card.show(items[card.root])
+                card.display = not needle or needle in card.search
         fill(self.query_one("#pools", DataTable), R.matches(R.pool_rows(snap["pools"]), text))
         fill(self.query_one("#events", DataTable), R.matches(R.event_rows(snap["events"], project=True), text))
 
@@ -341,7 +343,7 @@ class TopApp(App):
         self.items = {}
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield Header(icon="◆")
         with TabbedContent(initial=HOST_TAB):
             with Pane("Host", id=HOST_TAB):
                 yield HostView(self.history, self.interval, id="host-view")
@@ -401,6 +403,7 @@ class TopApp(App):
         if self.pending_open and pane_id(self.pending_open) in self.views:
             tabs.active = pane_id(self.pending_open)
         self.pending_open = None
+        await self.query_one(HostView).sync_cards(snap["projects"])
         self.title = f"theseus top · {len(snap['projects'])} project(s) · updated {top.local_clock(snap['time'])}"
         self.redraw()
         if self.greet and snap["projects"]:

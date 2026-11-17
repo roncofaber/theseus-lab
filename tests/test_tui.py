@@ -19,6 +19,8 @@ from theseus import config as cfg
 from theseus import host, registry, store, top
 from theseus import workqueue as wq
 
+ALLOWED_GLYPHS = re.compile("[\u00b7\u2190-\u21ff\u2500-\u257f\u2580-\u259f\u25a0-\u25ff]")
+
 
 def fake_conf(root, name="alpha"):
     return SimpleNamespace(root=Path(root), name=name, data=Path(root) / "data",
@@ -238,17 +240,38 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
             self.assertIn("■ assigned 1", project_chart)
             self.assertIn("■ errors/stalled 0", project_chart)
 
-    async def test_screen_has_only_allowed_glyphs_and_no_em_dash(self):
+    async def test_cards_follow_projects_appearing_and_disappearing(self):
+        from textual.widgets import DataTable
+        from theseus.tui.app import TopApp
+        self.event("alpha", "assigned", 5)
+        shown = {"count": 2}
+
+        def snapshot():
+            state = host.snapshot()
+            state["projects"] = state["projects"][:shown["count"]]
+            return state
+
+        app = TopApp(interval=3600, snapshot_fn=snapshot)
+        self.app = app
+        async with app.run_test(size=(170, 60)) as pilot:
+            await self.settle(pilot, lambda: [c.project for c in app.query_one("#host-view").cards()] == ["alpha", "beta"])
+            for count, names in ((1, ["alpha"]), (2, ["alpha", "beta"])):
+                shown["count"] = count
+                await pilot.press("r")
+                await self.settle(pilot, lambda: [c.project for c in app.query_one("#host-view").cards()] == names
+                                  and app.query_one("#host-view #events", DataTable).row_count == 1)
+
+    async def test_screen_shows_only_box_block_geometric_and_arrow_glyphs(self):
+        from textual.widgets import TabbedContent
         self.event("alpha", "assigned", 5)
         async with self.app.run_test(size=(170, 60)) as pilot:
             await self.settle(pilot)
-            for key in ("1", "2", "3"):
+            for key, tab in zip("123", self.app.tab_ids()):
                 await pilot.press(key)
+                await self.settle(pilot, lambda: self.app.query_one(TabbedContent).active == tab)
                 await pilot.pause()
                 screen = self.app.export_screenshot()
-                self.assertNotIn(chr(0x2014), screen)
-                self.assertIsNone(re.search("[" + chr(0x2600) + "-" + chr(0x27BF) + chr(0x1F300) + "-" + chr(0x10FFFF) + "]",
-                                            screen))
+                self.assertEqual(set(), {c for c in screen if ord(c) > 127 and not ALLOWED_GLYPHS.match(c)})
 
     async def test_opens_on_the_current_project_tab(self):
         from textual.widgets import TabbedContent
@@ -337,6 +360,26 @@ class ChartTests(unittest.TestCase):
         lines = charts.stacked_bars([("a", "green", values)], 30, 10)
         self.assertTrue(all(len(line.plain) <= 30 for line in lines))
         self.assertIn("now", lines[-1].plain)
+
+    def test_legend_wraps_and_the_chart_keeps_its_time_axis(self):
+        from theseus.tui import charts
+        series = charts.kind_series(self.project("alpha", 1, 2, 3, 4)["activity"])
+        self.assertEqual(1, len(charts.legend(series)))
+        wrapped = charts.legend(series, 60)
+        self.assertGreater(len(wrapped), 1)
+        self.assertTrue(all(len(line) <= 60 for line in wrapped))
+        self.assertEqual("■ assigned 1   ■ delivered/partial/blocked 2   ■ merged/completed 3   ■ errors/stalled 4",
+                         " ".join(line.plain for line in charts.legend(series)))
+
+    def test_agent_rows_show_cpu_and_memory_bars(self):
+        from theseus.tui import rows
+        agent = {"name": "a", "pane": "%1", "state": "working", "task": None, "room": None, "idleMinutes": None}
+        state = {"agents": [{**agent, "cpu": 250.0, "rss": 2 * 2**30}, {**agent, "name": "b", "cpu": 40.0, "rss": 2**30},
+                            {**agent, "name": "c", "cpu": None, "rss": None}], "workers": [], "events": []}
+        cells = {key.split(":")[1]: [c.plain for c in found[7:9]] for key, found, _ in rows.agent_rows(state)}
+        self.assertEqual(["█████ 250%", "█████ 2.0G"], cells["a"])
+        self.assertEqual(["██░░░  40%", "██▌░░ 1.0G"], cells["b"])
+        self.assertEqual(["-", "-"], cells["c"])
 
     def test_history_and_meters(self):
         from theseus.tui import charts
