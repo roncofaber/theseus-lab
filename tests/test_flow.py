@@ -147,6 +147,25 @@ class TaskFlowTests(Sandbox):
         self.assertFalse((self.project / "README.md").exists())
         self.assertEqual("in_progress", self.record()["status"])
 
+    def test_deleted_and_moved_files_are_committed_and_complete(self):
+        self.write("src/capture/old.py", "OLD = 1\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "old module")
+        self.add_task(owned=("src/capture/", f"docs/investigations/{TASK}.md"))
+        self.git("commit", "-q", "-am", "queue")
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        worktree = self.tmp / "worktrees/worker-1-a"
+        (worktree / "src/capture/old.py").unlink()
+        self.write("src/capture/new.py", "OLD = 1\nNEW = 2\n", root=worktree)
+        self.write(f"docs/investigations/{TASK}.md", f"# Move\n\nTask `{TASK}` on base x. Topic: `new`.\n", root=worktree)
+        self.write(".theseus/handoff.md", f"Task: {TASK}\nResult: delivered\n", root=worktree)
+        digest = __import__("hashlib").sha256((worktree / "src/capture/new.py").read_bytes()).hexdigest()
+        self.write(".theseus/changed.sha256", f"{digest}  src/capture/new.py\nD src/capture/old.py\n", root=worktree)
+        self.theseus("merge", TASK)
+        self.assertEqual("", self.git("status", "--porcelain").stdout)
+        self.assertNotEqual(0, self.git("cat-file", "-e", "HEAD:src/capture/old.py", check=False).returncode)
+        self.theseus("tasks", "complete", TASK, "--summary", "moved", "--check", "manual", "--log", str(worktree / ".theseus/handoff.md"))
+
     def test_worker_commit_and_outside_paths_are_refused(self):
         self.add_task()
         self.theseus("instance", "assign", TASK, "worker-1", "a")

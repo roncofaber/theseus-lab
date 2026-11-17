@@ -360,7 +360,12 @@ def unintegrated_files(worktree, root, ref="HEAD"):
     worktree would lose them. Later commits may legitimately change a file again, so HEAD alone is not the reference."""
     missing = []
     for digest, name in manifest_entries(worktree) or []:
-        if digest in ("DELETED", "MALFORMED") or name.startswith((cfg.WORKER_LOG, "/")) or name.endswith(".patch"):
+        if digest == "MALFORMED" or name.startswith((cfg.WORKER_LOG, "/")) or name.endswith(".patch"):
+            continue
+        if digest in ("D", "DELETED"):
+            gone = subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{ref}:{name}"], capture_output=True)
+            if gone.returncode == 0:
+                missing.append(name)
             continue
         path = Path(worktree) / name
         if path.is_file() and not path.is_symlink():

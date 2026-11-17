@@ -300,7 +300,12 @@ def merge(conf, task_id, subject=None, accept=(), skip_patches=(), commit=True, 
     g.git(root, "add", "-A", "--", *paths)
     if g.git(root, "diff", "--cached", "--quiet", "--", *paths, check=False).returncode == 0:
         raise IntegrationError("nothing to merge: main already holds this delivery")
-    g.git(root, "commit", "-q", "-m", f"{subject or task['objective']}\n\nDelivered by {task_id}.", "--", *paths)
+    staged = set(g.out(root, "diff", "--cached", "--name-only").split())
+    stray = sorted(staged - set(paths))
+    if stray:
+        g.git(root, "reset", "-q", "--", *stray)
+    # A pathspec commit takes paths from the working tree and drops deleted files, so commit the staged index instead.
+    g.git(root, "commit", "-q", "-m", f"{subject or task['objective']}\n\nDelivered by {task_id}.")
     sha = g.out(root, "rev-parse", "--short=12", "HEAD")
     report.append(t.mark_merged(queue, task_id, sha))
     commit_record(conf, f"chore: {task_id} merged in {sha}")
