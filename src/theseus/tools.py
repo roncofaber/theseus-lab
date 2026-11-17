@@ -1,11 +1,14 @@
 """External tools without hard-coded paths. Each machine resolves every catalogued tool in this order:
 
 1. an environment override (the tool's conventional variable, such as GHIDRA_INSTALL_DIR, or THESEUS_TOOL_<NAME>);
-2. a setting in the Git-ignored theseus.local.toml, written by `theseus tools set NAME VALUE`;
-3. PATH, for command tools;
-4. common install locations (version-sorted, newest first), and for REA the command its own MCP registration records.
+2. [tools.paths] in the project's Git-ignored theseus.local.toml, written by `theseus tools set NAME VALUE`;
+3. [tools.paths] in the project's theseus.toml (discouraged: locations are per machine);
+4. [tools.paths] in the host configuration (~/.config/theseus/config.toml), written by `theseus tools set --host`;
+5. PATH, for command tools;
+6. common install locations (version-sorted, newest first), and for REA the command its own MCP registration records.
 
-theseus.toml only lists which tools a project needs ([tools] need = [...]); where they live is per machine. Resolved
+A configured location that does not work falls through to the next step. theseus.toml only lists which tools a project
+needs ([tools] need = [...]); where they live is per machine. Resolved
 tools are exported to every script, configured command and worker as THESEUS_TOOL_<NAME> plus the conventional
 variables (GHIDRA_INSTALL_DIR, JAVA_HOME), so `eval "$(theseus tools env)"` gives an interactive shell the same view.
 """
@@ -19,6 +22,9 @@ import subprocess
 from pathlib import Path
 
 from . import config as cfg
+from . import hostconfig
+
+LAYER_LABELS = {"project-local": cfg.LOCAL_NAME, "project": cfg.CONFIG_NAME, "host": "host config.toml"}
 
 CATALOG = {
     "ghidra": {"kind": "dir", "env": "GHIDRA_INSTALL_DIR", "check": "Ghidra/application.properties",
@@ -66,8 +72,14 @@ def expanded_globs(patterns):
     return sorted(set(found), key=version_key, reverse=True)
 
 
-def local_settings(conf):
-    return dict((conf.raw.get("tools") or {}).get("paths") or {})
+def configured(conf, name):
+    """(value, label) for every layer that sets a location for the tool, highest first."""
+    found = []
+    for label, _, data in reversed(conf.layers):
+        value = ((data.get("tools") or {}).get("paths") or {}).get(name) if label in LAYER_LABELS else None
+        if value:
+            found.append((cfg.expand(value, conf.values), LAYER_LABELS[label]))
+    return found
 
 
 def valid(entry, value):
@@ -109,8 +121,7 @@ def resolve(conf, name):
     for env_name in filter(None, (entry.get("env"), variable(name))):
         if os.environ.get(env_name):
             candidates.append((os.environ[env_name], f"environment {env_name}"))
-    if local_settings(conf).get(name):
-        candidates.append((cfg.expand(local_settings(conf)[name], conf.values), "theseus.local.toml"))
+    candidates += configured(conf, name)
     for value, source in candidates:
         if name == "rea":
             words = shlex.split(value)
@@ -178,8 +189,9 @@ def environment(conf):
     return env
 
 
-def set_tool(conf, name, value):
-    """Record a machine-specific location in theseus.local.toml [tools.paths]; refuses a value that does not work."""
+def set_tool(conf, name, value, host=False):
+    """Record a machine-specific location in [tools.paths] of theseus.local.toml, or of the host config.toml with host;
+    refuses a value that does not work."""
     if name not in CATALOG:
         raise cfg.ConfigError(f"unknown tool {name}; known: {', '.join(CATALOG)}")
     entry = CATALOG[name]
@@ -190,13 +202,14 @@ def set_tool(conf, name, value):
     elif not valid(entry, value):
         detail = f"no {entry['check']} inside it" if entry["kind"] == "dir" else "not usable"
         raise cfg.ConfigError(f"{value} is {detail}")
-    path = conf.root / cfg.LOCAL_NAME
+    path = hostconfig.path() if host else conf.root / cfg.LOCAL_NAME
     text = path.read_text() if path.exists() else ""
     line = f'{name} = "{value}"' if '"' not in value else f"{name} = '{value}'"
     pattern = re.compile(rf'^{re.escape(name)}\s*=.*$', re.MULTILINE)
     header = "[tools.paths]"
-    if header in text:
-        start = text.index(header) + len(header)
+    found = re.search(r"^\[tools\.paths\][ \t]*$", text, re.MULTILINE)
+    if found:
+        start = found.end()
         end = text.find("\n[", start)
         end = len(text) if end == -1 else end
         section = text[start:end]
@@ -204,5 +217,6 @@ def set_tool(conf, name, value):
         text = text[:start] + section + text[end:]
     else:
         text = text.rstrip("\n") + ("\n\n" if text.strip() else "") + header + "\n" + line + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
-    return f"{name} -> {value} (theseus.local.toml)"
+    return f"{name} -> {value} ({path if host else cfg.LOCAL_NAME})"

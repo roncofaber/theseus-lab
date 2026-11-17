@@ -36,11 +36,23 @@ theseus agents profiles
 | `opencode` | OpenCode, with any provider it supports | no |
 | `gemini-cli` | Google Gemini CLI | no |
 
-**Ask** which agent and plan the person uses if it is not obvious from the installed CLIs. Unverified profiles follow the CLI's documented flags but were not run end to end: before relying on one, dispatch a trivial task and check that the worker starts, writes its handoff and that `theseus followup` resumes it. Fix any mismatch with an override in `theseus.toml` (step 4) rather than editing the package.
+**Ask** which agent and plan the person uses if it is not obvious from the installed CLIs. Unverified profiles follow the CLI's documented flags but were not run end to end: before relying on one, dispatch a trivial task and check that the worker starts, writes its handoff and that `theseus followup` resumes it. Fix any mismatch with an override (in the host profile, step 3, or `theseus.toml`, step 5) rather than editing the package.
 
 Size `capacity` (concurrent workers) to the person's rate limits: two is a safe start for a personal subscription.
 
-## 3. Create or adopt the project
+## 3. Write the host configuration
+
+Settings about the person and this machine, rather than a project, go in `~/.config/theseus/config.toml`: the agent profile they actually launch (launcher command, gateway model and its environment, MCP servers, `extra_args` such as a client settings file), pools shared by several projects, host store retention and backups, tool locations, and host defaults such as `workers.default`. Projects then only name the profile and set project matters such as `capacity`.
+
+```sh
+theseus setup host --print     # look at the commented starter
+theseus setup host             # write it (refuses to replace an existing file; --force does)
+theseus config check           # validates the host file, and the project when run inside one
+```
+
+Uncomment and fill in what applies; every example in the starter is neutral. Layers, lowest to highest: package defaults and presets, this file, the project's `theseus.toml`, its `theseus.local.toml`, then `THESEUS_*` variables and command line flags. `theseus config show --sources` prints each resolved value with the layer it came from. For a person who already has profiles in a project's `theseus.toml`, `theseus setup host --import-project PATH --dry-run` shows which `[workers.*]` tables and local `[tools.paths]` would move into the host file; without `--dry-run` it writes them and prints the project lines they can remove (it never edits the project). If `theseus doctor` reports `pools.toml` or `store.toml` as deprecated, move their tables into `[pools.<name>]` and `[store]` of `config.toml`.
+
+## 4. Create or adopt the project
 
 New port:
 
@@ -67,14 +79,14 @@ original = ["/path/to/original"]
 
 The original is read-only for the whole project; never copy it into the repository.
 
-## 4. Configure
+## 5. Configure
 
 Edit `theseus.toml`; `theseus config show` prints the resolved values and `theseus config check` validates them.
 
 - `[commands]`: `build`, `smoke` and `verify` for the new code. Until `verify` is set, verification reports NOT CONFIGURED and the push gate refuses code.
-- `[workers]`: `default = "<profile>"`; a `[workers.<profile>]` section adjusts `model`, `capacity`, `permission_mode`, `command`, `env` or `interactive`. A section with any other name plus `preset = "<profile>"` defines a variant, for example a cheaper model for research tasks.
+- `[workers]`: `default = "<profile>"` (a host profile from step 3 or a preset); a `[workers.<profile>]` section adjusts `model`, `capacity`, `permission_mode`, `command`, `env` or `interactive`. A section with any other name plus `preset = "<profile>"` defines a variant, for example a cheaper model for research tasks.
 - `[rooms]`: enable for a clean-room port that will be published (dirty paths, spec paths).
-- `[tools] need`: external tools the project requires; `theseus tools` shows how each resolves and `theseus tools set NAME PATH` records a machine-specific location in `theseus.local.toml`.
+- `[tools] need`: external tools the project requires; `theseus tools` shows how each resolves and `theseus tools set NAME PATH` records a machine-specific location in `theseus.local.toml` (`--host` records it in the host file for every project).
 - `[re] targets`: original binaries to decompile once and index (name, path, sha256).
 
 Example variant:
@@ -93,7 +105,7 @@ model = "provider/model-name"
 capacity = 1
 ```
 
-## 5. Check the host
+## 6. Check the host
 
 ```sh
 theseus doctor
@@ -101,7 +113,7 @@ theseus doctor
 
 Fix every FAIL; WARN rows are optional features. For reverse engineering, install REA and Ghidra, then `theseus setup rea` registers the REA MCP server and skill for the clients in `re.clients`.
 
-## 6. Run workers
+## 7. Run workers
 
 Pick one mode, or mix them:
 
@@ -111,7 +123,7 @@ Pick one mode, or mix them:
 
 Set `[instances] coordinator` to the coordinator session's name when the agent supports peer messaging (Claude Code); otherwise workers reply in their pane and the queue detects the handoff file.
 
-## 7. Start the coordinator
+## 8. Start the coordinator
 
 Open the coordinator agent in the project root and tell it: "Read AGENTS.md and follow the theseus-coordinating skill." The `theseus-recipe` skill gives the phases, from exploration to release. Check that the agent sees the skills in `.agents/skills/`; for agents that read skills from another directory, link them there.
 

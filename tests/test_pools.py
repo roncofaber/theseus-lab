@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from theseus import pools, store
 
 ISOLATED = ("THESEUS_POOLS", "THESEUS_POOL_STATE", "THESEUS_DB", "THESEUS_REGISTRY", "THESEUS_BACKUPS",
-            "THESEUS_STORE_CONFIG")
+            "THESEUS_STORE_CONFIG", "THESEUS_CONFIG")
 
 
 class PoolTests(unittest.TestCase):

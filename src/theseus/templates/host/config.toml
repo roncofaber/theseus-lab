@@ -1,0 +1,49 @@
+# theseus host configuration: settings specific to this user and machine, shared by every project on it.
+#
+# Layers, lowest to highest: package defaults and presets < this file < a project's theseus.toml < its Git-ignored
+# theseus.local.toml < THESEUS_* environment variables and command line flags. Tables merge key by key.
+# `theseus config show --sources` prints each resolved value with the layer it came from; `theseus config check`
+# validates this file. Every example below is commented out: uncomment and adapt what you need.
+
+# Host defaults for project keys a project leaves unset.
+# [defaults]
+# workers.default = "gateway"
+# limits.heavy_runs = 2
+# paths.data = "~/.local/share/${THESEUS_PROJECT}"
+
+# Agent profiles available to every project, same fields as [workers.<name>] in theseus.toml (see
+# docs/agent-profiles.md). A project selects one with [workers] default = "gateway" or `--profile gateway`; a project
+# section with the same name overrides only the keys it sets, for example [workers.gateway] capacity = 4.
+# [workers.gateway]
+# preset = "claude-code"
+# command = "agent-launcher"
+# model = "provider/model-name"
+# model_flag = ""
+# env = { GATEWAY_MODEL = "{model}" }
+# mcp_servers = ["theseus"]
+# extra_args = ["--settings", "~/.config/theseus/worker-settings.json"]
+# pool = "gateway"
+# capacity = 2
+#
+# [workers.gateway.interactive]
+# env = { CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS = "10000" }
+
+# Pools cap the agents working a task at once across projects; a profile joins one with pool = "<name>".
+# [pools.gateway]
+# max = 4
+# priority = ["first-project", "second-project"]
+
+# Host store retention and backups (the values shown are the defaults).
+# [store.retention]
+# samples_days = 14
+# events_days = 0
+#
+# [store.backups]
+# directory = ""
+# daily = 7
+# weekly = 4
+
+# Tool locations on this machine; `theseus tools set --host NAME PATH` writes here.
+# [tools.paths]
+# ghidra = "/opt/ghidra"
+# java = "/usr/lib/jvm/java-21"

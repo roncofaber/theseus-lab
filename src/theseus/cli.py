@@ -87,21 +87,54 @@ def cmd_upgrade(args):
     emit(scaffold.upgrade(load().root, dry_run=args.dry_run))
 
 
+def source_rows(conf):
+    """(dotted key, value, layer) for every resolved value: the project configuration with each configured profile
+    expanded over its preset, then the host pools and store settings."""
+    from . import hostconfig, pools, profiles, store
+    rows = []
+    configured = [name for name, value in conf.raw["workers"].items() if isinstance(value, dict)]
+    for key, value in cfg.leaves(conf.raw, ""):
+        if key.split(".")[:2] in (["workers", name] for name in configured):
+            continue
+        rows.append((key, value, cfg.source(conf, key)[0] or "package"))
+    for name in configured:
+        try:
+            profile = profiles.resolve(conf, name)
+        except profiles.ProfileError as error:
+            rows.append((f"workers.{name}", str(error), "error"))
+            continue
+        profile.pop("name", None)
+        for key, value in cfg.leaves(profile, f"workers.{name}"):
+            rows.append((key, value, cfg.source(conf, key)[0] or f"package (preset {profile['preset']})"))
+    labels = hostconfig.pool_sources()
+    for key, value in cfg.leaves(pools.definitions(), ""):
+        rows.append((f"pools.{key}", value, labels.get(key, "host")))
+    labels = hostconfig.store_sources(store.DEFAULTS)
+    for key, value in cfg.leaves(store.settings(), ""):
+        rows.append((f"store.{key}", value, labels.get(key, "package")))
+    return rows
+
+
+def print_sources(conf):
+    files = []
+    for label, file, _ in conf.layers:
+        files.append(f"{label} {file}{'' if file.is_file() else ' (absent)'}" if file else label)
+    print("# layers, lowest to highest: " + "; ".join(files))
+    for key, value, label in source_rows(conf):
+        print(f"{key} = {json.dumps(value)}    # {label}")
+
+
 def cmd_config(args):
-    conf = load()
-    data = resolved(conf)
-    if args.action == "show":
-        print(json.dumps(data, indent=2))
-        return
     if args.action == "check":
-        from . import profiles
-        conf.instances()
-        conf.consumer_patterns()
-        for name in profiles.names(conf):
-            profiles.resolve(conf, name)
-        print(f"{cfg.CONFIG_NAME} at {conf.root} is valid")
+        return config_check()
+    conf = load()
+    if args.action == "show":
+        if args.sources:
+            print_sources(conf)
+        else:
+            print(json.dumps(resolved(conf), indent=2))
         return
-    value = data
+    value = resolved(conf)
     for part in (args.key or "").split("."):
         if not part:
             continue
@@ -109,6 +142,42 @@ def cmd_config(args):
             sys.exit(f"theseus: no configuration key {args.key}")
         value = value[part]
     print(value if isinstance(value, str) else json.dumps(value))
+
+
+def config_check():
+    """Validate the host config.toml and, inside a project, the project configuration; exit 1 on any error."""
+    from . import hostconfig, profiles, setup
+    errors, warnings = setup.host_check()
+    try:
+        root = cfg.find_root()
+    except cfg.ConfigError:
+        root = None
+    if root:
+        try:
+            conf = cfg.load(root=root)
+            conf.instances()
+            conf.consumer_patterns()
+            for name in profiles.names(conf):
+                profiles.resolve(conf, name)
+            for label, file, data in conf.layers:
+                if label in ("project", "project-local"):
+                    for name, section in (data.get("workers") or {}).items():
+                        if isinstance(section, dict):
+                            warnings += [f"{file}: [workers.{name}] {problem}" for problem in profiles.problems(name, section)]
+        except (cfg.ConfigError, profiles.ProfileError) as error:
+            if not (errors and str(error).startswith(str(hostconfig.path()))):
+                errors.append(str(error))
+    for line in warnings:
+        print(f"warning: {line}")
+    for note in hostconfig.deprecation_notes():
+        print(f"note: {note}")
+    for line in errors:
+        print(f"error: {line}", file=sys.stderr)
+    if errors:
+        sys.exit(1)
+    host = hostconfig.path()
+    print(f"host config {host} is valid" if host.is_file() else f"no host config at {host} (optional; `theseus setup host`)")
+    print(f"{cfg.CONFIG_NAME} at {root} is valid" if root else "not inside a project; checked the host config only")
 
 
 def cmd_check(args):
@@ -355,6 +424,11 @@ def cmd_doctor(args):
 
 def cmd_setup(args):
     from . import setup
+    if args.component == "host":
+        status, lines = setup.setup_host(force=args.force, print_text=args.print_text, import_project=args.import_project,
+                                         dry_run=args.dry_run)
+        emit(lines)
+        sys.exit(status)
     if args.component == "skill":
         if args.print_path:
             print(setup.packaged_skill() / "SKILL.md")
@@ -374,7 +448,7 @@ def cmd_tools(args):
     if args.action == "set":
         if not args.name or not args.value:
             sys.exit("usage: theseus tools set NAME VALUE")
-        print(tools.set_tool(conf, args.name, args.value))
+        print(tools.set_tool(conf, args.name, args.value, host=args.host))
         return
     if args.action == "env":
         for key, value in sorted(tools.environment(conf).items()):
@@ -430,9 +504,13 @@ def cmd_pool(args):
             sys.exit(0 if ok else 3)
         print("released" if pools.release(args.project, args.name, args.agent) else "no such slot")
         return
-    names = [args.name] if args.name else sorted(pools.definitions())
+    from . import hostconfig
+    try:
+        names = [args.name] if args.name else sorted(pools.definitions())
+    except hostconfig.ConfigError as error:
+        sys.exit(f"theseus: {error}")
     if not names:
-        print(f"no pools defined; create {pools.config_path()} (see `theseus pool --help`)")
+        print(f"no pools defined; add [pools.NAME] to {hostconfig.path()} (see `theseus pool --help`)")
         return
     for name in names:
         info = pools.status(name)
@@ -585,9 +663,13 @@ def build_parser():
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=guarded(cmd_upgrade))
 
-    p = sub.add_parser("config", help="show, query or validate the resolved configuration")
+    p = sub.add_parser("config", help="show, query or validate the resolved configuration",
+                       description="Configuration layers, lowest to highest: package defaults and presets, the host "
+                                   "~/.config/theseus/config.toml (THESEUS_CONFIG overrides the path), the project's "
+                                   "theseus.toml, its theseus.local.toml, then THESEUS_* variables and command line flags.")
     p.add_argument("action", choices=("show", "get", "check"))
     p.add_argument("key", nargs="?", help="dotted key for get, e.g. paths.data or workers.default")
+    p.add_argument("--sources", action="store_true", help="show: print each resolved value with the layer it came from")
     p.set_defaults(func=cmd_config)
 
     p = sub.add_parser("check", help="run the project's Supervisor tests (tools/Supervisor) with this interpreter")
@@ -772,15 +854,22 @@ def build_parser():
     p.add_argument("action", nargs="?", default="list", choices=("list", "set", "env"))
     p.add_argument("name", nargs="?")
     p.add_argument("value", nargs="?")
+    p.add_argument("--host", action="store_true", help="set: record the location in the host config.toml instead of theseus.local.toml")
     p.set_defaults(func=guarded(cmd_tools))
-    p = sub.add_parser("setup", help="setup skill (install the theseus-setup agent skill), setup rea [--update]")
-    p.add_argument("component", choices=("rea", "skill"))
+    p = sub.add_parser("setup", help="setup host (write a starter host config.toml), setup skill (install the theseus-setup "
+                                     "agent skill), setup rea [--update]")
+    p.add_argument("component", choices=("host", "rea", "skill"))
     p.add_argument("--update", action="store_true", help="rea: run `rea update` first")
     p.add_argument("--client", default="agents", choices=("agents", "claude_code"),
                    help="skill: ~/.agents/skills (agents, default) or ~/.claude/skills (claude_code)")
     p.add_argument("--dir", help="skill: install into this skills directory instead")
-    p.add_argument("--force", action="store_true", help="skill: replace an existing, different copy")
+    p.add_argument("--force", action="store_true", help="skill: replace an existing, different copy; host: replace an existing file")
     p.add_argument("--print-path", action="store_true", help="skill: print the packaged SKILL.md path and exit")
+    p.add_argument("--print", dest="print_text", action="store_true", help="host: print the file instead of writing it")
+    p.add_argument("--import-project", metavar="PATH",
+                   help="host: also move this project's [workers.*] profile tables and theseus.local.toml [tools.paths] into "
+                        "the host file (the project files are not edited; the lines you can remove are printed)")
+    p.add_argument("--dry-run", action="store_true", help="host: print what would be written or moved, write nothing")
     p.set_defaults(func=guarded(cmd_setup))
 
     p = sub.add_parser("agents", help="registered persistent agents: list, add NAME PANE, remove NAME, enable NAME, disable NAME")
@@ -790,9 +879,9 @@ def build_parser():
     p.add_argument("--provider", "--profile", dest="provider", help="agent profile (theseus agents profiles)")
     p.add_argument("--rooms", help="comma-separated rooms this agent may work (clean,dirty)")
     p.set_defaults(func=guarded(cmd_agents))
-    p = sub.add_parser("pool", help="host-wide worker pools shared across projects (~/.config/theseus/pools.toml)",
+    p = sub.add_parser("pool", help="host-wide worker pools shared across projects ([pools.NAME] in ~/.config/theseus/config.toml)",
                        description="Show who holds the slots of each pool. A pool caps the agents working at once across "
-                                   "projects: [pools.NAME] max = N, priority = [\"project\", ...] in ~/.config/theseus/pools.toml; "
+                                   "projects: [pools.NAME] max = N, priority = [\"project\", ...] in ~/.config/theseus/config.toml; "
                                    "a profile joins with pool = \"NAME\" in [workers.PROFILE].")
     p.add_argument("action", nargs="?", default="status", choices=("status", "hold", "release"),
                    help="hold or release a slot by hand for a worker no theseus queue tracks")

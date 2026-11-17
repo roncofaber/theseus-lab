@@ -38,8 +38,9 @@ class StoreBenchmark(unittest.TestCase):
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory(prefix="theseus-bench-")
         cls.db = Path(cls._tmp.name) / "theseus.db"
-        cls.saved = os.environ.get("THESEUS_STORE_CONFIG")
+        cls.saved = {key: os.environ.get(key) for key in ("THESEUS_STORE_CONFIG", "THESEUS_CONFIG")}
         os.environ["THESEUS_STORE_CONFIG"] = str(Path(cls._tmp.name) / "store.toml")
+        os.environ["THESEUS_CONFIG"] = str(Path(cls._tmp.name) / "config.toml")
         cls.conn = store.connect(cls.db)
         cls.now = time.time()
         rng = random.Random(7)
@@ -60,10 +61,11 @@ class StoreBenchmark(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.conn.close()
-        if cls.saved is None:
-            os.environ.pop("THESEUS_STORE_CONFIG", None)
-        else:
-            os.environ["THESEUS_STORE_CONFIG"] = cls.saved
+        for key, value in cls.saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         cls._tmp.cleanup()
 
     def report(self, name, seconds):

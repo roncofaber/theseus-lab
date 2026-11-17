@@ -14,8 +14,13 @@ Placeholders: {command} {prompt} {message} {session} {model} {permission_mode} {
 [model_flag, model] when a model is set and to nothing otherwise. Presets marked verified: false follow the CLI's
 public help but were not exercised end to end; dispatch a trivial task and follow it up before relying on one.
 
-[workers.<name>] in theseus.toml selects or overrides a profile: a section named after a preset adjusts it; any other
-name sets `preset = "<preset>"` and overrides fields; `capacity` and `model` apply to every profile.
+extra_args: arguments appended to the headless, resume and persistent-instance command lines after the MCP flags, with
+the same placeholders filled and a leading ~ expanded, for example a client settings file.
+
+[workers.<name>] selects or overrides a profile: a section named after a preset adjusts it; any other name sets
+`preset = "<preset>"` and overrides fields; `capacity` and `model` apply to every profile. The section is the merge of
+the host configuration and the project's files (theseus.config), so a project section that shares a host profile's
+name overrides only the keys it sets.
 """
 import copy
 import json
@@ -125,12 +130,29 @@ PRESETS = {
 }
 ALIASES = {"claude": "claude-subagent"}
 DEFAULT = "claude-code"
-OVERRIDABLE = set(PRESETS["claude-code"]) | {"preset", "fallback", "pool", "mcp_servers", "mcp_flags"}
+OVERRIDABLE = set(PRESETS["claude-code"]) | {"preset", "fallback", "pool", "mcp_servers", "mcp_flags", "extra_args"}
+INTERACTIVE_KEYS = set(CLAUDE_INTERACTIVE) | {"launch", "resume"}
 THESEUS_MCP = {"command": "theseus", "args": ["mcp", "--role", "worker"]}
 
 
 class ProfileError(Exception):
     pass
+
+
+def problems(name, section):
+    """What is wrong with one [workers.<name>] table: unknown keys and badly typed extra_args."""
+    found = [f"unknown key {key}; known: {', '.join(sorted(OVERRIDABLE))}" for key in section if key not in OVERRIDABLE]
+    interactive = section.get("interactive")
+    if isinstance(interactive, dict):
+        found += [f"unknown key interactive.{key}; known: {', '.join(sorted(INTERACTIVE_KEYS))}"
+                  for key in interactive if key not in INTERACTIVE_KEYS]
+    extra = section.get("extra_args")
+    if extra is not None and not (isinstance(extra, list) and all(isinstance(item, str) for item in extra)):
+        found.append("extra_args must be a list of strings")
+    preset = section.get("preset")
+    if preset is not None and preset not in PRESETS:
+        found.append(f"preset {preset!r} is not a preset; presets: {', '.join(sorted(PRESETS))}")
+    return found
 
 
 def names(conf):
@@ -231,15 +253,26 @@ def mcp_args(conf, profile):
     return [fill(flag, {"mcp_config": str(path)}) for flag in profile["mcp_flags"]]
 
 
+def extra_args(profile, **values):
+    """The profile's extra_args with placeholders filled and a leading ~ expanded."""
+    data = {"command": profile.get("command") or "", "model": profile.get("model") or "",
+            "permission_mode": profile.get("permission_mode") or "", **{k: v for k, v in values.items() if v is not None}}
+    return [os.path.expanduser(fill(item, data)) for item in profile.get("extra_args") or []]
+
+
 def launch_argv(profile, prompt, session, model, conf=None):
     argv = render(profile.get("headless"), profile, prompt=prompt, session=session, model=model)
-    return argv + mcp_args(conf, profile) if argv else argv
+    if not argv:
+        return argv
+    return argv + mcp_args(conf, profile) + extra_args(profile, prompt=prompt, session=session, model=model)
 
 
 def resume_template(profile, session, model, conf=None):
     """The resume command with {message} left in place, stored in launch.json for followups."""
     argv = render(profile.get("resume"), profile, session=session, model=model, message="{message}")
-    return argv + mcp_args(conf, profile) if argv else argv
+    if not argv:
+        return argv
+    return argv + mcp_args(conf, profile) + extra_args(profile, session=session, model=model, message="{message}")
 
 
 EMPTY_OPTION = re.compile(r" --?[\w-]+ \{(\w+)\}")
@@ -247,8 +280,8 @@ EMPTY_OPTION = re.compile(r" --?[\w-]+ \{(\w+)\}")
 
 def interactive_launch(conf, profile, agent=None):
     """The command line that starts a persistent instance: `env VAR=value ...` for the profile's env and
-    interactive.env, the launch template, then the MCP flags. An option whose placeholder value is empty is dropped;
-    without an agent name {agent} stays for instance-restart.sh to fill from the session record."""
+    interactive.env, the launch template, the MCP flags, then extra_args. An option whose placeholder value is empty is
+    dropped; without an agent name {agent} stays for instance-restart.sh to fill from the session record."""
     interactive = profile.get("interactive") or {}
     template = conf.section("instances").get("launch") or interactive.get("launch") or profile.get("command") or ""
     values = {"command": profile.get("command") or "", "permission_mode": profile.get("permission_mode") or ""}
@@ -257,7 +290,8 @@ def interactive_launch(conf, profile, agent=None):
     template = EMPTY_OPTION.sub(lambda m: "" if m.group(1) in values and not values[m.group(1)] else m.group(0), template)
     variables = {**env(profile), **{k: str(v) for k, v in (interactive.get("env") or {}).items()}}
     prefix = "env " + " ".join(shlex.quote(f"{k}={v}") for k, v in variables.items()) if variables else ""
-    return " ".join(filter(None, [prefix, fill(template, values), shlex.join(mcp_args(conf, profile))]))
+    extra = shlex.join(extra_args(profile, agent=agent))
+    return " ".join(filter(None, [prefix, fill(template, values), shlex.join(mcp_args(conf, profile)), extra]))
 
 
 def stall_patterns(conf, profile_name=None):

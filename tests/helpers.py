@@ -1,5 +1,5 @@
-"""Shared fixtures: every test runs against temporary data, scratch and worktree roots, a temporary host database and
-backup directory and a throwaway Git identity, so nothing touches the user's real projects, host store, tmux server or
+"""Shared fixtures: every test runs against temporary data, scratch and worktree roots, a temporary host database,
+backup directory and host configuration (THESEUS_CONFIG, XDG_CONFIG_HOME, XDG_DATA_HOME) and a throwaway Git identity, so nothing touches the user's real projects, host store, tmux server or
 model gateway."""
 import os
 import subprocess
@@ -25,6 +25,9 @@ def base_env(root):
         "THESEUS_DB": str(root / "host/theseus.db"),
         "THESEUS_BACKUPS": str(root / "host/backups"),
         "THESEUS_STORE_CONFIG": str(root / "store.toml"),
+        "THESEUS_CONFIG": str(root / "config.toml"),
+        "XDG_CONFIG_HOME": str(root / "xdg-config"),
+        "XDG_DATA_HOME": str(root / "xdg-data"),
         "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
         "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.invalid",
         "GIT_CONFIG_GLOBAL": str(root / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
@@ -45,7 +48,7 @@ class Sandbox(unittest.TestCase):
         self.env = base_env(self.tmp)
         self.project = self.tmp / "project"
         self.saved_environ = dict(os.environ)
-        os.environ.update({k: v for k, v in self.env.items() if k.startswith(("THESEUS_", "GIT_"))})
+        os.environ.update({k: v for k, v in self.env.items() if k.startswith(("THESEUS_", "GIT_", "XDG_"))})
         self.addCleanup(self.restore_environ)
 
     def restore_environ(self):

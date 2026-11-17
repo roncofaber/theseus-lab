@@ -1,13 +1,14 @@
 """Host-wide worker pools: several projects share one provider limit, such as a model gateway that allows a fixed
 number of concurrent agents.
 
-~/.config/theseus/pools.toml (THESEUS_POOLS overrides the path) declares each pool:
+The host configuration (~/.config/theseus/config.toml, see theseus.hostconfig) declares each pool:
 
     [pools.gateway]
     max = 4                               # agents working a task at once, across every project
     priority = ["laser-port", "game-port"] # earlier projects win when the pool is full
 
-A profile joins a pool with `pool = "<name>"` in its [workers.<profile>] section. Only agents working a task hold a
+The older ~/.config/theseus/pools.toml (THESEUS_POOLS overrides the path) is still read, below config.toml, and
+reported as deprecated. A profile joins a pool with `pool = "<name>"` in its [workers.<profile>] section. Only agents working a task hold a
 slot; idle sessions cost nothing. The leases and claims live in the host store (theseus.store); every queue tick
 refreshes its project's slots there and takes a new one with store.acquire(), which checks room and priority and takes
 the slot in one transaction. A project that has ready work but finds the pool full records a claim; while a fresh claim
@@ -15,20 +16,17 @@ from a higher-priority project exists, lower-priority projects start no new task
 the slots return. Slots a project stopped refreshing expire, so a stopped queue never holds the pool forever.
 """
 import os
-import tomllib
 from pathlib import Path
 
-from . import store
+from . import hostconfig, store
 
 CLAIM_TTL = store.CLAIM_TTL
 LEASE_TTL = store.LEASE_TTL
 
 
 def config_path():
-    if os.environ.get("THESEUS_POOLS"):
-        return Path(os.environ["THESEUS_POOLS"])
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    return Path(base) / "theseus" / "pools.toml"
+    """The deprecated pools.toml."""
+    return hostconfig.pools_path()
 
 
 def state_dir():
@@ -40,10 +38,8 @@ def state_dir():
 
 
 def definitions():
-    path = config_path()
-    if not path.exists():
-        return {}
-    return tomllib.loads(path.read_text()).get("pools", {})
+    """[pools.<name>] from config.toml over the deprecated pools.toml."""
+    return hostconfig.pools()
 
 
 def pool_of(conf, profile_name):

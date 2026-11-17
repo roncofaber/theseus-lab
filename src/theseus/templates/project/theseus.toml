@@ -1,6 +1,8 @@
 # theseus configuration for {{PROJECT}}. Every value the workflow would otherwise hard-code lives here.
-# Machine-specific values (the original's path, a different data root) go in the Git-ignored theseus.local.toml,
-# which is merged over this file. `theseus config show` prints the resolved values.
+# Machine-specific values for this project (the original's path, a different data root) go in the Git-ignored
+# theseus.local.toml, which is merged over this file. Settings about you and this machine shared by every project
+# (agent profiles, pools, tool locations, host defaults) go in ~/.config/theseus/config.toml (`theseus setup host`),
+# below this file. `theseus config show --sources` prints the resolved values and where each came from.
 
 [project]
 name = "{{PROJECT}}"
@@ -33,7 +35,8 @@ heavy_runs = 2
 # Agent profile for workers (`theseus agents profiles` lists them): claude-code (your own Claude Code login or API
 # key), codex, opencode, gemini-cli, claude-subagent (launched by a Claude Code coordinator). A [workers.<name>]
 # section adjusts a profile (model, capacity, permission_mode, command, env, interactive); a section with another name
-# sets preset = "<profile>" to define a variant.
+# sets preset = "<profile>" to define a variant. A profile defined in the host config.toml can be named here too; a
+# section here with the same name overrides only the keys it sets. Remove default to use the host's [defaults].
 default = "claude-code"
 retries = 3
 

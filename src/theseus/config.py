@@ -1,13 +1,19 @@
-"""Per-project configuration: theseus.toml at the project root, optionally overlaid by the Git-ignored theseus.local.toml.
+"""Per-project configuration: theseus.toml at the project root, optionally overlaid by the Git-ignored theseus.local.toml,
+over the host configuration (theseus.hostconfig) and the package defaults.
 
-Every value a consuming project would otherwise hard-code lives here. The loader never invents a project: without a
-theseus.toml it raises ConfigError instead of falling back to home or temporary directories.
+Layers, lowest to highest: package (DEFAULTS and the agent presets), host (~/.config/theseus/config.toml), project
+(theseus.toml), project-local (theseus.local.toml), env (THESEUS_DATA, THESEUS_SCRATCH, THESEUS_WORKTREES). Tables merge
+key by key, so a project section that shares a host profile's name overrides only the keys it sets. The loader never
+invents a project: without a theseus.toml it raises ConfigError instead of falling back to home or temporary directories.
 """
 import copy
 import os
 import re
 import tomllib
 from pathlib import Path
+
+from . import hostconfig
+from .hostconfig import ConfigError
 
 CONFIG_NAME = "theseus.toml"
 LOCAL_NAME = "theseus.local.toml"
@@ -87,10 +93,6 @@ ENV_OVERRIDES = {"THESEUS_DATA": ("paths", "data"), "THESEUS_SCRATCH": ("paths",
                  "THESEUS_WORKTREES": ("paths", "worktrees")}
 
 
-class ConfigError(Exception):
-    pass
-
-
 def merge(base, overlay):
     result = copy.deepcopy(base)
     for key, value in overlay.items():
@@ -136,9 +138,10 @@ def slug(text):
 
 
 class Config:
-    def __init__(self, root, raw):
+    def __init__(self, root, raw, layers=None):
         self.root = Path(root).resolve()
         self.raw = raw
+        self.layers = layers or [("package", None, DEFAULTS)]
         name = raw["project"].get("name") or self.root.name
         self.name = name
         self.prefix = slug(raw["project"].get("prefix") or name) or "theseus"
@@ -252,21 +255,54 @@ class Config:
 
 def load(start=None, root=None):
     root = Path(root).resolve() if root else find_root(start)
-    raw = {}
-    for name in (CONFIG_NAME, LOCAL_NAME):
-        path = root / name
-        if path.is_file():
-            try:
-                raw = merge(raw, tomllib.loads(path.read_text()))
-            except tomllib.TOMLDecodeError as error:
-                raise ConfigError(f"{path}: {error}") from error
     if not (root / CONFIG_NAME).is_file():
         raise ConfigError(f"{root} has no {CONFIG_NAME}")
-    unknown = set(raw) - set(DEFAULTS)
-    if unknown:
-        raise ConfigError(f"unknown configuration sections: {', '.join(sorted(unknown))}")
-    raw = merge(DEFAULTS, raw)
+    host = hostconfig.path()
+    layers = [("package", None, DEFAULTS), ("host", host, hostconfig.project_layer(hostconfig.read()))]
+    for label, name in (("project", CONFIG_NAME), ("project-local", LOCAL_NAME)):
+        path = root / name
+        data = {}
+        if path.is_file():
+            try:
+                data = tomllib.loads(path.read_text())
+            except tomllib.TOMLDecodeError as error:
+                raise ConfigError(f"{path}: {error}") from error
+        unknown = set(data) - set(DEFAULTS)
+        if unknown:
+            raise ConfigError(f"{path}: unknown configuration sections: {', '.join(sorted(unknown))}")
+        layers.append((label, path, data))
+    env = {}
     for variable, (section, key) in ENV_OVERRIDES.items():
         if os.environ.get(variable):
-            raw[section][key] = os.environ[variable]
-    return Config(root, raw)
+            env.setdefault(section, {})[key] = os.environ[variable]
+    layers.append(("env", None, env))
+    raw = {}
+    for _, _, data in layers:
+        raw = merge(raw, data)
+    return Config(root, raw, layers)
+
+
+def lookup(table, dotted):
+    """(True, value) when the dotted key is set in a nested table, else (False, None)."""
+    value = table
+    for part in dotted.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return False, None
+        value = value[part]
+    return True, value
+
+
+def source(conf, dotted):
+    """The highest layer that sets a dotted key: (label, file), or (None, None) when no layer does."""
+    for label, file, data in reversed(conf.layers):
+        if lookup(data, dotted)[0]:
+            return label, file
+    return None, None
+
+
+def leaves(value, prefix):
+    if isinstance(value, dict) and value:
+        for key, item in value.items():
+            yield from leaves(item, f"{prefix}.{key}" if prefix else key)
+    else:
+        yield prefix, value

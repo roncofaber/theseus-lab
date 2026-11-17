@@ -13,9 +13,10 @@ import re
 import shutil
 import sqlite3
 import time
-import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
+
+from . import hostconfig
 
 BUSY_TIMEOUT = 30.0
 CLAIM_TTL = 15 * 60
@@ -849,25 +850,16 @@ def for_project(conf):
 
 
 def config_path():
-    if os.environ.get("THESEUS_STORE_CONFIG"):
-        return Path(os.environ["THESEUS_STORE_CONFIG"])
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    return Path(base) / "theseus" / "store.toml"
+    """The deprecated store.toml."""
+    return hostconfig.store_path()
 
 
 def settings():
-    """store.toml merged over DEFAULTS."""
-    merged = {section: dict(values) for section, values in DEFAULTS.items()}
-    file = config_path()
-    if file.exists():
-        try:
-            loaded = tomllib.loads(file.read_text())
-        except tomllib.TOMLDecodeError as error:
-            raise StoreError(f"{file}: {error}") from error
-        for section, values in loaded.items():
-            if section in merged and isinstance(values, dict):
-                merged[section].update(values)
-    return merged
+    """Retention and backups: DEFAULTS < store.toml (deprecated) < [store] in the host config.toml."""
+    try:
+        return hostconfig.store(DEFAULTS)
+    except hostconfig.ConfigError as error:
+        raise StoreError(str(error)) from error
 
 
 def backup_dir():

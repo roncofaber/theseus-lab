@@ -44,13 +44,15 @@ class StoreCase(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
         self.saved = {k: os.environ.get(k) for k in ("THESEUS_DB", "XDG_DATA_HOME", "THESEUS_POOLS", "THESEUS_POOL_STATE",
-                                                     "THESEUS_REGISTRY", "THESEUS_BACKUPS", "THESEUS_STORE_CONFIG")}
+                                                     "THESEUS_REGISTRY", "THESEUS_BACKUPS", "THESEUS_STORE_CONFIG",
+                                                     "THESEUS_CONFIG")}
         self.addCleanup(self.restore)
         self.db = self.tmp / "host" / "theseus.db"
         os.environ["THESEUS_DB"] = str(self.db)
         os.environ["THESEUS_REGISTRY"] = str(self.tmp / "projects.json")
         os.environ["THESEUS_BACKUPS"] = str(self.tmp / "backups")
         os.environ["THESEUS_STORE_CONFIG"] = str(self.tmp / "store.toml")
+        os.environ["THESEUS_CONFIG"] = str(self.tmp / "config.toml")
         os.environ["THESEUS_POOLS"] = str(self.tmp / "pools.toml")
         os.environ["THESEUS_POOL_STATE"] = str(self.tmp / "pool-state")
         (self.tmp / "pools.toml").write_text('[pools.gw]\nmax = 2\npriority = ["first", "second"]\n')

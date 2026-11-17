@@ -1,5 +1,6 @@
-"""Host readiness: `theseus doctor` checks the tools the workflow uses, and `theseus setup rea` wires REA (the
-reverse-engineering MCP server and its skill) into the configured agent clients through REA's own `rea setup`.
+"""Host readiness: `theseus doctor` checks the tools the workflow uses and the host configuration, `theseus setup host`
+writes a starter host configuration, and `theseus setup rea` wires REA (the reverse-engineering MCP server and its
+skill) into the configured agent clients through REA's own `rea setup`.
 
 REA owns client registration and skill installation and records this machine's absolute paths in each client's
 configuration; theseus stores no paths. It resolves REA, Ghidra and the JDK through `theseus.tools` and passes them
@@ -7,13 +8,14 @@ to `rea setup` as the provider environment.
 """
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
 import time
 from pathlib import Path
 
-from . import tools
+from . import hostconfig, tools
 
 SKILL = "reverse-engineer-anything"
 SKILL_HOMES = {"claude_code": "~/.claude/skills", "default": "~/.agents/skills"}
@@ -41,6 +43,142 @@ def install_skill(client="agents", directory=None, force=False):
         target.unlink()
     shutil.copytree(source, target)
     return 0, [f"installed {target}"]
+
+
+def host_template():
+    from importlib import resources
+    return (resources.files("theseus") / "templates" / "host" / "config.toml").read_text()
+
+
+def host_check(text=None, file=None):
+    """(errors, warnings) for the host config.toml (or for text that would be written to it)."""
+    import tomllib
+    from . import profiles
+    file = file or hostconfig.path()
+    try:
+        data = tomllib.loads(text) if text is not None else hostconfig.parse(file)
+    except (tomllib.TOMLDecodeError, hostconfig.ConfigError) as error:
+        return [str(error) if text is None else f"{file}: {error}"], []
+    return hostconfig.validate(data, file, profiles.problems, list(tools.CATALOG))
+
+
+def host_rows():
+    file = hostconfig.path()
+    errors, warnings = host_check()
+    rows = [("FAIL", "host config", error) for error in errors]
+    rows += [("WARN", "host config", warning) for warning in warnings]
+    if not errors:
+        rows.append(("ok", "host config", str(file) if file.is_file() else f"none at {file} (optional; `theseus setup host`)"))
+    rows += [("WARN", "deprecated file", note) for note in hostconfig.deprecation_notes()]
+    return rows
+
+
+TABLE = re.compile(r"^\s*(\[\[?)\s*([^\[\]#]+?)\s*\]\]?\s*(?:#.*)?$")
+
+
+def tables(text):
+    """(dotted name, first line, end line) of each single-bracket table, 0-based and end-exclusive. A table ends at the
+    next header, leaving trailing blank and comment lines to whatever follows."""
+    lines = text.splitlines()
+    heads = [(i, m.group(1), re.sub(r"\s+", "", m.group(2))) for i, line in enumerate(lines) if (m := TABLE.match(line))]
+    found = []
+    for n, (start, brackets, name) in enumerate(heads):
+        end = heads[n + 1][0] if n + 1 < len(heads) else len(lines)
+        while end > start + 1 and (not lines[end - 1].strip() or lines[end - 1].lstrip().startswith("#")):
+            end -= 1
+        if brackets == "[":
+            found.append((name, start, end))
+    return lines, found
+
+
+def import_slices(project):
+    """What --import-project moves: [(file, title, start, end, text)] and notes about what it leaves in place. Profiles
+    come from theseus.toml and theseus.local.toml (a profile in both moves from theseus.toml only), tool locations from
+    theseus.local.toml; each slice is checked to parse back to exactly the table it came from."""
+    import tomllib
+    project = Path(project).resolve()
+    slices, notes, moved = [], [], set()
+    for name in ("theseus.toml", "theseus.local.toml"):
+        file = project / name
+        if not file.is_file():
+            continue
+        text = file.read_text()
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as error:
+            raise hostconfig.ConfigError(f"{file}: {error}") from error
+        lines, found = tables(text)
+        wanted = {key: value for key, value in (data.get("workers") or {}).items() if isinstance(value, dict)}
+        groups = {}
+        for profile in wanted:
+            if profile in moved:
+                notes.append(f"[workers.{profile}] in {file} stays: it also exists in theseus.toml and now overrides the host profile")
+                continue
+            groups[f"[workers.{profile}]"] = ([t for t in found if t[0] == f"workers.{profile}" or t[0].startswith(f"workers.{profile}.")],
+                                              ("workers", profile), wanted[profile])
+        paths = (data.get("tools") or {}).get("paths")
+        if name == "theseus.local.toml" and paths:
+            groups["[tools.paths]"] = ([t for t in found if t[0] == "tools.paths"], ("tools", "paths"), paths)
+        for title, (parts, (section, key), expected) in groups.items():
+            chunk = "\n".join("\n".join(lines[start:end]) for _, start, end in parts)
+            try:
+                parsed = tomllib.loads(chunk).get(section, {}).get(key) if parts else None
+            except tomllib.TOMLDecodeError:
+                parsed = None
+            if parsed != expected:
+                notes.append(f"{title} in {file} is not written as its own tables (dotted keys or an inline table); copy it by hand")
+                continue
+            if section == "workers":
+                moved.add(key)
+            for _, start, end in parts:
+                slices.append((file, title, start, end, "\n".join(lines[start:end])))
+    return slices, notes
+
+
+def setup_host(force=False, print_text=False, import_project=None, dry_run=False):
+    """Write the starter host config.toml (refused over an existing file without force). With import_project, append
+    that project's profile tables and local tool locations; the project files are never edited."""
+    target = hostconfig.path()
+    exists = target.is_file()
+    if exists and not force and not import_project and not print_text:
+        return 1, [f"{target} exists; pass --force to replace it with the starter (or --print to see it)"]
+    base = target.read_text() if exists and not force else host_template()
+    if not import_project:
+        if print_text:
+            return 0, [host_template().rstrip("\n")]
+        if dry_run:
+            return 0, [f"would write the starter to {target}; nothing written"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(base)
+        return 0, [f"wrote {target}; edit it, then `theseus config check`"]
+    import tomllib
+    slices, notes = import_slices(import_project)
+    current = tomllib.loads(base)
+    clashes = [f"{title} already exists in {target}" for _, title, *_ in slices
+               if (title.startswith("[workers.") and title[9:-1] in (current.get("workers") or {}))
+               or (title == "[tools.paths]" and "paths" in (current.get("tools") or {}))]
+    if not slices:
+        return 1, notes + [f"nothing to import from {import_project}"]
+    blocks, last = [], None
+    for file, title, start, end, chunk in slices:
+        if file != last:
+            blocks.append(f"# Imported from {file}")
+            last = file
+        blocks.append(chunk)
+    text = base.rstrip("\n") + "\n\n" + "\n\n".join(blocks) + "\n"
+    errors, _ = host_check(text, target)
+    if clashes or errors:
+        return 1, sorted(set(clashes)) + errors + ["nothing written"]
+    plan = [f"{'would move' if dry_run else 'moved'} {title} from {file} lines {start + 1}-{end}" for file, title, start, end, _ in slices]
+    if print_text:
+        return 0, [text.rstrip("\n")]
+    if dry_run:
+        return 0, plan + notes + [f"target: {target} ({'append' if exists and not force else 'new file from the starter'}); nothing written"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    removable = [f"  {file}: lines {start + 1}-{end} ({title})" for file, title, start, end, _ in slices]
+    return 0, plan + notes + [f"wrote {target}", "the project files are unchanged; once `theseus config check` passes you can "
+                              "remove these lines from them (keep project-specific keys such as capacity there):", *removable]
 
 
 def rea_environment(conf):
@@ -132,7 +270,7 @@ def doctor(conf):
             location = skill_location(client)
             rows.append(("ok" if location else "FAIL", f"rea skill ({client})",
                          str(location) if location else "missing; run `theseus setup rea`"))
-    return rows + store_rows()
+    return rows + host_rows() + store_rows()
 
 
 def store_rows():
