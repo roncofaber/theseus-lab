@@ -158,7 +158,7 @@ def record_size(record):
     return len(json.dumps(record))
 
 
-def add(queue, task_id, role, owned, objective, contract, accept, depends=(), milestone=None, room=None):
+def add(queue, task_id, role, owned, objective, contract, accept, depends=(), milestone=None, room=None, priority=0):
     if not TASK_ID.fullmatch(task_id):
         raise TaskError(f"{task_id} is not a kebab-case task id")
     known = queue.index()
@@ -188,6 +188,8 @@ def add(queue, task_id, role, owned, objective, contract, accept, depends=(), mi
     }
     if milestone:
         record["milestone"] = milestone
+    if priority:
+        record["priority"] = int(priority)
     if room:
         if room not in ("clean", "dirty"):
             raise TaskError(f"room must be clean or dirty, not {room}")
@@ -607,6 +609,18 @@ def note(queue, task_id, text):
     task["assignmentNote"] = text
     queue.save(document)
     return f"{task_id}: note set"
+
+
+def set_priority(queue, task_id, priority):
+    """Higher priority is assigned first among ready tasks; equal priorities keep task-file order."""
+    document = queue.load()
+    task = queue.open_task(document, task_id)
+    if int(priority):
+        task["priority"] = int(priority)
+    else:
+        task.pop("priority", None)
+    queue.save(document)
+    return f"{task_id}: priority {int(priority)}"
 
 
 def hold(queue, task_id, held):

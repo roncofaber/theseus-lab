@@ -32,6 +32,9 @@ QUEUE_COLOR = {"review": MAGENTA, "merged": CYAN, "working": GREEN, "ready": YEL
 ROWS = {"actions": 2, "waiting": 5, "events": 10}
 ROOM_COLOR = {"dirty": RED, "clean": GREEN}
 SLOW, VERY_SLOW, QUIET_WARN = 3600, 7200, 20 * 60
+AFTERGLOW = 90
+GLOW_LABEL = {"delivered": "delivered", "partial": "partial", "blocked": "blocked", "merged": "merged",
+              "completed": "completed", "cleared": "context cleared", "compacted": "compacted"}
 _CPU_PREVIOUS = {}
 
 
@@ -299,6 +302,18 @@ def pool_states(conf):
         return []
 
 
+def recent(state, kinds, seconds=AFTERGLOW):
+    """Events of the given kinds within the afterglow window, newest first."""
+    found = []
+    for record in reversed(state.get("events", [])):
+        elapsed = age(record.get("time"))
+        if elapsed is None or elapsed > seconds:
+            break
+        if record["kind"] in kinds:
+            found.append((record, elapsed))
+    return found
+
+
 def snapshot(conf, sample=False):
     states = ag.states(conf)
     if sample:
@@ -314,6 +329,7 @@ def snapshot(conf, sample=False):
         "rooms": {x["id"]: x.get("room") for v in summary.values() for x in v},
         "blocked": {x["id"]: x["reasons"] for x in summary["blocked"]},
         "times": task_times(conf),
+        "priorities": {x["id"]: int(x.get("priority") or 0) for x in t.Queue(conf).load().get("tasks", []) if x.get("priority")},
         "paused": wq.paused(conf), "git": git_state(conf), "verification": verification_state(conf),
         "events": merge_resets(wq.events(conf, 200)),
         "today": today_stats(wq.events(conf)), "progress": milestone_progress(conf),
@@ -531,6 +547,11 @@ def render(state, width=120, height=None, ui=None):
     for number, agent in enumerate(state["agents"], 1):
         color = STATE_COLOR.get(agent["state"], R)
         note = f"{RED}dirty{R}" if agent.get("tainted") else ""
+        glow = next(((r, e) for r, e in recent(state, GLOW_LABEL) if r.get("agent") == agent["name"]), None)
+        if glow:
+            record, elapsed = glow
+            glow_text = f"{KIND_COLOR.get(record['kind'], '')}{B}{GLOW_LABEL[record['kind']]}{R}" + (f" {DIM}{int(elapsed)}s{R}" if wide else "")
+            note = f"{note} {glow_text}".strip()
         cpu = "-" if agent.get("cpu") is None else f"{agent['cpu']:.0f}%"
         quiet_seconds = None if agent.get("idleMinutes") is None else agent["idleMinutes"] * 60
         on_task = age(times.get(agent.get("task"), (None, None))[1]) if agent.get("task") else None
@@ -601,15 +622,31 @@ def render(state, width=120, height=None, ui=None):
     frame.rule("WAITING", counts)
     frame.header(f"{'STATUS':<8} {'TASK':<34} {'ROOM':<6} {'FOR':<7} " + (f"{'POSTED':<7} " if medium else "") + "REASON")
     rows = []
-    for key, label in (("review", "review"), ("merged", "merged"), ("ready", "ready"), ("blocked", "blocked"), ("held", "held")):
+    priorities = state.get("priorities", {})
+    started = [(r, e) for r, e in recent(state, {"assigned"}) if r.get("task") in queue["in_progress"]]
+    for key, label in (("review", "review"), ("merged", "merged"), ("started", "started"), ("ready", "ready"),
+                       ("blocked", "blocked"), ("held", "held")):
+        if key == "started":
+            for record, elapsed in started:
+                task_id = record["task"]
+                rows.append(f"{GREEN}{DIM}{'started':<8}{R} {DIM}{cut(task_id, 34):<34}{R} "
+                            f"{ROOM_COLOR.get(state['rooms'].get(task_id), '')}{state['rooms'].get(task_id) or '-':<6}{R} "
+                            f"{DIM}{int(elapsed)}s{R}{' ' * max(1, 7 - len(f'{int(elapsed)}s'))}" + (f"{'':<7} " if medium else "")
+                            + f"{GREEN}→ {record.get('agent') or '?'}{R}")
+            continue
         color = QUEUE_COLOR[label]
-        for task_id in queue[key]:
+        ids = queue[key]
+        if key in ("ready", "blocked", "held"):
+            ids = sorted(ids, key=lambda i: -priorities.get(i, 0))
+        for task_id in ids:
             posted, since = times.get(task_id, (None, None))
             waiting = age(since)
             shown = aged(waiting, SLOW, VERY_SLOW) if key in ("review", "merged") else duration(waiting)
             room = state["rooms"].get(task_id) or "-"
             bold = B if key in ("review", "merged", "ready") else ""
-            rows.append(f"{color}{bold}{label:<8}{R} {bold}{cut(task_id, 34):<34}{R} {ROOM_COLOR.get(room, '')}{room:<6}{R} "
+            level = priorities.get(task_id, 0)
+            shown_id = (f"▲{level} " if level > 0 else (f"▼{-level} " if level < 0 else "")) + task_id
+            rows.append(f"{color}{bold}{label:<8}{R} {bold}{cut(shown_id, 34):<34}{R} {ROOM_COLOR.get(room, '')}{room:<6}{R} "
                         f"{column(shown, 7)} " + (f"{DIM}{posted_label(posted):<7}{R} " if medium else "") + reason(key, task_id))
     if not rows:
         rows = [f"{DIM}nothing waiting; {len(queue['in_progress'])} task(s) in progress (see AGENTS){R}" if queue["in_progress"]

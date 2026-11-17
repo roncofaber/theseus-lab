@@ -67,7 +67,7 @@ theseus agents add worker-1 %3 --profile claude-code
 - tasks waiting for review, verification or an agent;
 - recent events.
 
-Durations turn yellow and then red as they grow. Keys: `q` quits, `p` pauses or resumes the queue, space freezes the display, and `1` to `9` switches your tmux client to that agent's pane. `--once` prints a single frame and `--json` prints machine-readable output.
+Durations turn yellow and then red as they grow. Status changes linger for about 90 seconds so they are easy to follow: a task that just started stays in the waiting list as "started → agent", and an agent's row notes a recent delivery, merge, completion or context reset. Tasks with a priority (`theseus tasks add --priority N`, `theseus tasks priority ID N`) show a ▲N marker and are listed, and assigned, before others; equal priorities keep task-file order. Keys: `q` quits, `p` pauses or resumes the queue, space freezes the display, and `1` to `9` switches your tmux client to that agent's pane. `--once` prints a single frame and `--json` prints machine-readable output.
 
 ## Verification and pushing
 

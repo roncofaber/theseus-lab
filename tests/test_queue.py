@@ -231,6 +231,23 @@ class QueueTests(Sandbox):
         self.assertIn("assigned", self.theseus("queue", "tick").stdout)
         self.assertIn("demo-port 1", self.theseus("pool").stdout)
 
+    def test_priority_orders_assignment_and_transitions_linger_on_the_dashboard(self):
+        self.add("ordinary-task")
+        self.theseus("tasks", "add", "urgent-task", "--role", "research", "--owned", "docs/investigations/urgent-task.md",
+                     "--objective", "Do it.", "--contract", "All variants.", "--accept", "Done.", "--priority", "5")
+        self.git("commit", "-q", "-am", "queue")
+        before = " ".join(self.theseus("top", "--once").stdout.split())
+        self.assertIn("▲5 urgent-task", before)
+        self.assertLess(before.index("urgent-task"), before.index("ordinary-task"))
+        self.assertIn("urgent-task", self.theseus("queue", "tick").stdout)
+        after = " ".join(self.theseus("top", "--once").stdout.split())
+        self.assertRegex(after, r"started urgent-task - \d+s .*→ worker-a")
+        self.deliver("urgent-task")
+        self.theseus("queue", "tick")
+        wide = self.theseus("top", "--once", env={**self.env, "COLUMNS": "150"}).stdout
+        self.assertRegex(" ".join(wide.split()), r"working ordinary-task .* delivered \d+s")
+        self.theseus("tasks", "priority", "ordinary-task", "0")
+
     def test_wait_returns_when_a_delivery_needs_the_coordinator(self):
         self.add("watched-task")
         self.theseus("queue", "tick")

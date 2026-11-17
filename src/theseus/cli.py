@@ -125,7 +125,7 @@ def cmd_tasks(args):
     action = args.task_action
     if action == "add":
         emit(t.add(queue, args.id, args.role, args.owned, args.objective, args.contract, args.accept, args.depends, args.milestone,
-                   args.room))
+                   args.room, args.priority))
     elif action == "list":
         emit(t.list_tasks(queue, args.status, args.all, args.evidence))
     elif action == "ready":
@@ -146,6 +146,8 @@ def cmd_tasks(args):
         emit(t.deliver(queue, args.id, args.handoff))
     elif action == "note":
         emit(t.note(queue, args.id, args.text))
+    elif action == "priority":
+        emit(t.set_priority(queue, args.id, args.value))
     elif action in ("hold", "release-hold"):
         emit(t.hold(queue, args.id, action == "hold"))
     elif action == "reopen":
@@ -512,6 +514,7 @@ def build_parser():
     p.add_argument("--depends", nargs="+", default=[], metavar="ID")
     p.add_argument("--milestone", help="milestone (default: the current one)")
     p.add_argument("--room", choices=("clean", "dirty"), help="clean-room separation (see [rooms] in theseus.toml)")
+    p.add_argument("--priority", type=int, default=0, help="higher is assigned first among ready tasks (default 0)")
     p = ts.add_parser("list", help="one line per task with readiness or blocking reasons")
     p.add_argument("--status", choices=("pending", "in_progress", "verification", "merged", "completed"))
     p.add_argument("--all", action="store_true", help="include archived tasks")
@@ -538,6 +541,9 @@ def build_parser():
     p = ts.add_parser("deliver", help="mark a task delivered (awaiting coordinator integration)")
     p.add_argument("id")
     p.add_argument("--handoff", required=True)
+    p = ts.add_parser("priority", help="set a task's priority (higher is assigned first; 0 removes it)")
+    p.add_argument("id")
+    p.add_argument("value", type=int)
     p = ts.add_parser("note", help="set the coordinator note carried in the task message")
     p.add_argument("id")
     p.add_argument("text")
