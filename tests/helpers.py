@@ -1,5 +1,6 @@
-"""Shared fixtures: every test runs against temporary data, scratch and worktree roots and a throwaway Git identity,
-so nothing touches the user's real projects, tmux server or model gateway."""
+"""Shared fixtures: every test runs against temporary data, scratch and worktree roots, a temporary host database and
+backup directory and a throwaway Git identity, so nothing touches the user's real projects, host store, tmux server or
+model gateway."""
 import os
 import subprocess
 import sys
@@ -21,6 +22,9 @@ def base_env(root):
         "THESEUS_REGISTRY": str(root / "registry/projects.json"),
         "THESEUS_POOLS": str(root / "pools.toml"),
         "THESEUS_POOL_STATE": str(root / "pool-state"),
+        "THESEUS_DB": str(root / "host/theseus.db"),
+        "THESEUS_BACKUPS": str(root / "host/backups"),
+        "THESEUS_STORE_CONFIG": str(root / "store.toml"),
         "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
         "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.invalid",
         "GIT_CONFIG_GLOBAL": str(root / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",

@@ -9,14 +9,24 @@ with connect(), and each write runs in its own BEGIN IMMEDIATE transaction so co
 import contextlib
 import json
 import os
+import re
+import shutil
 import sqlite3
 import time
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
 BUSY_TIMEOUT = 30.0
 CLAIM_TTL = 15 * 60
 LEASE_TTL = 30 * 60
+DAY = 24 * 3600
+DEFAULTS = {"retention": {"samples_days": 14, "events_days": 0},
+            "backups": {"directory": "", "daily": 7, "weekly": 4}}
+
+
+class StoreError(Exception):
+    pass
 
 MIGRATIONS = [
     [
@@ -109,6 +119,18 @@ MIGRATIONS = [
             indexed TEXT NOT NULL,
             PRIMARY KEY (project, id))""",
     ],
+    [
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)",
+        """CREATE TABLE project_conflicts (
+            name TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+            root TEXT NOT NULL,
+            seen TEXT NOT NULL,
+            seen_epoch REAL NOT NULL,
+            PRIMARY KEY (name, root))""",
+        "CREATE INDEX events_project_id ON events(project, id)",
+        "CREATE INDEX events_project_kind ON events(project, kind, epoch)",
+        "CREATE INDEX samples_epoch ON samples(epoch)",
+    ],
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -150,6 +172,8 @@ def connect(db=None):
         conn.row_factory = sqlite3.Row
         conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT * 1000)}")
         conn.execute("PRAGMA foreign_keys = ON")
+        if version(conn) == 0:
+            conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
         set_wal(conn)
         conn.execute("PRAGMA synchronous = NORMAL")
         migrate(conn)
@@ -183,6 +207,10 @@ def opened(db=None):
 
 @contextlib.contextmanager
 def transaction(conn):
+    """BEGIN IMMEDIATE ... COMMIT; inside an open transaction it joins the outer one instead."""
+    if conn.in_transaction:
+        yield conn
+        return
     conn.execute("BEGIN IMMEDIATE")
     try:
         yield conn
@@ -197,14 +225,35 @@ def version(conn):
 
 
 def migrate(conn):
-    if version(conn) >= SCHEMA_VERSION:
+    current = version(conn)
+    if current > SCHEMA_VERSION:
+        raise StoreError(f"{database_name(conn)} has schema version {current}, newer than the {SCHEMA_VERSION} this theseus "
+                         f"knows; upgrade theseus (or restore an older backup with `theseus db restore`)")
+    if current == SCHEMA_VERSION:
         return
     with transaction(conn):
         current = version(conn)
+        if current > SCHEMA_VERSION:
+            raise StoreError(f"{database_name(conn)} has schema version {current}, newer than this theseus knows")
         for number, statements in enumerate(MIGRATIONS[current:], current + 1):
             for statement in statements:
                 conn.execute(statement)
             conn.execute(f"PRAGMA user_version = {number}")
+
+
+def database_name(conn):
+    row = conn.execute("PRAGMA database_list").fetchone()
+    return (row[2] if row else "") or "the host database"
+
+
+def get_meta(conn, key, default=None):
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return default if row is None else row[0]
+
+
+def set_meta(conn, key, value):
+    with transaction(conn):
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, str(value)))
 
 
 def touch_project(conn, name):
@@ -226,9 +275,10 @@ def list_projects(conn):
     return [dict(row) for row in conn.execute("SELECT * FROM projects ORDER BY name")]
 
 
-def prune_projects(conn, missing_root=True, older_than=None):
+def prune_projects(conn, missing_root=True, older_than=None, dry_run=False):
     """Remove projects whose root directory no longer exists, or (with older_than, in seconds) that nobody saw for
-    that long; their agents, events, deliveries, samples, sessions and task index go with them. Returns the names."""
+    that long; their agents, events, deliveries, samples, sessions and task index go with them. Returns the names
+    (with dry_run, the names it would remove). Nothing calls this automatically."""
     cutoff = time.time() - older_than if older_than is not None else None
     with transaction(conn):
         doomed = []
@@ -237,8 +287,35 @@ def prune_projects(conn, missing_root=True, older_than=None):
             stale = cutoff is not None and (row["last_seen_epoch"] or 0) < cutoff
             if gone or stale:
                 doomed.append(row["name"])
-        conn.executemany("DELETE FROM projects WHERE name = ?", [(name,) for name in doomed])
+        if not dry_run:
+            conn.executemany("DELETE FROM projects WHERE name = ?", [(name,) for name in doomed])
     return doomed
+
+
+def get_project(conn, name):
+    row = conn.execute("SELECT * FROM projects WHERE name = ?", (name,)).fetchone()
+    return dict(row) if row else None
+
+
+def add_conflict(conn, name, root, seen=None):
+    """Record that root also claims the project name another root holds."""
+    text, epoch = stamp(seen)
+    with transaction(conn):
+        touch_project(conn, name)
+        conn.execute("INSERT OR REPLACE INTO project_conflicts (name, root, seen, seen_epoch) VALUES (?, ?, ?, ?)",
+                     (name, str(root), text, epoch))
+
+
+def drop_conflict(conn, name, root):
+    with transaction(conn):
+        conn.execute("DELETE FROM project_conflicts WHERE name = ? AND root = ?", (name, str(root)))
+
+
+def conflicts(conn):
+    """[{name, root (the one kept), other (the one refused), seen}] for every recorded name conflict."""
+    rows = conn.execute("""SELECT c.name, p.root, c.root AS other, c.seen FROM project_conflicts c
+                           JOIN projects p ON p.name = c.name ORDER BY c.name, c.root""")
+    return [dict(row) for row in rows]
 
 
 def start_session(conn, project, pane=None, profile=None, detail="", started=None):
@@ -305,6 +382,13 @@ def remove_agent(conn, project, name):
         return conn.execute("DELETE FROM agents WHERE project = ? AND name = ?", (project, name)).rowcount == 1
 
 
+def set_enabled(conn, project, name, enabled):
+    """Change only the enabled flag; False when the agent is not registered."""
+    with transaction(conn):
+        return conn.execute("UPDATE agents SET enabled = ? WHERE project = ? AND name = ?",
+                            (int(bool(enabled)), project, name)).rowcount == 1
+
+
 EVENT_COLUMNS = "id, project, time, epoch, kind, agent, task, detail"
 
 
@@ -342,9 +426,12 @@ def filters(project=None, since=None, until=None, kinds=None, after_id=None):
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", args
 
 
-def events(conn, project=None, since=None, limit=None, kinds=None, until=None, after_id=None):
+def events(conn, project=None, since=None, limit=None, kinds=None, until=None, after_id=None, task=None):
     """Events oldest first; with limit, the latest limit of them (still oldest first). after_id resumes a cursor."""
     where, args = filters(project, since, until, kinds, after_id)
+    if task is not None:
+        where += (" AND" if where else " WHERE") + " task = ?"
+        args.append(task)
     sql = f"SELECT {EVENT_COLUMNS} FROM events{where} ORDER BY id DESC"
     if limit:
         sql += f" LIMIT {int(limit)}"
@@ -529,6 +616,15 @@ def add_sample(conn, project, agent, state, task=None, at=None):
                      (project, agent, text, epoch, state, task))
 
 
+def add_samples(conn, project, rows, at=None):
+    """One sample per (agent, state, task) row, all at the same time and in one transaction."""
+    text, epoch = stamp(at)
+    with transaction(conn):
+        touch_project(conn, project)
+        conn.executemany("INSERT INTO samples (project, agent, time, epoch, state, task) VALUES (?, ?, ?, ?, ?, ?)",
+                         [(project, agent, text, epoch, state, task) for agent, state, task in rows])
+
+
 def samples(conn, project=None, agent=None, since=None, until=None):
     where, args = filters(project, since, until)
     if agent is not None:
@@ -676,3 +772,293 @@ def import_project(conn, name, root, data):
     upsert_project(conn, name, root=root, data=data)
     return {"agents": import_agents(conn, name, data / "agents.json"),
             "events": import_events(conn, name, data / "queue" / "events.jsonl")}
+
+
+def ensure_host(conn):
+    """One-time migration of the host files: the pool state directory and the projects.json registry."""
+    if get_meta(conn, "imported:host") is not None:
+        return
+    from . import pools, registry
+    with transaction(conn):
+        if get_meta(conn, "imported:host") is not None:
+            return
+        import_pool_state(conn, pools.state_dir())
+        legacy = registry.path()
+        import_registry(conn, legacy)
+        for root, entry in registry.read(legacy).items():
+            kept = (get_project(conn, entry.get("name")) or {}).get("root") if entry.get("name") else None
+            if kept and kept != root:
+                add_conflict(conn, entry["name"], root, entry.get("last_seen"))
+        set_meta(conn, "imported:host", iso())
+
+
+def ensure_project(conn, name, data):
+    """One-time migration of a project's agents.json and queue/events.jsonl; the files stay where they are."""
+    marker = f"imported:project:{name}"
+    if get_meta(conn, marker) is not None:
+        return
+    data = Path(data)
+    with transaction(conn):
+        if get_meta(conn, marker) is not None:
+            return
+        touch_project(conn, name)
+        conn.execute("UPDATE projects SET data = COALESCE(data, ?) WHERE name = ?", (str(data), name))
+        if (data / "agents.json").exists():
+            import_agents(conn, name, data / "agents.json")
+            set_meta(conn, f"agents:{name}", iso())
+        import_events(conn, name, data / "queue" / "events.jsonl")
+        set_meta(conn, marker, iso())
+
+
+READY = set()
+
+
+@contextlib.contextmanager
+def for_host():
+    """A connection to the host database after the one-time import of the host files."""
+    with opened() as conn:
+        key = (str(path()), None)
+        if key not in READY:
+            ensure_host(conn)
+            READY.add(key)
+        yield conn
+
+
+@contextlib.contextmanager
+def for_project(conf):
+    """A connection to the host database after the one-time imports for conf's project. Every runtime write for a
+    project goes through here, so its legacy files are imported before anything new is recorded."""
+    with for_host() as conn:
+        key = (str(path()), conf.name)
+        if key not in READY:
+            ensure_project(conn, conf.name, conf.data)
+            READY.add(key)
+        yield conn
+
+
+def config_path():
+    if os.environ.get("THESEUS_STORE_CONFIG"):
+        return Path(os.environ["THESEUS_STORE_CONFIG"])
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return Path(base) / "theseus" / "store.toml"
+
+
+def settings():
+    """store.toml merged over DEFAULTS."""
+    merged = {section: dict(values) for section, values in DEFAULTS.items()}
+    file = config_path()
+    if file.exists():
+        try:
+            loaded = tomllib.loads(file.read_text())
+        except tomllib.TOMLDecodeError as error:
+            raise StoreError(f"{file}: {error}") from error
+        for section, values in loaded.items():
+            if section in merged and isinstance(values, dict):
+                merged[section].update(values)
+    return merged
+
+
+def backup_dir():
+    if os.environ.get("THESEUS_BACKUPS"):
+        return Path(os.environ["THESEUS_BACKUPS"])
+    configured = settings()["backups"].get("directory")
+    return Path(os.path.expanduser(configured)) if configured else path().parent / "backups"
+
+
+def trim(conn, now=None):
+    """Delete samples (and events, when retention.events_days is set) older than their retention."""
+    now = time.time() if now is None else now
+    retention = settings()["retention"]
+    removed = {}
+    with transaction(conn):
+        for table, key in (("samples", "samples_days"), ("events", "events_days")):
+            days = float(retention.get(key) or 0)
+            removed[table] = conn.execute(f"DELETE FROM {table} WHERE epoch < ?", (now - days * DAY,)).rowcount if days else 0
+    return removed
+
+
+def file_size(target):
+    return sum(Path(f"{target}{suffix}").stat().st_size for suffix in ("", "-wal") if Path(f"{target}{suffix}").exists())
+
+
+def maintain(conn, now=None):
+    """Trim by retention, refresh the planner statistics, give free pages back to the file system and truncate the
+    write-ahead log. Returns a summary dict."""
+    target = database_name(conn)
+    before = file_size(target)
+    removed = trim(conn, now)
+    conn.execute("ANALYZE")
+    conn.execute("PRAGMA optimize").fetchall()
+    converted = conn.execute("PRAGMA auto_vacuum").fetchone()[0] != 2
+    if converted:
+        conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
+        conn.execute("VACUUM")
+    freed = conn.execute("PRAGMA freelist_count").fetchone()[0]
+    conn.execute("PRAGMA incremental_vacuum").fetchall()
+    set_meta(conn, "maintain.last", iso(now))
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+    return {"removed": removed, "freed_pages": freed, "vacuumed": converted, "before": before,
+            "after": file_size(target)}
+
+
+BACKUP_NAME = re.compile(r"^theseus-(\d{8}T\d{6}Z)(?:-\d+)?\.db$")
+
+
+def backup_target(directory, now, label=""):
+    base = "theseus-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now)) + (f"-{label}" if label else "")
+    target, n = directory / f"{base}.db", 1
+    while target.exists():
+        target, n = directory / f"{base}-{n}.db", n + 1
+    return target
+
+
+def integrity(target):
+    check = sqlite3.connect(f"file:{target}?mode=ro", uri=True)
+    try:
+        return [row[0] for row in check.execute("PRAGMA integrity_check")]
+    finally:
+        check.close()
+
+
+def backup(conn, directory=None, now=None, label="", strict=True, rotate_after=True):
+    """Copy the live database with the online backup API to <backups>/theseus-YYYYmmddTHHMMSSZ.db, run integrity_check
+    on the copy and rotate. A labelled copy (pre-restore) is never rotated; strict=False keeps a copy that fails the
+    check instead of deleting it. Returns {path, size, integrity, removed}."""
+    now = time.time() if now is None else now
+    directory = Path(directory) if directory else backup_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    target = backup_target(directory, now, label)
+    temporary = target.with_name(target.name + ".tmp")
+    copy = sqlite3.connect(temporary)
+    try:
+        conn.backup(copy)
+        copy.execute("PRAGMA journal_mode = DELETE")
+    finally:
+        copy.close()
+    found = integrity(temporary)
+    if found != ["ok"] and strict:
+        temporary.unlink(missing_ok=True)
+        raise StoreError(f"the backup failed integrity_check: {'; '.join(found[:5])}")
+    os.replace(temporary, target)
+    record = {"path": str(target), "time": iso(now), "size": target.stat().st_size, "integrity": "; ".join(found[:5])}
+    if not label:
+        set_meta(conn, "backup.last", json.dumps(record))
+    record["removed"] = rotate(directory) if rotate_after and not label else []
+    return record
+
+
+def rotation(names, daily=7, weekly=4):
+    """The backup file names to keep: the newest of each of the `daily` most recent days and of each of the `weekly`
+    most recent ISO weeks that have a backup. Names that are not plain timestamped backups are ignored (kept)."""
+    stamped = []
+    for name in names:
+        match = BACKUP_NAME.match(name)
+        if match:
+            stamped.append((datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ"), name))
+    stamped.sort(reverse=True)
+    keep, days, weeks = set(), [], []
+    for moment, name in stamped:
+        day, week = moment.date(), moment.isocalendar()[:2]
+        if day not in days and len(days) < daily:
+            days.append(day)
+            keep.add(name)
+        if week not in weeks and len(weeks) < weekly:
+            weeks.append(week)
+            keep.add(name)
+    return keep | {name for name in names if not BACKUP_NAME.match(name)}
+
+
+def rotate(directory=None):
+    directory = Path(directory) if directory else backup_dir()
+    spec = settings()["backups"]
+    names = [p.name for p in directory.glob("theseus-*.db")]
+    keep = rotation(names, int(spec.get("daily", 7)), int(spec.get("weekly", 4)))
+    removed = sorted(set(names) - keep)
+    for name in removed:
+        (directory / name).unlink(missing_ok=True)
+    return removed
+
+
+def restore(conn, source, now=None):
+    """Replace the live database's content with a backup file after checking it, saving the current content first
+    as a pre-restore copy. Returns {"saved": the pre-restore copy, "restored": source, "version": schema version}."""
+    source = Path(source)
+    if not source.is_file():
+        raise StoreError(f"no backup file {source}")
+    try:
+        found = integrity(source)
+        reader = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+        try:
+            restored_version = version(reader)
+        finally:
+            reader.close()
+    except sqlite3.DatabaseError as error:
+        raise StoreError(f"{source} is not a readable SQLite database: {error}") from error
+    if found != ["ok"]:
+        raise StoreError(f"{source} failed integrity_check: {'; '.join(found[:5])}")
+    if restored_version > SCHEMA_VERSION:
+        raise StoreError(f"{source} has schema version {restored_version}, newer than this theseus knows ({SCHEMA_VERSION})")
+    try:
+        saved = backup(conn, now=now, label="pre-restore", strict=False)["path"]
+    except sqlite3.DatabaseError:
+        target = backup_target(backup_dir(), time.time() if now is None else now, "pre-restore")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(database_name(conn), target)
+        saved = str(target)
+    reader = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    try:
+        reader.backup(conn)
+    finally:
+        reader.close()
+    migrate(conn)
+    return {"saved": saved, "restored": str(source), "version": version(conn)}
+
+
+def check(conn, quick=False):
+    """Health summary: integrity, schema version, sizes, row counts, last backup and last maintenance."""
+    target = database_name(conn)
+    tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' "
+                                             "AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+    pragma = lambda name: conn.execute(f"PRAGMA {name}").fetchone()[0]
+    last = get_meta(conn, "backup.last")
+    return {
+        "path": target, "version": version(conn), "known": SCHEMA_VERSION,
+        "integrity": None if quick else [row[0] for row in conn.execute("PRAGMA integrity_check")],
+        "size": file_size(target), "wal": Path(f"{target}-wal").stat().st_size if Path(f"{target}-wal").exists() else 0,
+        "page_size": pragma("page_size"), "pages": pragma("page_count"), "free_pages": pragma("freelist_count"),
+        "rows": {} if quick else {t: conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] for t in tables},
+        "backup": json.loads(last) if last else None, "backups": str(backup_dir()),
+        "maintained": get_meta(conn, "maintain.last"),
+        "errors": {job: get_meta(conn, f"{job}.error") for job in ("backup", "maintain") if get_meta(conn, f"{job}.error")},
+    }
+
+
+def due(conn, job, every=DAY, now=None):
+    """Claim a periodic job: True (and stamped) when it last started more than every seconds ago."""
+    now = time.time() if now is None else now
+    with transaction(conn):
+        claimed = get_meta(conn, f"{job}.claimed")
+        if claimed is not None and now - float(claimed) < every:
+            return False
+        set_meta(conn, f"{job}.claimed", now)
+    return True
+
+
+def daily(conn, now=None):
+    """Maintenance and a backup at most once a day across every process on the host; failures are recorded in meta
+    (shown by `theseus db check`) and never raised. Returns one line per job that ran."""
+    lines = []
+    for job, run in (("maintain", maintain), ("backup", backup)):
+        if not due(conn, job, now=now):
+            continue
+        try:
+            result = run(conn, now=now)
+            with transaction(conn):
+                conn.execute("DELETE FROM meta WHERE key = ?", (f"{job}.error",))
+            lines.append(f"{job}: {result.get('path') or result.get('removed')}")
+        except Exception as error:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            set_meta(conn, f"{job}.error", f"{iso()} {type(error).__name__}: {error}")
+            lines.append(f"{job} failed: {error}")
+    return lines

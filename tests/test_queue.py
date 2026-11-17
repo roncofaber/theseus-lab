@@ -66,7 +66,10 @@ class QueueTests(Sandbox):
         self.assertRegex(self.theseus("agents").stdout, r"worker-b\s+%2\s+disabled")
         self.theseus("agents", "remove", "worker-b")
         self.assertNotIn("worker-b", self.theseus("agents").stdout)
-        self.assertTrue((self.tmp / "data/agents.json").exists())
+        from theseus import store
+        with store.opened() as conn:
+            self.assertEqual(["worker-a"], [a["name"] for a in store.list_agents(conn, "demo-port")])
+        self.assertFalse((self.tmp / "data/agents.json").exists())
 
     def test_tick_assigns_delivers_resets_and_assigns_again(self):
         self.add("first-task")
@@ -214,20 +217,16 @@ class QueueTests(Sandbox):
         self.assertFalse(wq.still_open(conf, record))
 
     def test_a_full_shared_pool_holds_assignment_until_a_slot_frees(self):
-        pools_file, pool_state = self.tmp / "pools.toml", self.tmp / "pool-state"
-        pools_file.write_text('[pools.gw]\nmax = 1\npriority = ["demo-port", "other"]\n')
-        self.env.update({"THESEUS_POOLS": str(pools_file), "THESEUS_POOL_STATE": str(pool_state)})
+        (self.tmp / "pools.toml").write_text('[pools.gw]\nmax = 1\npriority = ["demo-port", "other"]\n')
         path = self.project / "theseus.toml"
         path.write_text(path.read_text().replace('[workers.claude-code]\n', '[workers.claude-code]\npool = "gw"\n', 1))
         self.git("commit", "-q", "-am", "pool")
-        pool_state.mkdir()
-        (pool_state / "gw.json").write_text(json.dumps({"leases": {"other/x": {"project": "other", "agent": "x", "task": "t",
-                                                                                "seen": __import__("time").time()}}, "claims": {}}))
+        self.theseus("pool", "hold", "gw", "x", "--project", "other", "--task", "t")
         self.add("pooled-task")
         self.assertNotIn("assigned", self.theseus("queue", "tick").stdout)
         self.assertIn("pool gw full (1/1)", " ".join(self.theseus("top", "--once").stdout.split()))
         self.assertIn("demo-port", self.theseus("pool").stdout)
-        (pool_state / "gw.json").write_text(json.dumps({"leases": {}, "claims": {}}))
+        self.theseus("pool", "release", "gw", "x", "--project", "other")
         self.assertIn("assigned", self.theseus("queue", "tick").stdout)
         self.assertIn("demo-port 1", self.theseus("pool").stdout)
 

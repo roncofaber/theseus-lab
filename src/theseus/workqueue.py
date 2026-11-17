@@ -6,8 +6,11 @@ A tick looks at every registered agent and acts on its state:
 - stalled (idle past instances.idle_minutes with no handoff): one `continue` nudge, then a `stalled` event;
 - free (enabled, no open task): if a ready task fits its room, the agent is reset (a full /clear when it carries dirty
   context into clean work, a /compact otherwise), the task is assigned on a fresh worktree, and its message is sent.
-Tasks with "hold": true are never assigned by the queue; `theseus queue pause` stops all assignment. Events go to
-<data>/queue/events.jsonl; `theseus queue wait` blocks until one needs the coordinator.
+Tasks with "hold": true are never assigned by the queue; `theseus queue pause` stops all assignment. Events go to the
+host store (theseus.store); `theseus queue wait` blocks until one needs the coordinator. Each tick also writes one
+state sample per registered agent and, at most once a day across the host, runs the store's maintenance and backup.
+<data>/queue/events.jsonl still receives a plain-text copy of every event as an audit trail; it is deprecated and
+nothing reads it after the one-time import.
 """
 import fcntl
 import json
@@ -21,6 +24,7 @@ from importlib import resources
 from . import agents as ag
 from . import config as cfg
 from . import rooms
+from . import store
 from . import tasks as t
 
 ATTENTION = {"delivered", "partial", "blocked", "stalled", "error"}
@@ -55,18 +59,20 @@ def set_paused(conf, value):
 
 
 def event(conf, kind, agent=None, task=None, detail=""):
-    record = {"time": ag.now(), "kind": kind, "agent": agent, "task": task, "detail": detail}
-    with open(queue_dir(conf) / "events.jsonl", "a") as handle:
-        handle.write(json.dumps(record) + "\n")
+    with store.for_project(conf) as conn:
+        record = store.add_event(conn, conf.name, kind, agent=agent, task=task, detail=detail)
+    try:
+        with open(queue_dir(conf) / "events.jsonl", "a") as handle:
+            handle.write(json.dumps({key: record[key] for key in ("time", "kind", "agent", "task", "detail")}) + "\n")
+    except OSError:
+        pass
     return record
 
 
-def events(conf, limit=None):
-    path = queue_dir(conf) / "events.jsonl"
-    if not path.exists():
-        return []
-    lines = path.read_text().splitlines()
-    return [json.loads(line) for line in (lines[-limit:] if limit else lines) if line.strip()]
+def events(conf, limit=None, since=None, after_id=None, kinds=None, task=None):
+    """This project's events oldest first; with limit, the latest limit of them."""
+    with store.for_project(conf) as conn:
+        return store.events(conn, conf.name, since=since, limit=limit, after_id=after_id, kinds=kinds, task=task)
 
 
 @contextmanager
@@ -176,6 +182,7 @@ def tick(conf, assign=True):
     """One pass over every registered agent. Returns the events it recorded."""
     recorded = []
     claimed = set()
+    samples = []
     with locked(conf):
         from . import pools
         registered = ag.agents(conf)
@@ -204,10 +211,9 @@ def tick(conf, assign=True):
                 if runtime(conf).get(name, {}).get("nudged") != task_id:
                     if nudge(conf, agent, t.Queue(conf).get(task_id)):
                         recorded.append(event(conf, "nudged", name, task_id, f"idle {info['idleMinutes']} min without a handoff"))
-                else:
-                    already = [e for e in events(conf) if e["kind"] == "stalled" and e["task"] == task_id]
-                    if not already:
-                        recorded.append(event(conf, "stalled", name, task_id, f"still idle after a nudge ({info['idleMinutes']} min)"))
+                elif not events(conf, 1, kinds=["stalled"], task=task_id):
+                    recorded.append(event(conf, "stalled", name, task_id, f"still idle after a nudge ({info['idleMinutes']} min)"))
+            samples.append((name, info["state"], info["task"]))
             if info["state"] != "free" or not assign or paused(conf):
                 continue
             task, needed = next_task(conf, agent, info, claimed)
@@ -215,7 +221,7 @@ def tick(conf, assign=True):
                 continue
             pool = pool_names.get(name)
             if pool:
-                allowed, why = pools.may_start(conf, pool)
+                allowed, why = pools.acquire(conf, pool, name, task["id"])
                 if not allowed:
                     waiting_on_pool.add(pool)
                     state = runtime(conf)
@@ -223,22 +229,40 @@ def tick(conf, assign=True):
                     save_runtime(conf, state)
                     continue
             claimed.add(task["id"])
-            if needed:
-                ok, detail = reset(conf, agent, needed)
-                if not ok:
-                    recorded.append(event(conf, "error", name, task["id"], f"{needed} failed: {detail}"))
-                    continue
-                recorded.append(event(conf, "cleared" if needed == "clear" else "compacted", name, None, detail))
+            ok = False
             try:
-                ok, detail = assign_and_send(conf, agent, task)
-            except Exception as error:
-                ok, detail = False, str(error)
-            recorded.append(events(conf, 1)[-1] if ok else event(conf, "error", name, task["id"], detail))
-            if ok and pool:
-                pools.take(conf, pool, name, task["id"])
+                if needed:
+                    ok, detail = reset(conf, agent, needed)
+                    if not ok:
+                        recorded.append(event(conf, "error", name, task["id"], f"{needed} failed: {detail}"))
+                        continue
+                    recorded.append(event(conf, "cleared" if needed == "clear" else "compacted", name, None, detail))
+                try:
+                    ok, detail = assign_and_send(conf, agent, task)
+                except Exception as error:
+                    ok, detail = False, str(error)
+                recorded.append(events(conf, 1)[-1] if ok else event(conf, "error", name, task["id"], detail))
+            finally:
+                if pool and not ok:
+                    pools.release(conf.name, pool, name)
         for pool in set(filter(None, pool_names.values())) - waiting_on_pool:
             pools.drop_claim(conf, pool)
+        if samples:
+            with store.for_project(conf) as conn:
+                store.add_samples(conn, conf.name, samples)
+    housekeeping()
     return recorded
+
+
+def housekeeping():
+    """The store's daily maintenance and backup; a failure is recorded in the store and never stops the queue."""
+    try:
+        with store.for_host() as conn:
+            for line in store.daily(conn):
+                if "failed" in line:
+                    print(f"theseus store: {line}", file=sys.stderr)
+    except Exception as error:
+        print(f"theseus store: housekeeping failed: {error}", file=sys.stderr)
 
 
 def run(conf, interval=30, once=False):
@@ -262,12 +286,13 @@ def still_open(conf, record):
 def wait(conf, timeout=10800, interval=30, drive=True):
     """Block until an event that needs the coordinator appears after the call started; print it and return 0.
     With drive, also run ticks meanwhile so the queue makes progress without a separate runner."""
-    start = len(events(conf))
+    latest = events(conf, 1)
+    start = latest[-1]["id"] if latest else 0
     deadline = time.time() + timeout
     while time.time() < deadline:
         if drive:
             tick(conf)
-        new = events(conf)[start:]
+        new = events(conf, after_id=start)
         hits = [e for e in new if e["kind"] in ATTENTION and still_open(conf, e)]
         if hits:
             for record in new:

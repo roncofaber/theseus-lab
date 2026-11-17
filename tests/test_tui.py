@@ -13,7 +13,7 @@ from helpers import Sandbox
 
 from test_queue import FAKE_TMUX
 from theseus import config as cfg
-from theseus import host, registry, top
+from theseus import host, registry, store, top
 from theseus import workqueue as wq
 
 
@@ -44,14 +44,15 @@ class RegistryTests(Sandbox):
         self.assertTrue(registry.record(fake_conf(root), now=1061.0))
         self.assertEqual(1061.0, registry.entries()[0]["last_seen"])
 
-    def test_prunes_projects_whose_root_lost_its_config(self):
+    def test_hides_projects_whose_root_lost_its_config_without_deleting_them(self):
         first, second = self.make_project("alpha"), self.make_project("beta")
         registry.record(fake_conf(first), now=1.0)
         registry.record(fake_conf(second, "beta"), now=1.0)
         (first / "theseus.toml").unlink()
         self.assertEqual(["beta"], [e["name"] for e in registry.entries()])
         registry.record(fake_conf(second, "beta"), now=500.0)
-        self.assertNotIn(str(first), json.loads(registry.path().read_text())["projects"])
+        with store.opened() as conn:
+            self.assertEqual(["alpha", "beta"], [p["name"] for p in store.list_projects(conn)])
 
     def test_override_and_xdg_paths(self):
         self.assertEqual(self.tmp / "registry/projects.json", registry.path())
@@ -63,7 +64,7 @@ class RegistryTests(Sandbox):
         root = self.make_project("alpha")
         blocker = self.tmp / "blocker"
         blocker.write_text("not a directory")
-        os.environ["THESEUS_REGISTRY"] = str(blocker / "projects.json")
+        os.environ["THESEUS_DB"] = str(blocker / "theseus.db")
         self.assertFalse(registry.record(fake_conf(root)))
         self.assertEqual([], registry.entries())
 
@@ -96,11 +97,9 @@ class HostCase(Sandbox):
         self.theseus("queue", "status", cwd=self.second)
 
     def event(self, label, kind, minutes_ago, task="t1"):
-        data = self.tmp / f"data-{label}/queue"
-        data.mkdir(parents=True, exist_ok=True)
-        stamp = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()
-        with open(data / "events.jsonl", "a") as handle:
-            handle.write(json.dumps({"time": stamp, "kind": kind, "agent": "worker-a", "task": task, "detail": ""}) + "\n")
+        stamp = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+        with store.opened() as conn:
+            store.add_event(conn, label, kind, agent="worker-a", task=task, at=stamp)
 
 
 class HostSnapshotTests(HostCase):

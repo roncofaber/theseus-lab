@@ -41,10 +41,14 @@ class StoreCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(prefix="theseus-store-")
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
-        self.saved = {k: os.environ.get(k) for k in ("THESEUS_DB", "XDG_DATA_HOME", "THESEUS_POOLS", "THESEUS_POOL_STATE")}
+        self.saved = {k: os.environ.get(k) for k in ("THESEUS_DB", "XDG_DATA_HOME", "THESEUS_POOLS", "THESEUS_POOL_STATE",
+                                                     "THESEUS_REGISTRY", "THESEUS_BACKUPS", "THESEUS_STORE_CONFIG")}
         self.addCleanup(self.restore)
         self.db = self.tmp / "host" / "theseus.db"
         os.environ["THESEUS_DB"] = str(self.db)
+        os.environ["THESEUS_REGISTRY"] = str(self.tmp / "projects.json")
+        os.environ["THESEUS_BACKUPS"] = str(self.tmp / "backups")
+        os.environ["THESEUS_STORE_CONFIG"] = str(self.tmp / "store.toml")
         os.environ["THESEUS_POOLS"] = str(self.tmp / "pools.toml")
         os.environ["THESEUS_POOL_STATE"] = str(self.tmp / "pool-state")
         (self.tmp / "pools.toml").write_text('[pools.gw]\nmax = 2\npriority = ["first", "second"]\n')
@@ -353,15 +357,15 @@ class ImportTests(StoreCase):
         self.assertEqual(str(data), store.list_projects(self.conn)[0]["data"])
 
     def test_pool_state_import_is_idempotent_and_skips_expired_entries(self):
-        conf = SimpleNamespace(name="second")
-        self.assertTrue(pools.hold("third", "gw", "manual", "t", hours=1)[0])
-        pools.sync(conf, "gw", {"b1": "t1"})
-        self.assertFalse(pools.may_start(SimpleNamespace(name="first"), "gw")[0])
-        state_file = self.tmp / "pool-state/gw.json"
-        state = json.loads(state_file.read_text())
-        state["leases"]["second/b2"] = {"project": "second", "agent": "b2", "task": "t2",
-                                        "seen": time.time() - pools.LEASE_TTL - 1}
-        state_file.write_text(json.dumps(state))
+        now = time.time()
+        state = {"leases": {"second/b1": {"project": "second", "agent": "b1", "task": "t1", "seen": now},
+                            "third/manual": {"project": "third", "agent": "manual", "task": "t", "seen": now,
+                                             "until": now + 3600},
+                            "second/b2": {"project": "second", "agent": "b2", "task": "t2",
+                                          "seen": now - pools.LEASE_TTL - 1}},
+                 "claims": {"first": now, "fourth": now - pools.CLAIM_TTL - 1}}
+        (self.tmp / "pool-state").mkdir()
+        (self.tmp / "pool-state/gw.json").write_text(json.dumps(state))
         for _ in range(2):
             self.assertEqual(["gw"], store.import_pool_state(self.conn))
             status = store.status(self.conn, "gw")

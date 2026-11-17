@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -51,7 +52,16 @@ def record(queue, kind, task, detail=""):
     from . import workqueue
     try:
         workqueue.event(queue.conf, kind, agent_of(task), task["id"], detail)
-    except OSError:
+    except (OSError, sqlite3.Error):
+        pass
+
+
+def record_delivery(queue, task, handoff, result):
+    from . import store
+    try:
+        with store.for_project(queue.conf) as conn:
+            store.add_delivery(conn, queue.conf.name, task["id"], agent=agent_of(task), handoff=handoff, result=result)
+    except (OSError, sqlite3.Error):
         pass
 
 
@@ -283,8 +293,9 @@ def deliver(queue, task_id, handoff):
     task.setdefault("execution", {}).update({"handoff": str(handoff), "deliveredAt": now()})
     queue.save(document)
     result = handoff_result(handoff)
-    record(queue, "delivered" if result in ("delivered", None) else result, task,
-           f"handoff result {result or 'not stated'}")
+    kind = "delivered" if result in ("delivered", None) else result
+    record(queue, kind, task, f"handoff result {result or 'not stated'}")
+    record_delivery(queue, task, handoff, kind)
     return f"{task_id} -> verification; the worker slot is free, dependents wait for the merge"
 
 

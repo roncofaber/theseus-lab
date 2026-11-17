@@ -1,13 +1,19 @@
-"""Host registry of theseus projects: every command that loads a project configuration records the project in
-~/.local/share/theseus/projects.json (THESEUS_REGISTRY overrides the path), so `theseus top` can show every project on
-the machine. A project is written at most once per minute; entries whose root lost its theseus.toml are dropped.
+"""Host registry of theseus projects: every command that loads a project configuration records the project in the
+host store's projects table (theseus.store), keyed by project name with the main checkout's root, so `theseus top` can
+show every project on the machine. A project is written at most once per minute. When a second root claims a name that
+a live root already holds, the first one stays and the conflict is recorded for `theseus doctor`; a root whose
+theseus.toml is gone gives its name up to the next root that claims it. Projects are never deleted automatically:
+entries() skips dead roots and `theseus db prune` removes them on request.
+
+~/.local/share/theseus/projects.json (THESEUS_REGISTRY overrides the path), the registry before the store, is imported
+once by the store migration and left in place.
 """
-import contextlib
-import fcntl
-import json
 import os
+import sqlite3
 import time
 from pathlib import Path
+
+from . import store
 
 THROTTLE = 60
 CONFIG_NAME = "theseus.toml"
@@ -21,8 +27,9 @@ def path():
 
 
 def read(file):
+    import json
     try:
-        data = json.loads(file.read_text())
+        data = json.loads(Path(file).read_text())
     except (OSError, ValueError):
         return {}
     projects = data.get("projects") if isinstance(data, dict) else None
@@ -44,38 +51,51 @@ def canonical(root):
     return str(common.parent if common.name == ".git" else Path(root))
 
 
+def entry(row):
+    return {"name": row["name"], "root": row["root"], "data": row["data"], "coordinator": row["coordinator"] or "",
+            "last_seen": row["last_seen_epoch"]}
+
+
 def entries():
     """Registered projects whose root still has a theseus.toml, sorted by name."""
-    found = [dict(entry, root=root) for root, entry in read(path()).items() if alive(root)]
-    return sorted(found, key=lambda entry: (entry.get("name") or "", entry["root"]))
+    try:
+        with store.for_host() as conn:
+            rows = store.list_projects(conn)
+    except (OSError, sqlite3.Error):
+        return []
+    found = [entry(row) for row in rows if row["root"] and alive(row["root"])]
+    return sorted(found, key=lambda item: (item["name"] or "", item["root"]))
 
 
-@contextlib.contextmanager
-def locked(file):
-    file.parent.mkdir(parents=True, exist_ok=True)
-    with open(file.with_name(file.name + ".lock"), "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        yield
+def conflicts():
+    """Name conflicts whose refused root is still a live project: [{name, root (kept), other, seen}]."""
+    with store.for_host() as conn:
+        found = store.conflicts(conn)
+    return [c for c in found if c["other"] != c["root"] and alive(c["other"])]
 
 
 def record(conf, now=None):
-    """Record conf's project; never raises, so a read-only home never breaks a command."""
+    """Record conf's project; never raises (except for a store newer than this theseus), so a read-only home never
+    breaks a command."""
     try:
         now = time.time() if now is None else now
-        file = path()
         root = canonical(conf.root)
         if root != str(conf.root):
             return False
-        previous = read(file).get(root)
-        if previous and now - previous.get("last_seen", 0) < THROTTLE:
-            return False
-        with locked(file):
-            projects = {r: e for r, e in read(file).items() if alive(r)}
-            projects[root] = {"name": conf.name, "data": str(conf.data),
-                              "coordinator": str(conf.section("instances").get("coordinator") or ""), "last_seen": now}
-            temporary = file.with_name(f"{file.name}.{os.getpid()}.tmp")
-            temporary.write_text(json.dumps({"projects": projects}, indent=2) + "\n")
-            os.replace(temporary, file)
+        with store.for_host() as conn:
+            known = store.get_project(conn, conf.name)
+            if known and known["root"] == root and now - (known["last_seen_epoch"] or 0) < THROTTLE:
+                return False
+            with store.transaction(conn):
+                known = store.get_project(conn, conf.name)
+                if known and known["root"] and known["root"] != root and alive(known["root"]):
+                    store.add_conflict(conn, conf.name, root, now)
+                    return False
+                store.drop_conflict(conn, conf.name, root)
+                store.upsert_project(conn, conf.name, root=root, data=conf.data,
+                                     coordinator=str(conf.section("instances").get("coordinator") or ""), seen=now)
         return True
+    except store.StoreError:
+        raise
     except Exception:
         return False

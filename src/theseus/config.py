@@ -205,7 +205,7 @@ class Config:
 
     def instances(self):
         from . import agents
-        if agents.registry_path(self).exists():
+        if agents.registered(self):
             return agents.instance_entries(self)
         panes = self.raw["instances"].get("panes") or []
         result = []
