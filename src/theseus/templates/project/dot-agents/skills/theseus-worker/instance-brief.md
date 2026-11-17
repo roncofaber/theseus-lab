@@ -12,6 +12,7 @@ The coordinator types one task per message into your session: a task ID, a git w
 - Recover first: the decompiled original (`theseus re show|callers|callees|find`), its data and recorded traffic, before implementing. Implement only what the original does; record anything you cannot recover as an explicit limit.
 - Never launch subagents or parallel model calls of your own: every worker shares the same provider rate limits.
 - Keep your context small: search before reading (rg, `theseus re find`), read large files in line ranges rather than whole, and never re-read a file you already have in context.
+- Keep shell output short (head/tail, --quiet), and write findings into your report as you go so they survive context compaction.
 - Never commit, push or stash; never print the environment; never modify the original; never kill processes by name pattern.
 - Run only the checks the task message names. Writing a test does not authorize running heavy suites; read-only inspection (`rg`, `git`, `theseus re`) is always fine.
 - Lab hosts forward logs to central syslog: no verbose daemons or polling loops.

@@ -7,10 +7,10 @@ A profile describes one agent CLI:
 - session: "preassign" when the CLI accepts a session ID chosen by theseus, "none" otherwise;
 - env, model_flag, permission_mode: how the model and permissions are passed;
 - retry: whether a retryable gateway error (Claude JSON output) resumes the run automatically;
-- interactive: the persistent-instance behavior in a tmux pane (launch, resume, busy marker, compact and clear
-  commands, where session records live, whether the agent can message the coordinator).
+- interactive: the persistent-instance behavior in a tmux pane (launch, resume, busy marker, stall patterns, extra
+  environment, compact and clear commands, where session records live, whether the agent can message the coordinator).
 
-Placeholders: {command} {prompt} {message} {session} {model} {permission_mode} {keep}; an item "{model_args}" expands to
+Placeholders: {command} {prompt} {message} {session} {model} {permission_mode} {keep} {agent}; an item "{model_args}" expands to
 [model_flag, model] when a model is set and to nothing otherwise. Presets marked verified: false follow the CLI's
 public help but were not exercised end to end; dispatch a trivial task and follow it up before relying on one.
 
@@ -26,9 +26,12 @@ import shutil
 from pathlib import Path
 
 CLAUDE_INTERACTIVE = {
-    "launch": "{command}",
+    "launch": "{command} --name {agent} --permission-mode {permission_mode}",
     "resume": "{launch} --resume {session}",
+    "resume_missing": "No conversation found with session ID",
     "busy_pattern": "esc to interrupt",
+    "stall_patterns": ["Autocompact is thrashing"],
+    "env": {},
     "compact": "/compact Keep only: {keep}; drop finished task details.",
     "clear": "/clear",
     "sessions_dir": "~/.claude/sessions",
@@ -239,7 +242,30 @@ def resume_template(profile, session, model, conf=None):
     return argv + mcp_args(conf, profile) if argv else argv
 
 
-def instance_env(conf, profile_name=None):
+EMPTY_OPTION = re.compile(r" --?[\w-]+ \{(\w+)\}")
+
+
+def interactive_launch(conf, profile, agent=None):
+    """The command line that starts a persistent instance: `env VAR=value ...` for the profile's env and
+    interactive.env, the launch template, then the MCP flags. An option whose placeholder value is empty is dropped;
+    without an agent name {agent} stays for instance-restart.sh to fill from the session record."""
+    interactive = profile.get("interactive") or {}
+    template = conf.section("instances").get("launch") or interactive.get("launch") or profile.get("command") or ""
+    values = {"command": profile.get("command") or "", "permission_mode": profile.get("permission_mode") or ""}
+    if agent:
+        values["agent"] = shlex.quote(agent)
+    template = EMPTY_OPTION.sub(lambda m: "" if m.group(1) in values and not values[m.group(1)] else m.group(0), template)
+    variables = {**env(profile), **{k: str(v) for k, v in (interactive.get("env") or {}).items()}}
+    prefix = "env " + " ".join(shlex.quote(f"{k}={v}") for k, v in variables.items()) if variables else ""
+    return " ".join(filter(None, [prefix, fill(template, values), shlex.join(mcp_args(conf, profile))]))
+
+
+def stall_patterns(conf, profile_name=None):
+    """Screen text that means the agent stopped and needs the coordinator (interactive.stall_patterns)."""
+    return list((resolve(conf, profile_name).get("interactive") or {}).get("stall_patterns") or [])
+
+
+def instance_env(conf, profile_name=None, agent=None):
     """Environment the instance scripts read for one agent's profile."""
     profile = resolve(conf, profile_name)
     interactive = profile.get("interactive") or {}
@@ -248,11 +274,9 @@ def instance_env(conf, profile_name=None):
         "THESEUS_BUSY_PATTERN": instances.get("busy_pattern") or interactive.get("busy_pattern") or "",
         "THESEUS_COMPACT_TEMPLATE": interactive.get("compact") or "",
         "THESEUS_CLEAR_COMMAND": interactive.get("clear") or "",
-        "THESEUS_AGENT_LAUNCH": " ".join(filter(None, [
-            fill(instances.get("launch") or interactive.get("launch") or profile.get("command") or "",
-                 {"command": profile.get("command") or ""}),
-            shlex.join(mcp_args(conf, profile))])),
+        "THESEUS_AGENT_LAUNCH": interactive_launch(conf, profile, agent),
         "THESEUS_RESUME_TEMPLATE": interactive.get("resume") or "",
+        "THESEUS_RESUME_MISSING": interactive.get("resume_missing") or "",
         "THESEUS_AGENT_SESSIONS": os.path.expanduser(instances.get("sessions_dir") or interactive.get("sessions_dir") or ""),
         "THESEUS_MESSAGING": "1" if interactive.get("messaging") else "0",
     }

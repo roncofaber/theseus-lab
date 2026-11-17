@@ -55,6 +55,7 @@ theseus agents add worker-1 %3 --profile claude-code
 - Before an agent takes its next task, its context is reset. Normally the queue compacts it; when it moves from reading original code to clean-room work, the queue clears it completely.
 - A free agent gets the next ready task that it is allowed to work on.
 - An agent that sits idle without a handoff gets one reminder, then is reported as stalled.
+- An agent whose pane shows one of its profile's stall patterns (Claude Code: "Autocompact is thrashing") is shown as `thrashing` and reported as stalled at once, without a reminder: more input only refills a context that no longer fits. Restart or clear it (`theseus instance restart PANE`, `theseus instance compact PANE --clear`) or split the task.
 
 `theseus queue wait` exits as soon as something needs the coordinator (a delivery, a stall, an error), so the coordinator can run it in the background and react. `theseus queue pause|resume` stops and restarts assignment, and a task with `hold` set is never assigned.
 

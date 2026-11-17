@@ -125,7 +125,11 @@ def pane_alive(pane):
     return tmux("display", "-p", "-t", pane, "#{pane_pid}").returncode == 0
 
 
-def pane_busy(conf, pane, profile=None):
+def pane_screen(pane):
+    return tmux("capture-pane", "-p", "-t", pane).stdout.splitlines()
+
+
+def pane_busy(conf, pane, profile=None, screen=None):
     from . import profiles
     try:
         pattern = profiles.instance_env(conf, profile)["THESEUS_BUSY_PATTERN"]
@@ -133,8 +137,21 @@ def pane_busy(conf, pane, profile=None):
         pattern = conf.section("instances").get("busy_pattern") or ""
     if not pattern:
         return False
-    screen = tmux("capture-pane", "-p", "-t", pane).stdout.splitlines()
+    screen = pane_screen(pane) if screen is None else screen
     return any(pattern in line for line in screen[-3:])
+
+
+def pane_stall(conf, pane, profile=None, screen=None):
+    """The first of the profile's stall patterns anywhere on the visible screen, or None."""
+    from . import profiles
+    try:
+        patterns = profiles.stall_patterns(conf, profile)
+    except profiles.ProfileError:
+        return None
+    if not patterns:
+        return None
+    text = "\n".join(pane_screen(pane) if screen is None else screen)
+    return next((pattern for pattern in patterns if pattern in text), None)
 
 
 def current_task(conf, name):
@@ -196,9 +213,11 @@ def handoff_final(conf, handoff):
 
 
 def state(conf, agent):
-    """Live state: offline, busy, working, delivered, stalled, quiet, free (plus disabled). A handoff counts as delivered
-    only once the pane is idle and the handoff is final (handoff_final). Without a busy marker for the agent's profile a
-    long silence is reported as quiet, never stalled, so the queue does not type nudges into a working agent."""
+    """Live state: offline, busy, working, delivered, thrashing, stalled, quiet, free (plus disabled). A handoff counts
+    as delivered only once the pane is idle and the handoff is final (handoff_final). An idle pane that shows one of the
+    profile's stall patterns (interactive.stall_patterns) while it holds a task is thrashing at once, with the pattern
+    in "stall". Without a busy marker for the agent's profile a long silence is reported as quiet, never stalled, so the
+    queue does not type nudges into a working agent."""
     from . import rooms
     from . import tasks as t
     pane = agent["pane"]
@@ -209,7 +228,8 @@ def state(conf, agent):
     if not pane_alive(pane):
         info["state"] = "offline"
         return info
-    busy = pane_busy(conf, pane, agent.get("provider"))
+    screen = pane_screen(pane)
+    busy = pane_busy(conf, pane, agent.get("provider"), screen)
     if task:
         handoff = handoff_path(task)
         worktree = task.get("worktree")
@@ -218,6 +238,9 @@ def state(conf, agent):
         if handoff and handoff.exists() and not busy and handoff_final(conf, handoff):
             info["state"] = "delivered"
             info["result"] = t.handoff_result(handoff)
+        elif not busy and (stall := pane_stall(conf, pane, agent.get("provider"), screen)):
+            info["state"] = "thrashing"
+            info["stall"] = stall
         elif busy:
             info["state"] = "working"
         elif info["idleMinutes"] is not None and info["idleMinutes"] >= idle_limit(conf):

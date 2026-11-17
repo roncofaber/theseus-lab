@@ -4,6 +4,8 @@ A tick looks at every registered agent and acts on its state:
 - delivered (handoff present): the task is marked delivered and a `delivered` event asks the coordinator to review and
   merge it; the agent is reset before its next task;
 - stalled (idle past instances.idle_minutes with no handoff): one `continue` nudge, then a `stalled` event;
+- thrashing (the pane shows a stall pattern of its profile, such as Claude Code's autocompact thrashing notice): one
+  `stalled` event at once and no nudge, since typing more into that context only refills it;
 - free (enabled, no open task): if a ready task fits its room, the agent is reset (a full /clear when it carries dirty
   context into clean work, a /compact otherwise), the task is assigned on a fresh worktree, and its message is sent.
 Tasks with "hold": true are never assigned by the queue; `theseus queue pause` stops all assignment. Events go to the
@@ -90,7 +92,7 @@ def run_script(conf, name, args, agent=None):
     from . import profiles
     env = {**conf.environment(), **os.environ}
     if agent is not None:
-        env.update(profiles.instance_env(conf, agent.get("provider")))
+        env.update(profiles.instance_env(conf, agent.get("provider"), agent["name"]))
     return subprocess.run(["bash", script(name), *args], cwd=conf.root, env=env, capture_output=True, text=True)
 
 
@@ -162,7 +164,8 @@ def assign_and_send(conf, agent, task):
     if result.returncode != 0:
         return False, (result.stderr or result.stdout).strip()
     state = runtime(conf)
-    state.setdefault(agent["name"], {}).update({"last_task": task["id"], "assigned": ag.now(), "nudged": None})
+    state.setdefault(agent["name"], {}).update({"last_task": task["id"], "assigned": ag.now(), "nudged": None,
+                                                "thrashing": None})
     save_runtime(conf, state)
     return True, str(worktree)
 
@@ -213,6 +216,12 @@ def tick(conf, assign=True):
                         recorded.append(event(conf, "nudged", name, task_id, f"idle {info['idleMinutes']} min without a handoff"))
                 elif not events(conf, 1, kinds=["stalled"], task=task_id):
                     recorded.append(event(conf, "stalled", name, task_id, f"still idle after a nudge ({info['idleMinutes']} min)"))
+            elif info["state"] == "thrashing":
+                state = runtime(conf)
+                if state.get(name, {}).get("thrashing") != task_id:
+                    state.setdefault(name, {}).update({"thrashing": task_id, "nudged": task_id})
+                    save_runtime(conf, state)
+                    recorded.append(event(conf, "stalled", name, task_id, f"thrashing: the pane shows {info['stall']!r}; not nudged"))
             samples.append((name, info["state"], info["task"]))
             if info["state"] != "free" or not assign or paused(conf):
                 continue

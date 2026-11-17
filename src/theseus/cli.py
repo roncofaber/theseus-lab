@@ -32,7 +32,7 @@ def run_script(name, args, conf=None, pane=None):
         from . import agents, profiles
         agent = next((a for a in agents.agents(conf) if a["pane"] == pane), None)
         if agent is not None:
-            env.update(profiles.instance_env(conf, agent.get("provider")))
+            env.update(profiles.instance_env(conf, agent.get("provider"), agent["name"]))
     return subprocess.run(["bash", script(name), *args], cwd=conf.root, env=env).returncode
 
 

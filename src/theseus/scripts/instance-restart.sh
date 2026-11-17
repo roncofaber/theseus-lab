@@ -2,7 +2,8 @@
 # Restarts a persistent agent session in its tmux pane and resumes the same conversation, so it reloads MCP servers,
 # skills and settings without losing its name or history. The agent is the pane shell's child that owns a session
 # record (Claude Code keeps one per process, <sessions dir>/<pid>.json), which also gives its session ID. The relaunch is typed into the
-# pane's own shell, so the same aliases and environment (for example a model gateway configuration) apply.
+# pane's own shell, so the same aliases and environment (for example a model gateway configuration) apply. When the
+# session no longer exists (the pane shows THESEUS_RESUME_MISSING with its ID), the agent is launched fresh instead.
 # Usage: theseus instance restart PANE [--dry-run]
 set -uo pipefail
 # shellcheck source=lib.sh
@@ -12,7 +13,7 @@ pane=$1 dry=${2:-}
 sessions=${THESEUS_AGENT_SESSIONS:-$HOME/.claude/sessions}
 launch=${THESEUS_AGENT_LAUNCH:-claude}
 resume_template=${THESEUS_RESUME_TEMPLATE:-"{launch} --resume {session}"}
-resume_template=${resume_template//\{launch\}/$launch}
+missing=${THESEUS_RESUME_MISSING-No conversation found with session ID}
 [[ -n "$sessions" && -d "$sessions" ]] || { echo "$pane: the agent profile records no sessions; restart is unsupported" >&2; exit 1; }
 shell_pid=$(tmux display -p -t "$pane" '#{pane_pid}') || { echo "$pane: no such pane" >&2; exit 1; }
 agent() { for pid in $(pgrep -P "$shell_pid"); do [[ -f "$sessions/$pid.json" ]] && { echo "$pid"; return; }; done; }
@@ -21,21 +22,38 @@ agent_pid=$(agent)
 session=$(jq -r '.sessionId // empty' "$sessions/$agent_pid.json" 2>/dev/null)
 [[ -n "$session" ]] || { echo "$pane: no session record $sessions/$agent_pid.json" >&2; exit 1; }
 name=$(jq -r '.name // empty' "$sessions/$agent_pid.json")
+if [[ -n "$name" ]]; then
+    launch=${launch//\{agent\}/"$(printf '%q' "$name")"}
+else
+    launch=${launch// --name \{agent\}/}
+fi
+resume=${resume_template//\{launch\}/"$launch"}
+resume=${resume//\{session\}/"$session"}
 if [[ "$dry" == --dry-run ]]; then
-    echo "$pane: would restart ${name:-unnamed} (pid $agent_pid, session $session) with: ${resume_template//\{session\}/$session}"
+    echo "$pane: would restart ${name:-unnamed} (pid $agent_pid, session $session) with: $resume"
     exit 0
 fi
 for _ in $(seq 1 36); do pane_busy "$pane" || break; sleep 5; done
 pane_busy "$pane" && { echo "$pane still busy after 3 minutes; not restarting" >&2; exit 1; }
-tmux send-keys -t "$pane" -l "/exit" && sleep 0.3 && tmux send-keys -t "$pane" Enter
+type_line() { tmux send-keys -t "$pane" -l "$1" && sleep 0.3 && tmux send-keys -t "$pane" Enter; }
+type_line "/exit"
 for _ in $(seq 1 60); do kill -0 "$agent_pid" 2>/dev/null || break; sleep 1; done
 kill -0 "$agent_pid" 2>/dev/null && { echo "$pane: pid $agent_pid did not exit after /exit" >&2; exit 1; }
-tmux send-keys -t "$pane" -l "${resume_template//\{session\}/$session}" && sleep 0.3 && tmux send-keys -t "$pane" Enter
-new_pid=""
+type_line "$resume"
+new_pid="" fresh=""
 for _ in $(seq 1 90); do
     new_pid=$(agent)
     [[ -n "$new_pid" ]] && break
+    if [[ -n "$missing" && -z "$fresh" ]] && tmux capture-pane -p -t "$pane" 2>/dev/null | grep -F -- "$missing" | grep -qF -- "$session"; then
+        fresh=1
+        type_line "$launch"
+    fi
     sleep 1
 done
 [[ -n "$new_pid" ]] || { echo "$pane: no agent came back within 90 s" >&2; exit 1; }
-echo "$pane: restarted ${name:-unnamed} as pid $new_pid, session $session"
+if [[ -n "$fresh" ]]; then
+    new_session=$(jq -r '.sessionId // empty' "$sessions/$new_pid.json" 2>/dev/null)
+    echo "$pane: session $session no longer exists; launched ${name:-unnamed} fresh as pid $new_pid, session ${new_session:-unknown}"
+else
+    echo "$pane: restarted ${name:-unnamed} as pid $new_pid, session $session"
+fi

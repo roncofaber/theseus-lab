@@ -91,16 +91,37 @@ class WorkerMcpTests(Sandbox):
                    'mcp_servers = ["theseus"]\n')
         conf = cfg.load(root=self.project)
         profile = profiles.resolve(conf, "gateway")
-        env = profiles.instance_env(conf, "gateway")
-        self.assertTrue(env["THESEUS_AGENT_LAUNCH"].startswith("wrapped-claude --strict-mcp-config --mcp-config "))
+        env = profiles.instance_env(conf, "gateway", "worker-1")
+        self.assertTrue(env["THESEUS_AGENT_LAUNCH"].startswith(
+            "wrapped-claude --name worker-1 --permission-mode auto --strict-mcp-config --mcp-config "))
         path = Path(env["THESEUS_AGENT_LAUNCH"].split()[-1])
         self.assertEqual({"theseus"}, set(json.loads(path.read_text())["mcpServers"]))
         argv = profiles.launch_argv(profile, "do it", "S1", "", conf)
         self.assertEqual(["--strict-mcp-config", "--mcp-config", str(path)], argv[-3:])
-        self.assertEqual("claude", profiles.instance_env(conf, "claude-code")["THESEUS_AGENT_LAUNCH"])
+        self.assertEqual("claude --name worker-1 --permission-mode auto",
+                         profiles.instance_env(conf, "claude-code", "worker-1")["THESEUS_AGENT_LAUNCH"])
+        self.assertEqual("claude --name {agent} --permission-mode auto", profiles.instance_env(conf)["THESEUS_AGENT_LAUNCH"])
         self.write("theseus.local.toml", '[workers.gateway]\npreset = "claude-code"\nmcp_servers = ["nonexistent"]\n')
         with self.assertRaises(profiles.ProfileError):
             profiles.instance_env(cfg.load(root=self.project), "gateway")
+
+
+class InteractiveLaunchTests(Sandbox):
+    def test_env_prefix_quoting_empty_options_and_stall_patterns(self):
+        from theseus import profiles
+        self.scaffold()
+        self.write("theseus.local.toml", '[workers.gateway]\npreset = "claude-code"\ncommand = "wrapped-claude"\n'
+                   'model = "m1"\nmodel_flag = ""\npermission_mode = ""\nenv = { GW_MODEL = "{model}" }\n'
+                   '[workers.gateway.interactive]\nenv = { CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS = "10000", NOTE = "a b" }\n')
+        conf = cfg.load(root=self.project)
+        env = profiles.instance_env(conf, "gateway", "it's-me")
+        self.assertEqual("env GW_MODEL=m1 CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS=10000 'NOTE=a b' wrapped-claude --name 'it'\"'\"'s-me'",
+                         env["THESEUS_AGENT_LAUNCH"])
+        self.assertEqual("{launch} --resume {session}", env["THESEUS_RESUME_TEMPLATE"])
+        self.assertEqual("No conversation found with session ID", env["THESEUS_RESUME_MISSING"])
+        self.assertEqual(["Autocompact is thrashing"], profiles.stall_patterns(conf, "gateway"))
+        self.assertEqual([], profiles.stall_patterns(conf, "codex"))
+        self.assertEqual("codex", profiles.instance_env(conf, "codex", "w")["THESEUS_AGENT_LAUNCH"])
 
 
 class TaskRuleTests(Sandbox):

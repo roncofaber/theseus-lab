@@ -55,13 +55,16 @@ Use a variant per task with `theseus dispatch TASK --provider cheap-research`, o
 | `retry` | Resume automatically after a retryable gateway error (Claude JSON output with status 429, 5xx or 529) |
 | `capacity` | Concurrent active tasks under this profile |
 | `pool` | A host-wide pool shared with other projects (see [Configuration](configuration.md#sharing-agents-between-projects)) |
-| `interactive.launch`, `interactive.resume` | How a persistent instance is started and resumed (`{launch}`, `{session}`) by `theseus instance restart` |
+| `interactive.launch`, `interactive.resume` | How a persistent instance is started and resumed (`{launch}`, `{session}`) by `theseus instance restart`; the Claude Code presets launch `{command} --name {agent} --permission-mode {permission_mode}`, so a restarted agent keeps its name and permissions, and an option whose value is empty is left out |
+| `interactive.resume_missing` | Text the CLI prints when the session to resume no longer exists; `instance restart` then launches the agent fresh with the same launch line and says so |
+| `interactive.env` | Extra environment for the persistent instance. It and `env` are put in front of the launch as `env VAR=value ...` (shell-quoted), for the first launch and every restart |
 | `interactive.busy_pattern` | Text the agent shows only while working; the queue treats the pane as idle otherwise |
+| `interactive.stall_patterns` | Screen text that means the agent has stopped and needs the coordinator. An idle pane holding a task that shows one is `thrashing` at once: the queue records one `stalled` event and never nudges it. Claude Code presets: `["Autocompact is thrashing"]` |
 | `interactive.compact`, `interactive.clear` | Commands typed between tasks: compact (same room, or clean to dirty) and clear (dirty to clean); `{keep}` is what compaction keeps |
 | `interactive.sessions_dir` | Where the CLI records running sessions (needed by `instance restart`) |
 | `interactive.messaging` | Whether the agent can message the coordinator session; without it workers reply in their pane and the queue detects the handoff file |
 
-Placeholders: `{command}`, `{prompt}`, `{message}`, `{session}`, `{model}`, `{permission_mode}`, `{keep}`, `{launch}`, and the list item `{model_args}`.
+Placeholders: `{command}`, `{prompt}`, `{message}`, `{session}`, `{model}`, `{permission_mode}`, `{keep}`, `{launch}`, `{agent}` (the registered agent name, shell-quoted), and the list item `{model_args}`.
 
 ## Wrapped CLIs and gateways
 
@@ -76,6 +79,17 @@ model_flag = ""                         # the launcher reads the model from its 
 env = { GATEWAY_MODEL = "{model}" }
 capacity = 4
 ```
+
+### Persistent instance environment
+
+`env` and `interactive.env` reach a persistent instance through its launch line, since the agent starts in the pane's own shell. A model with a small context window, or a gateway that sends every tool schema on every request, fills its context quickly when the agent reads whole files; Claude Code then compacts over and over and finally stops with "Autocompact is thrashing". Lowering the file read limit makes the agent read large files in line ranges:
+
+```toml
+[workers.gateway.interactive]
+env = { CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS = "10000" }
+```
+
+The instance then starts as `env CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS=10000 claude-via-gateway --name worker-1 --permission-mode auto`. Restart running agents (`theseus instance restart PANE`) to apply a change.
 
 ## Adding an agent theseus does not know
 

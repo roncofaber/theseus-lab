@@ -14,9 +14,14 @@ All notable changes to this project are documented here. The format follows [Kee
 - `theseus db check|maintain|backup|restore FILE --yes|prune`: integrity and size report, retention trim with `ANALYZE`, optimize, incremental vacuum and WAL truncation, online backups with an integrity check and 7 daily plus 4 weekly rotation, restore that saves the current database first, and explicit removal of projects whose root is gone. The queue runs maintenance and a backup at most once a day. Retention and backups are configured in `~/.config/theseus/store.toml`.
 - `theseus doctor` shows the host store (path, schema version, size, last backup, last maintenance) and project names claimed by two roots.
 - `theseus top` dashboard look: boxed, titled sections in the plain dashboard's state colors; a stable accent color per project (tab label, section borders, host tables); project cards on the Host tab; one stacked activity bar chart per project tab (series per kind group, legend, time axis) and one for all projects on the Host tab; CPU, load, memory, swap and GPU meters with an in-memory CPU history and per-core view (`c`); CPU and memory bars per agent.
+- Thrashing is a stall: an idle agent holding a task whose pane shows one of its profile's `interactive.stall_patterns` (Claude Code presets: "Autocompact is thrashing") is reported in state `thrashing` at once, and the queue records one `stalled` event, which wakes `theseus queue wait`, and never nudges it.
+- `interactive.env` for a profile: it and the profile's `env` are put in front of the persistent instance's launch and restart as `env VAR=value ...`, for example `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS = "10000"` to make agents read large files in ranges.
+- `theseus instance restart` launches the agent fresh with the same name and permission mode when the session to resume no longer exists (`interactive.resume_missing`), and reports it.
 
 ### Changed
 
+- The Claude Code presets launch persistent instances as `{command} --name {agent} --permission-mode {permission_mode}`, and resume with the same line plus `--resume`, so a restarted agent keeps its name and permissions. `profiles.instance_env()` takes the agent name; without one, `instance restart` fills `{agent}` from the session record.
+- The worker instance brief asks for short shell output and for findings to go into the report as the work goes, so they survive context compaction.
 - Textual (`textual>=8.2,<9`) is now a runtime dependency. `theseus top --once` and `--json` keep their output; the old ANSI refresh loop is retired.
 - The queue tick takes pool slots atomically (`store.acquire()`) and gives a slot back when the assignment fails, so concurrent queues never push a pool past its `max`.
 - Event records returned by `workqueue.events()` (and in `theseus top --json`) also carry `id`, `project` and `epoch`.

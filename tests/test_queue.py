@@ -153,6 +153,18 @@ class QueueTests(Sandbox):
         self.assertIn("stalled", self.theseus("queue", "tick").stdout)
         self.assertNotIn("stalled", self.theseus("queue", "tick").stdout, "a stall is reported once")
 
+    def test_a_thrashing_agent_is_reported_at_once_and_never_nudged(self):
+        self.add("heavy-task")
+        self.theseus("queue", "tick")
+        (self.state / "screen-%1").write_text("Autocompact is thrashing: the context refilled right after compacting.\n> \n")
+        self.assertRegex(self.theseus("agents").stdout, r"worker-a\s+%1\s+thrashing")
+        waited = self.theseus("queue", "wait", "--timeout", "20", "--interval", "1").stdout
+        self.assertRegex(waited, r"stalled\s+worker-a\s+heavy-task thrashing: the pane shows 'Autocompact is thrashing'")
+        self.assertNotIn("nudged", self.theseus("queue", "tick").stdout)
+        self.assertNotIn("Continue the current task", self.typed())
+        self.assertEqual(1, self.theseus("queue", "log").stdout.count("stalled"))
+        self.assertIn("thrashing", self.theseus("top", "--once").stdout)
+
     def test_an_interim_handoff_while_busy_is_not_a_delivery(self):
         self.add("busy-task")
         self.theseus("queue", "tick")
