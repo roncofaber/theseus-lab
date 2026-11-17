@@ -54,6 +54,18 @@ class PoolTests(unittest.TestCase):
         self.assertTrue(pools.may_start(self.first, "gw")[0])
         self.assertEqual(0, pools.status("gw")["active"])
 
+    def test_manual_hold_counts_against_the_pool_and_yields_to_priority(self):
+        self.assertTrue(pools.hold("second", "gw", "pane-1", "game task")[0])
+        self.assertTrue(pools.hold("second", "gw", "pane-2", "game task")[0])
+        allowed, why = pools.hold("second", "gw", "pane-3", "game task")
+        self.assertFalse(allowed)
+        self.assertIn("full", why)
+        pools.sync(self.first, "gw", {})
+        self.assertFalse(pools.may_start(self.first, "gw")[0])
+        self.assertTrue(pools.release("second", "gw", "pane-1"))
+        self.assertFalse(pools.hold("second", "gw", "pane-1", "again")[0], "first's fresh claim wins the freed slot")
+        self.assertTrue(pools.may_start(self.first, "gw")[0])
+
 
 if __name__ == "__main__":
     unittest.main()

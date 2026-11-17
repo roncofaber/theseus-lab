@@ -70,7 +70,8 @@ def locked(pool):
         state.setdefault("leases", {})
         state.setdefault("claims", {})
         now = time.time()
-        state["leases"] = {k: v for k, v in state["leases"].items() if now - v.get("seen", 0) < LEASE_TTL}
+        state["leases"] = {k: v for k, v in state["leases"].items()
+                           if (v.get("until") or v.get("seen", 0) + LEASE_TTL) > now}
         state["claims"] = {k: v for k, v in state["claims"].items() if now - v < CLAIM_TTL}
         yield state
         path.write_text(json.dumps(state, indent=2) + "\n")
@@ -114,6 +115,30 @@ def may_start(conf, pool):
 def take(conf, pool, agent, task):
     with locked(pool) as state:
         state["leases"][key(conf, agent)] = {"project": conf.name, "agent": agent, "task": task, "seen": time.time()}
+
+
+def hold(project, pool, agent, task, hours=4.0):
+    """Hold a slot by hand for a worker no theseus queue tracks (it expires after hours unless released). Refused when
+    the pool is full or a higher-priority project claims it; returns (ok, reason)."""
+    spec = definitions().get(pool, {})
+    limit = int(spec.get("max") or 0)
+    priority = list(spec.get("priority") or [])
+    with locked(pool) as state:
+        ahead = priority[: priority.index(project)] if project in priority else priority
+        waiting = [p for p in ahead if p in state["claims"]]
+        if waiting:
+            return False, f"yielding to {waiting[0]} in pool {pool}"
+        if f"{project}/{agent}" not in state["leases"] and limit and len(state["leases"]) >= limit:
+            return False, f"pool {pool} full ({len(state['leases'])}/{limit})"
+        now = time.time()
+        state["leases"][f"{project}/{agent}"] = {"project": project, "agent": agent, "task": task, "seen": now,
+                                                 "until": now + hours * 3600}
+        return True, ""
+
+
+def release(project, pool, agent):
+    with locked(pool) as state:
+        return state["leases"].pop(f"{project}/{agent}", None) is not None
 
 
 def drop_claim(conf, pool):

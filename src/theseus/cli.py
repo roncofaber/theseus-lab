@@ -410,6 +410,15 @@ def cmd_agents(args):
 
 def cmd_pool(args):
     from . import pools
+    if args.action in ("hold", "release"):
+        if not (args.name and args.agent and args.project):
+            sys.exit("usage: theseus pool hold|release POOL AGENT --project NAME [--task ID] [--hours H]")
+        if args.action == "hold":
+            ok, why = pools.hold(args.project, args.name, args.agent, args.task or "-", args.hours)
+            print(f"held {args.name} slot for {args.project}/{args.agent}" if ok else f"refused: {why}")
+            sys.exit(0 if ok else 3)
+        print("released" if pools.release(args.project, args.name, args.agent) else "no such slot")
+        return
     names = [args.name] if args.name else sorted(pools.definitions())
     if not names:
         print(f"no pools defined; create {pools.config_path()} (see `theseus pool --help`)")
@@ -675,8 +684,14 @@ def build_parser():
                        description="Show who holds the slots of each pool. A pool caps the agents working at once across "
                                    "projects: [pools.NAME] max = N, priority = [\"project\", ...] in ~/.config/theseus/pools.toml; "
                                    "a profile joins with pool = \"NAME\" in [workers.PROFILE].")
-    p.add_argument("name", nargs="?")
-    p.set_defaults(func=guarded(cmd_pool))
+    p.add_argument("action", nargs="?", default="status", choices=("status", "hold", "release"),
+                   help="hold or release a slot by hand for a worker no theseus queue tracks")
+    p.add_argument("name", nargs="?", help="pool name")
+    p.add_argument("agent", nargs="?", help="hold/release: the worker holding the slot")
+    p.add_argument("--project", help="hold/release: project name as listed in the pool priority")
+    p.add_argument("--task", help="hold: what the worker is doing")
+    p.add_argument("--hours", type=float, default=4.0, help="hold: expiry if never released (default 4)")
+    p.set_defaults(func=cmd_pool)
 
     p = sub.add_parser("queue", help="work queue: status, tick, run, wait, pause, resume, log")
     p.add_argument("action", nargs="?", default="status", choices=("status", "tick", "run", "wait", "pause", "resume", "log"))
