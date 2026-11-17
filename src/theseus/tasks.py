@@ -233,6 +233,15 @@ def provider_capacity(conf, provider):
         return None
 
 
+def capacity_use(conf, tasks=None):
+    """profile -> (active tasks, capacity or None) for every profile with active tasks or a configured capacity."""
+    tasks = tasks if tasks is not None else Queue(conf).load()["tasks"]
+    active = active_by_provider(tasks)
+    from . import profiles
+    names = set(active) | set(profiles.names(conf))
+    return {n: (active.get(n, 0), provider_capacity(conf, n)) for n in names if n}
+
+
 def active_by_provider(tasks):
     counts = {}
     for task in tasks:

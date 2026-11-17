@@ -314,6 +314,18 @@ class QueueTests(Sandbox):
         self.assertRegex(" ".join(wide.split()), r"working ordinary-task .* delivered \d+s")
         self.theseus("tasks", "priority", "ordinary-task", "0")
 
+    def test_a_full_profile_leaves_free_agents_idle_without_errors(self):
+        self.set_config("[workers.claude-code]\ncapacity = 1\n")
+        self.git("commit", "-q", "-am", "capacity 1")
+        self.theseus("agents", "add", "worker-b", "%2")
+        self.add("first-task")
+        self.add("second-task")
+        out = self.theseus("queue", "tick").stdout
+        self.assertEqual(1, out.count("assigned"))
+        self.assertNotIn("error", self.theseus("queue", "tick").stdout)
+        self.assertNotIn("error", self.theseus("queue", "log").stdout)
+        self.assertIn("profile claude-code at capacity (1/1)", " ".join(self.theseus("top", "--once").stdout.split()))
+
     def test_wait_returns_when_a_delivery_needs_the_coordinator(self):
         self.add("watched-task")
         self.theseus("queue", "tick")

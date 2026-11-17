@@ -260,6 +260,10 @@ def tick(conf, assign=True):
             samples.append((name, info["state"], info["task"]))
             if info["state"] != "free" or not assign or paused(conf):
                 continue
+            from . import profiles as pf
+            used, capacity = t.capacity_use(conf).get(agent.get("provider") or pf.default_name(conf), (0, None))
+            if capacity is not None and used >= int(capacity):
+                continue
             task, needed = next_task(conf, agent, info, claimed)
             if task is None:
                 continue

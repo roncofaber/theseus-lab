@@ -330,6 +330,7 @@ def snapshot(conf, sample=False, host=None):
         "profiles": {x["id"]: x["profile"] for v in summary.values() for x in v if x.get("profile")},
         "blocked": {x["id"]: x["reasons"] for x in summary["blocked"]},
         "times": task_times(conf),
+        "capacity": {k: list(v) for k, v in t.capacity_use(conf).items()},
         "priorities": {x["id"]: int(x.get("priority") or 0) for x in t.Queue(conf).load().get("tasks", []) if x.get("priority")},
         "paused": wq.paused(conf), "git": git_state(conf), "verification": verification_state(conf),
         "events": merge_resets(wq.events(conf, 200)),
@@ -485,7 +486,7 @@ def day_label(stamp):
 
 
 REASON_COLOR = {"review": MAGENTA, "merged": CYAN, "held": DIM, "blocked": DIM, "paused": YELLOW, "none": RED,
-                "full": YELLOW, "yield": YELLOW, "next": GREEN, "busy": YELLOW}
+                "full": YELLOW, "yield": YELLOW, "next": GREEN, "busy": YELLOW, "capacity": YELLOW}
 BLOCK_WORDS = {"waits": "waiting for", "missing": "unknown dependency", "milestone": "outside the milestone, in"}
 
 
@@ -513,6 +514,15 @@ def waiting_reason(state, key, task_id):
         return "none", f"no eligible agent{f' for the {room} room' if room else ''}"
     free = {a["name"] for a in state["agents"] if a["state"] == "free"}
     if [n for n, _ in allowed if n in free]:
+        profiles_of = {a["name"]: a.get("provider") for a in state["agents"]}
+        full = []
+        for name, _ in allowed:
+            used, capacity = state.get("capacity", {}).get(profiles_of.get(name) or "", (0, None))
+            if name in free and capacity is not None and used >= int(capacity):
+                full.append((profiles_of.get(name), used, capacity))
+        if full and len(full) == len([n for n, _ in allowed if n in free]):
+            profile, used, capacity = full[0]
+            return "capacity", f"profile {profile} at capacity ({used}/{capacity})"
         for pool in state.get("pools", []):
             if pool["max"] and pool["active"] >= pool["max"]:
                 return "full", f"pool {pool['pool']} full ({pool['active']}/{pool['max']})"
