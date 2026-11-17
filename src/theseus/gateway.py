@@ -33,6 +33,7 @@ DEFAULT_RESEND = ("The gateway error is over. Continue the current task from the
                   "the handoff and your done line.")
 FATAL_TEXT = re.compile(r"prompt is too long|context (?:length|window)[^.]{0,30}(?:exceeded|too long)|too many tokens|"
                         r"invalid_request_error", re.IGNORECASE)
+PROGRESS_SECONDS = 120
 STATUS = re.compile(r"API Error:\s*(\d{3})")
 TITLE = re.compile(r"\bError (\d{3})\b")
 # Anthropic-format error types win over the bare status when both appear.
@@ -51,6 +52,7 @@ def settings(conf):
     section["fresh_after_errors"] = int(section.get("fresh_after_errors") or 0)
     section["screen_lines"] = int(section.get("screen_lines") or 15)
     section["stagger_seconds"] = float(section.get("stagger_seconds") or 0)
+    section["recovery_seconds"] = float(section.get("recovery_seconds") or 900)
     return section
 
 
@@ -107,9 +109,12 @@ def detect(conf, profile, screen):
     matched = next((pattern for pattern in patterns if re.search(pattern, text)), None)
     if matched is None:
         return None
-    info = parse(lines)
     ready = interactive.get("gateway_ready")
-    info.update({"pattern": matched, "ready": bool(ready and ready in text), "fatal": fatal(info)})
+    ready = bool(ready and ready in text)
+    # With the ready marker showing the newest error is current, so a long error body that starts above the bottom
+    # window can be read from the whole screen; the last error on it wins.
+    info = parse(screen if ready else lines)
+    info.update({"pattern": matched, "ready": ready, "fatal": fatal(info)})
     return info
 
 
@@ -313,14 +318,25 @@ def handle(conf, agent, info, now=None):
 
 
 def observe(conf, agent, info, now=None):
-    """Bookkeeping for an agent seen working: its pool had a success, and a resent episode counts as recovered."""
+    """Bookkeeping for an agent seen busy. Busy alone is no success: a request that ends in a 524 shows the busy marker
+    for minutes first. Progress is a change in the worktree or log directory after the resend, or recovery_seconds of
+    work since it; only then does the episode count as recovered (its attempts start over) and the pool record a
+    success. A waiting episode whose pane got going without the queue's resend keeps its attempts and gets no resend."""
     from . import workqueue
+    now = time.time() if now is None else now
     pool = pool_key(conf, workqueue.launched(conf, agent))
+    changed = info.get("lastChange")
     with store.for_project(conf) as conn:
-        store.gateway_success(conn, pool, at=now)
         row = store.gateway_retry(conn, conf.name, agent["name"])
-        if row and row["phase"] == "resent" and row["task"] == info.get("task"):
-            store.put_gateway_retry(conn, conf.name, agent["name"], now=now, phase="recovered", recovered=1)
+        if row and row["task"] == info.get("task"):
+            since = row["resent_epoch"] or 0
+            progress = (changed and changed > since) or now - since >= settings(conf)["recovery_seconds"]
+            if row["phase"] == "waiting":
+                store.put_gateway_retry(conn, conf.name, agent["name"], now=now, phase="resent", resent_epoch=now)
+            elif row["phase"] == "resent" and progress:
+                store.put_gateway_retry(conn, conf.name, agent["name"], now=now, phase="recovered", recovered=1)
+        if changed and now - changed <= PROGRESS_SECONDS:
+            store.gateway_success(conn, pool, at=now)
 
 
 def health(now=None, window=24 * 3600):

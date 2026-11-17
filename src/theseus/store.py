@@ -1,7 +1,7 @@
 """Host store: one SQLite database per machine for host-level and runtime state shared by every project.
 
 The database lives at ~/.local/share/theseus/theseus.db (XDG_DATA_HOME is respected; THESEUS_DB overrides the path).
-THESEUS_DB_GUARD names a path (file or directory) the store must never open, so a test harness fails loudly instead of
+THESEUS_DB_GUARD lists paths (files or directories, separated like PATH) the store must never open, so a test harness fails loudly instead of
 touching the real host database. It holds the projects this host runs, coordinator sessions, registered agents, queue events, pool leases and claims,
 deliveries, periodic agent-state samples and gateway errors, retry episodes and pauses. Task records stay in each project's tasks.json in Git; the optional task
 index here is a read-only copy for cross-project queries. There is no daemon: every short-lived process opens the file
@@ -135,7 +135,7 @@ MIGRATIONS = [
         "CREATE INDEX samples_epoch ON samples(epoch)",
     ],
     [
-        """CREATE TABLE gateway_errors (
+        """CREATE TABLE IF NOT EXISTS gateway_errors (
             id INTEGER PRIMARY KEY,
             pool TEXT NOT NULL,
             project TEXT NOT NULL,
@@ -146,8 +146,8 @@ MIGRATIONS = [
             retry_after REAL,
             time TEXT NOT NULL,
             epoch REAL NOT NULL)""",
-        "CREATE INDEX gateway_errors_pool ON gateway_errors(pool, epoch)",
-        """CREATE TABLE gateway_retries (
+        "CREATE INDEX IF NOT EXISTS gateway_errors_pool ON gateway_errors(pool, epoch)",
+        """CREATE TABLE IF NOT EXISTS gateway_retries (
             project TEXT NOT NULL,
             agent TEXT NOT NULL,
             task TEXT,
@@ -163,7 +163,7 @@ MIGRATIONS = [
             recovered INTEGER NOT NULL DEFAULT 0,
             updated_epoch REAL,
             PRIMARY KEY (project, agent))""",
-        """CREATE TABLE gateway_pools (
+        """CREATE TABLE IF NOT EXISTS gateway_pools (
             pool TEXT PRIMARY KEY,
             paused_until REAL,
             reason TEXT,
@@ -179,11 +179,11 @@ def path():
     else:
         base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
         found = Path(base) / "theseus" / "theseus.db"
-    guard = os.environ.get("THESEUS_DB_GUARD")
-    if guard:
-        resolved, fenced = found.expanduser().resolve(), Path(guard).expanduser().resolve()
+    resolved = found.expanduser().resolve()
+    for guard in filter(None, os.environ.get("THESEUS_DB_GUARD", "").split(os.pathsep)):
+        fenced = Path(guard).expanduser().resolve()
         if resolved == fenced or fenced in resolved.parents:
-            raise StoreError(f"refusing to open {resolved}: it lies under THESEUS_DB_GUARD={guard} (a test harness "
+            raise StoreError(f"refusing to open {resolved}: it lies under {guard} in THESEUS_DB_GUARD (a test harness "
                              f"fences off the real host store)")
     return found
 

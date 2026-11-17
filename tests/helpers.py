@@ -16,14 +16,20 @@ def isolate_session():
     """Point the host store, host configuration and XDG roots of this whole test process, and of every subprocess it
     starts, at a private temporary directory before any test runs, and make theseus refuse the user's real host
     database (THESEUS_DB_GUARD) should a test or a subprocess drop that isolation."""
-    real_data = Path(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")) / "theseus"
+    import pwd
+    fenced = {Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local/share/theseus",
+              Path(os.path.expanduser("~/.local/share")) / "theseus"}
+    if os.environ.get("XDG_DATA_HOME"):
+        fenced.add(Path(os.environ["XDG_DATA_HOME"]) / "theseus")
+    if os.environ.get("THESEUS_DB"):
+        fenced.add(Path(os.environ["THESEUS_DB"]))
     session = Path(tempfile.mkdtemp(prefix="theseus-session-"))
     os.environ.update({
         "XDG_DATA_HOME": str(session / "xdg-data"),
         "XDG_CONFIG_HOME": str(session / "xdg-config"),
         "THESEUS_DB": str(session / "xdg-data/theseus/theseus.db"),
         "THESEUS_CONFIG": str(session / "xdg-config/theseus/config.toml"),
-        "THESEUS_DB_GUARD": str(real_data),
+        "THESEUS_DB_GUARD": os.pathsep.join(sorted(map(str, fenced))),
     })
     import atexit
     import shutil

@@ -123,6 +123,13 @@ class ClassificationTests(GatewayCase):
         self.assertEqual((524, None), (found["code"], found["retry_after"]))
         self.assertFalse(found["fatal"])
 
+    def test_a_full_length_error_in_a_narrow_pane_is_read_from_the_whole_screen(self):
+        long_524 = CF_524.replace('"detail":"', '"detail":"' + "The origin web server timed out. " * 8)
+        found = self.detect(screen(long_524, width=80))
+        self.assertEqual((524, 120.0), (found["code"], found["retry_after"]))
+        found = self.detect(screen(CF_530 + " " + "x" * 600, width=80))
+        self.assertEqual(530, found["code"])
+
     def test_a_530_tunnel_error_without_a_retryable_field_is_retryable(self):
         found = self.detect(screen(CF_530))
         self.assertEqual((530, None, "tunnel_error"), (found["code"], found["retryable"], found["error_name"]))
@@ -249,12 +256,37 @@ class RetryTests(FakeSend):
         self.assertEqual("/clear", self.sent[0])
         self.assertIn("Your context was cleared after gateway 524", self.sent[1])
 
-    def test_an_agent_seen_working_recovers_and_old_error_text_is_not_a_new_error(self):
+    def test_busy_without_progress_is_no_recovery_and_the_attempts_run_out(self):
+        from theseus import gateway
+        info = self.info(screen(CF_524))
+        now = 1_000_000.0
+        for attempt in (1, 2, 3):
+            [(kind, detail)] = self.handle(info, now)
+            self.assertIn(f"attempt {attempt}/3", detail)
+            now += 1000
+            self.assertEqual("resent", self.handle(info, now)[0][0])
+            gateway.observe(self.conf, self.agent, {"task": "slow-task", "lastChange": now - 5000}, now=now + 60)
+            now += 180
+        [(kind, detail)] = self.handle(info, now)
+        self.assertEqual("stalled", kind)
+        self.assertIn("gateway 524 x3", detail)
+
+    def test_a_pane_that_gets_going_without_the_resend_is_not_resent(self):
+        from theseus import gateway
+        info = self.info(screen(CF_524))
+        self.handle(info, 1000.0)
+        gateway.observe(self.conf, self.agent, {"task": "slow-task"}, now=1050.0)
+        [(kind, detail)] = self.handle(info, 1200.0)
+        self.assertEqual("gateway_error", kind)
+        self.assertIn("attempt 1/3", detail, "no resend of ours happened, so no attempt was used")
+        self.assertEqual([], self.sent)
+
+    def test_an_agent_that_made_progress_recovers_and_old_error_text_is_not_a_new_error(self):
         from theseus import gateway
         info = self.info(screen(CF_524))
         self.handle(info, 1000.0)
         self.handle(info, 1200.0)
-        gateway.observe(self.conf, self.agent, {"task": "slow-task"})
+        gateway.observe(self.conf, self.agent, {"task": "slow-task", "lastChange": 1250.0}, now=1260.0)
         stale = dict(info["gateway"], ready=False)
         self.assertTrue(gateway.stale(self.conf, "worker-a", stale))
         self.assertFalse(gateway.stale(self.conf, "worker-a", info["gateway"]), "a ready marker is always current")
@@ -304,6 +336,41 @@ class BreakerTests(FakeSend):
         self.assertIn("in 130s", detail)
 
 
+class GuardTests(GatewayCase):
+    def test_the_store_refuses_a_path_under_the_guard(self):
+        from theseus import store
+        os.environ["THESEUS_DB_GUARD"] = os.pathsep.join([str(self.tmp / "elsewhere"), str(self.tmp / "fenced")])
+        os.environ["THESEUS_DB"] = str(self.tmp / "fenced/theseus.db")
+        with self.assertRaisesRegex(store.StoreError, "refusing to open"):
+            store.path()
+        os.environ["THESEUS_DB"] = str(self.tmp / "open/theseus.db")
+        self.assertEqual(self.tmp / "open/theseus.db", store.path())
+
+    def test_migration_3_runs_from_version_2_even_over_leftover_gateway_tables(self):
+        import sqlite3
+        from theseus import store
+        db = self.tmp / "v2.db"
+        raw = sqlite3.connect(db)
+        for statement in store.MIGRATIONS[0] + store.MIGRATIONS[1]:
+            raw.execute(statement)
+        raw.execute(store.MIGRATIONS[2][-1])
+        raw.execute("PRAGMA user_version = 2")
+        raw.commit()
+        raw.close()
+        conn = store.connect(db)
+        try:
+            self.assertEqual(store.SCHEMA_VERSION, store.version(conn))
+            self.assertEqual([], store.gateway_pools(conn))
+        finally:
+            conn.close()
+
+    def test_the_session_fences_off_the_real_host_store(self):
+        import pwd
+        home = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".local/share/theseus")
+        self.assertIn(home, os.environ["THESEUS_DB_GUARD"].split(os.pathsep))
+        self.assertIn(home, self.env["THESEUS_DB_GUARD"].split(os.pathsep))
+
+
 class VerifiedSendTests(GatewayCase):
     def test_a_stuck_input_box_gets_one_more_enter(self):
         text = "Continue the current task from the state of your worktree."
@@ -346,6 +413,24 @@ class QueueGatewayTests(GatewayCase):
         self.assertIn("1 error(s) in 24 h: 524", top)
         snapshot = json.loads(self.theseus("top", "--json").stdout)
         self.assertEqual([524], snapshot["gateway"][0]["codes"])
+
+    def test_a_paused_pool_gets_no_new_assignments_and_shows_on_the_host_summary(self):
+        from theseus import store
+        self.theseus("tasks", "add", "next-task", "--role", "research", "--owned", "docs/investigations/next-task.md",
+                     "--objective", "Do it.", "--contract", "All variants.", "--accept", "Done.")
+        self.git("commit", "-q", "-am", "queue next-task")
+        self.theseus("agents", "add", "worker-b", "%2")
+        with store.opened() as conn:
+            store.add_gateway_error(conn, "claude-code", "other-port", 530, True, agent="w")
+            store.pause_gateway(conn, "claude-code", time.time() + 600, "gateway 530")
+        self.assertNotIn("assigned", self.theseus("queue", "tick").stdout)
+        host = self.theseus("top", "--host", "--once").stdout
+        self.assertIn("GATEWAY", host)
+        self.assertRegex(host, r"claude-code\s+1 error\(s\) in 24 h: 530 .* PAUSED until .*\(gateway 530\)")
+        self.assertIn("gateway pool claude-code is paused", self.theseus("top", "--once").stdout)
+        with store.opened() as conn, store.transaction(conn):
+            conn.execute("UPDATE gateway_pools SET paused_until = ?", (time.time() - 1,))
+        self.assertIn("assigned   worker-b", self.theseus("queue", "tick").stdout)
 
     def test_a_fatal_error_wakes_the_coordinator(self):
         (self.state / "screen-%1").write_text("\n".join(screen(CF_403)) + "\n")

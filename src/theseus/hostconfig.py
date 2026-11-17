@@ -19,7 +19,7 @@ DEFAULT_KEYS = ("workers.default", "workers.retries", "limits.heavy_runs", "path
                 "instances.idle_minutes", "instances.handoff_settle_seconds", "instances.send_verify_seconds", "queue.interval",
                 "re.clients", "gateway.attempts", "gateway.backoff", "gateway.slow_codes", "gateway.slow_factor",
                 "gateway.resend", "gateway.clear_tokens", "gateway.fresh_after_errors", "gateway.screen_lines",
-                "gateway.stagger_seconds")
+                "gateway.stagger_seconds", "gateway.recovery_seconds")
 GATEWAY_DEFAULTS = {"breaker_errors": 3, "breaker_window_minutes": 10, "strong_codes": [530]}
 POOL_KEYS = ("max", "priority")
 STORE_KEYS = {"retention": ("samples_days", "events_days"), "backups": ("directory", "daily", "weekly")}

@@ -326,6 +326,7 @@ def state(conf, agent):
         worktree = task.get("worktree")
         newest = newest_change([p for p in (worktree, handoff.parent if handoff else None) if p])
         info["idleMinutes"] = int((time.time() - newest) / 60) if newest else None
+        info["lastChange"] = newest
         if handoff and handoff.exists() and not busy and handoff_final(conf, handoff):
             info["state"] = "delivered"
             info["result"] = t.handoff_result(handoff)
