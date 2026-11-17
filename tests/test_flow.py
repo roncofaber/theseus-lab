@@ -181,6 +181,25 @@ class TaskFlowTests(Sandbox):
         self.assertNotEqual(0, self.git("cat-file", "-e", "HEAD:src/capture/old.py", check=False).returncode)
         self.theseus("tasks", "complete", TASK, "--summary", "moved", "--check", "manual", "--log", str(worktree / ".theseus/handoff.md"))
 
+    def test_completion_accepts_a_change_main_kept_after_moving_on(self):
+        self.write("src/capture/shared.py", "A = 1\n\n\n\nB = 2\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "shared file")
+        self.add_task(owned=("src/capture/", f"docs/investigations/{TASK}.md"))
+        self.git("commit", "-q", "-am", "queue")
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        worktree = self.tmp / "worktrees/worker-1-a"
+        self.write("src/capture/shared.py", "A = 10\n\n\n\nB = 2\n", root=worktree)
+        self.write(f"docs/investigations/{TASK}.md", f"# Shared\n\nTask `{TASK}` on base x. Topic: `new`.\n", root=worktree)
+        self.write(".theseus/handoff.md", f"Task: {TASK}\nResult: delivered\n", root=worktree)
+        digest = __import__("hashlib").sha256((worktree / "src/capture/shared.py").read_bytes()).hexdigest()
+        self.write(".theseus/changed.sha256", f"{digest}  src/capture/shared.py\n", root=worktree)
+        self.write("src/capture/shared.py", "A = 1\n\n\n\nB = 20\n")
+        self.git("commit", "-q", "-am", "another task changed the same file before the merge")
+        self.theseus("merge", TASK)
+        self.assertEqual("A = 10\n\n\n\nB = 20\n", (self.project / "src/capture/shared.py").read_text())
+        self.theseus("tasks", "complete", TASK, "--summary", "done", "--check", "manual", "--log", str(worktree / ".theseus/handoff.md"))
+
     def test_worker_patches_never_conflict_on_generated_indexes(self):
         self.add_task()
         self.theseus("instance", "assign", TASK, "worker-1", "a")

@@ -374,8 +374,23 @@ def unintegrated_files(worktree, root, ref="HEAD"):
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
         shown = subprocess.run(["git", "-C", str(root), "show", f"{ref}:{name}"], capture_output=True)
         if shown.returncode != 0 or hashlib.sha256(shown.stdout).hexdigest() != digest:
-            missing.append(name)
+            if not change_present(worktree, root, name):
+                missing.append(name)
     return missing
+
+
+def change_present(worktree, root, name):
+    """True when the worker's change to a file it did not create (its diff against its base, the worktree HEAD)
+    reverse-applies on main: main holds the change even though later commits changed the same file again."""
+    tracked = subprocess.run(["git", "-C", str(worktree), "cat-file", "-e", f"HEAD:{name}"], capture_output=True)
+    if tracked.returncode != 0:
+        return False
+    diff = subprocess.run(["git", "-C", str(worktree), "diff", "--binary", "HEAD", "--", name], capture_output=True)
+    if diff.returncode != 0 or not diff.stdout.strip():
+        return False
+    check = subprocess.run(["git", "-C", str(root), "apply", "--reverse", "--check", "-"], input=diff.stdout,
+                           capture_output=True)
+    return check.returncode == 0
 
 
 def complete(queue, task_id, summary, commit=None, checks=(), log=None, limits=(), from_log=None, force=False):

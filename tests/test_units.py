@@ -83,6 +83,26 @@ class ProfileTests(Sandbox):
             profiles.resolve(conf, "no-such-agent")
 
 
+class WorkerMcpTests(Sandbox):
+    def test_mcp_servers_limit_what_workers_load_and_launch_follows_the_command(self):
+        from theseus import profiles
+        self.scaffold()
+        self.write("theseus.local.toml", '[workers.gateway]\npreset = "claude-code"\ncommand = "wrapped-claude"\n'
+                   'mcp_servers = ["theseus"]\n')
+        conf = cfg.load(root=self.project)
+        profile = profiles.resolve(conf, "gateway")
+        env = profiles.instance_env(conf, "gateway")
+        self.assertTrue(env["THESEUS_AGENT_LAUNCH"].startswith("wrapped-claude --strict-mcp-config --mcp-config "))
+        path = Path(env["THESEUS_AGENT_LAUNCH"].split()[-1])
+        self.assertEqual({"theseus"}, set(json.loads(path.read_text())["mcpServers"]))
+        argv = profiles.launch_argv(profile, "do it", "S1", "", conf)
+        self.assertEqual(["--strict-mcp-config", "--mcp-config", str(path)], argv[-3:])
+        self.assertEqual("claude", profiles.instance_env(conf, "claude-code")["THESEUS_AGENT_LAUNCH"])
+        self.write("theseus.local.toml", '[workers.gateway]\npreset = "claude-code"\nmcp_servers = ["nonexistent"]\n')
+        with self.assertRaises(profiles.ProfileError):
+            profiles.instance_env(cfg.load(root=self.project), "gateway")
+
+
 class TaskRuleTests(Sandbox):
     def setUp(self):
         super().setUp()

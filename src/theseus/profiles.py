@@ -23,9 +23,10 @@ import os
 import re
 import shlex
 import shutil
+from pathlib import Path
 
 CLAUDE_INTERACTIVE = {
-    "launch": "claude",
+    "launch": "{command}",
     "resume": "{launch} --resume {session}",
     "busy_pattern": "esc to interrupt",
     "compact": "/compact Keep only: {keep}; drop finished task details.",
@@ -52,6 +53,8 @@ PRESETS = {
         "retry": True,
         "capacity": 2,
         "interactive": CLAUDE_INTERACTIVE,
+        "mcp_servers": None,
+        "mcp_flags": ["--strict-mcp-config", "--mcp-config", "{mcp_config}"],
     },
     "claude-subagent": {
         "label": "Claude Code subagents launched by the coordinator session itself (Agent tool)",
@@ -119,7 +122,8 @@ PRESETS = {
 }
 ALIASES = {"claude": "claude-subagent"}
 DEFAULT = "claude-code"
-OVERRIDABLE = set(PRESETS["claude-code"]) | {"preset", "fallback", "pool"}
+OVERRIDABLE = set(PRESETS["claude-code"]) | {"preset", "fallback", "pool", "mcp_servers", "mcp_flags"}
+THESEUS_MCP = {"command": "theseus", "args": ["mcp", "--role", "worker"]}
 
 
 class ProfileError(Exception):
@@ -185,13 +189,54 @@ def env(profile, model=None):
     return {k: fill(v, {"model": model}) for k, v in (profile.get("env") or {}).items()}
 
 
-def launch_argv(profile, prompt, session, model):
-    return render(profile.get("headless"), profile, prompt=prompt, session=session, model=model)
+def mcp_config(conf, profile):
+    """Path of the MCP config a profile's agents start with (only the servers in mcp_servers), written under the data
+    root, or None when the profile keeps the client's own MCP servers. Each server definition comes from the user's
+    Claude Code configuration; "theseus" is the theseus MCP server."""
+    names = profile.get("mcp_servers")
+    if names is None:
+        return None
+    known = {}
+    client = Path(os.path.expanduser("~/.claude.json"))
+    if client.exists():
+        try:
+            known = json.loads(client.read_text()).get("mcpServers", {})
+        except ValueError:
+            known = {}
+    servers = {}
+    for name in names:
+        if name == "theseus":
+            servers[name] = THESEUS_MCP
+        elif name in known:
+            servers[name] = known[name]
+        else:
+            raise ProfileError(f"profile {profile['name']}: MCP server {name!r} is not defined in {client}")
+    path = conf.data / "mcp" / f"{profile['name']}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps({"mcpServers": servers}, indent=2) + "\n"
+    if not path.exists() or path.read_text() != text:
+        path.write_text(text)
+    return path
 
 
-def resume_template(profile, session, model):
+def mcp_args(conf, profile):
+    path = mcp_config(conf, profile) if conf is not None else None
+    if path is None:
+        return []
+    if not profile.get("mcp_flags"):
+        raise ProfileError(f"profile {profile['name']} sets mcp_servers but its CLI has no mcp_flags")
+    return [fill(flag, {"mcp_config": str(path)}) for flag in profile["mcp_flags"]]
+
+
+def launch_argv(profile, prompt, session, model, conf=None):
+    argv = render(profile.get("headless"), profile, prompt=prompt, session=session, model=model)
+    return argv + mcp_args(conf, profile) if argv else argv
+
+
+def resume_template(profile, session, model, conf=None):
     """The resume command with {message} left in place, stored in launch.json for followups."""
-    return render(profile.get("resume"), profile, session=session, model=model, message="{message}")
+    argv = render(profile.get("resume"), profile, session=session, model=model, message="{message}")
+    return argv + mcp_args(conf, profile) if argv else argv
 
 
 def instance_env(conf, profile_name=None):
@@ -203,7 +248,10 @@ def instance_env(conf, profile_name=None):
         "THESEUS_BUSY_PATTERN": instances.get("busy_pattern") or interactive.get("busy_pattern") or "",
         "THESEUS_COMPACT_TEMPLATE": interactive.get("compact") or "",
         "THESEUS_CLEAR_COMMAND": interactive.get("clear") or "",
-        "THESEUS_AGENT_LAUNCH": instances.get("launch") or interactive.get("launch") or profile.get("command") or "",
+        "THESEUS_AGENT_LAUNCH": " ".join(filter(None, [
+            fill(instances.get("launch") or interactive.get("launch") or profile.get("command") or "",
+                 {"command": profile.get("command") or ""}),
+            shlex.join(mcp_args(conf, profile))])),
         "THESEUS_RESUME_TEMPLATE": interactive.get("resume") or "",
         "THESEUS_AGENT_SESSIONS": os.path.expanduser(instances.get("sessions_dir") or interactive.get("sessions_dir") or ""),
         "THESEUS_MESSAGING": "1" if interactive.get("messaging") else "0",
