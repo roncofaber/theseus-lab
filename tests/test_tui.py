@@ -167,9 +167,21 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
         self.jumps = []
         self.app = TopApp(interval=3600, snapshot_fn=host.snapshot, jump_fn=lambda pane: self.jumps.append(pane) or f"jumped {pane}")
 
-    async def settle(self, pilot):
+    async def settle(self, pilot, condition=None):
+        """Wait for the first refresh to be applied and its tabs mounted (slow machines need more than one pause)."""
+        from textual.widgets import TabbedContent, TabPane
         await self.app.workers.wait_for_complete()
-        await pilot.pause()
+        ready = condition or (lambda: self.app.snap is not None
+                              and len(list(self.app.query_one(TabbedContent).query(TabPane))) == 3)
+        for _ in range(100):
+            await pilot.pause(0.05)
+            if ready():
+                return
+        self.fail("dashboard did not settle")
+
+    async def switch(self, pilot, key):
+        await pilot.press(key)
+        await self.settle(pilot, lambda: self.app.active_item() is not None)
 
     def rows(self, table_id):
         from textual.widgets import DataTable
@@ -195,8 +207,7 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
     async def test_filter_narrows_rows_and_escape_clears_it(self):
         async with self.app.run_test(size=(170, 60)) as pilot:
             await self.settle(pilot)
-            await pilot.press("2")
-            await pilot.pause()
+            await self.switch(pilot, "2")
             self.assertEqual(2, self.rows("agents"))
             await pilot.press("slash", "minus", "b")
             await pilot.pause()
