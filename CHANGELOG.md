@@ -20,6 +20,13 @@ All notable changes to this project are documented here. The format follows [Kee
 - Per-task profiles: `theseus tasks add ... --profile NAME` and `theseus tasks profile ID [NAME]`. The queue gives such a task only to agents registered with that profile, or relaunches an agent whose profile differs only in MCP servers or environment onto it first (a `relaunched` event) and back onto its registered profile before its next task that does not need it. The dashboard says `needs profile NAME` when no agent can take it.
 - docs/agent-profiles.md: an example REA variant (`[workers.gateway-rea]`) used only for tasks that need REA's session state, with everything else on a lean profile.
 - `theseus instance restart` launches the agent fresh with the same name and permission mode when the session to resume no longer exists (`interactive.resume_missing`), and reports it.
+- Host configuration, `~/.config/theseus/config.toml` (`XDG_CONFIG_HOME` is respected, `THESEUS_CONFIG` overrides the path), for everything specific to one user or machine: host-wide agent profiles (`[workers.<name>]`), pools (`[pools.<name>]`), host store retention and backups (`[store]`), tool locations (`[tools.paths]`) and defaults for project keys a project leaves unset (`[defaults]`, such as `workers.default`). Layers, lowest to highest: package defaults and presets, host, project `theseus.toml`, project `theseus.local.toml`, `THESEUS_*` variables and command line flags. A project section named like a host profile overrides only the keys it sets (`env` and `interactive` merge key by key), so `[workers.gateway] capacity = 4` inherits the rest from the host.
+- Profile field `extra_args`: arguments appended to the headless run, the resume and the persistent-instance launch after the MCP flags, with placeholders filled and a leading `~` expanded, for example a client settings file.
+- `theseus config show --sources` prints every resolved value, including each configured profile's fields and the host pools and store settings, with the layer it came from (package, host, project, project-local, env).
+- `theseus config check` validates the host file too, also outside a project: an unknown section, profile key, pool key or store key is an error naming the file and key; an unknown `[defaults]` key is a warning. Unknown keys in a project's profile sections are reported as warnings.
+- `theseus setup host` writes a commented starter host file (refuses to replace one without `--force`; `--print` prints it); `--import-project PATH [--dry-run]` moves a project's `[workers.*]` tables and its `theseus.local.toml` `[tools.paths]` into the host file and prints the project lines that can then be removed, without editing the project.
+- `theseus tools set --host NAME PATH` records a tool location in the host file. Tools now resolve from the environment, then `theseus.local.toml`, `theseus.toml` and the host file (`[tools.paths]` in each), then `PATH` and install locations; a configured location that does not work falls through to the next.
+- `theseus doctor` shows the host configuration file and its validation result.
 
 ### Changed
 
@@ -28,9 +35,11 @@ All notable changes to this project are documented here. The format follows [Kee
 - Textual (`textual>=8.2,<9`) is now a runtime dependency. `theseus top --once` and `--json` keep their output; the old ANSI refresh loop is retired.
 - The queue tick takes pool slots atomically (`store.acquire()`) and gives a slot back when the assignment fails, so concurrent queues never push a pool past its `max`.
 - Event records returned by `workqueue.events()` (and in `theseus top --json`) also carry `id`, `project` and `epoch`.
+- An unknown section in `theseus.toml` or `theseus.local.toml` is reported with the file that has it.
 
 ### Deprecated
 
+- `~/.config/theseus/pools.toml` and `~/.config/theseus/store.toml`: still read, below `config.toml` (which wins on each conflicting key), with a one-line note in `theseus doctor` and `theseus config check`. Move their tables into `[pools.<name>]` and `[store]` of `config.toml`.
 - `<data>/queue/events.jsonl` is still appended as a plain-text audit trail but no longer read; it will stop being written in a later release. `<data>/agents.json`, the pool state files under `~/.local/share/theseus/pools/` and `~/.local/share/theseus/projects.json` are no longer written after their one-time import.
 
 ## [0.1.0] - 2026-11-16

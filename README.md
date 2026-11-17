@@ -103,7 +103,7 @@ Any other CLI can be added as a custom profile; see [Agent profiles](docs/agent-
 
 - [Getting started](docs/getting-started.md): installation and first project, step by step
 - [Workflow](docs/workflow.md): tasks, workers, merging, verification, the queue and the dashboard
-- [Configuration](docs/configuration.md): `theseus.toml` reference, external tools, REA and Ghidra
+- [Configuration](docs/configuration.md): configuration layers, the host `config.toml`, `theseus.toml` reference, external tools, REA and Ghidra
 - [Agent profiles](docs/agent-profiles.md): supported agents and how to add your own
 - [Design notes](docs/architecture.md): how the package is built, for contributors
 

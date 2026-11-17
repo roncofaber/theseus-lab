@@ -1,18 +1,75 @@
 # Configuration
 
+## Configuration layers
+
+theseus itself is user- and site-agnostic: anything specific to one person or machine (agent launchers, gateway models and environment, MCP server choices, client settings files, tool locations, pools, store retention) lives in configuration, not in the package. Values come from five layers; each overrides the ones above it, and tables merge key by key.
+
+| Layer | Where | Holds | Shared |
+| --- | --- | --- | --- |
+| package | built into theseus | defaults and the agent presets | everyone |
+| host | `~/.config/theseus/config.toml` (`XDG_CONFIG_HOME` is respected; `THESEUS_CONFIG` overrides the path) | agent profiles, pools, host store settings, tool locations and defaults for this user on this machine | every project on this machine |
+| project | `theseus.toml` in the project root, committed | how the project builds, verifies and works: commands, paths, rooms, targets, its profile choice and capacity | everyone working on the project |
+| project-local | `theseus.local.toml` in the project root, Git-ignored | this machine's values for this project: where the original software lives, a different data root | this checkout |
+| env | `THESEUS_DATA`, `THESEUS_SCRATCH`, `THESEUS_WORKTREES` and other `THESEUS_*` variables, and command line flags such as `--profile` | one shell or one command | one command |
+
+What belongs where:
+- A launcher, a gateway model and its environment, the MCP servers your agents start with, a client settings file passed with `extra_args`: a `[workers.<name>]` profile in the host file. A project then names the profile (`[workers] default = "gateway"`) and sets only what is about the project, such as `capacity`.
+- Pools and their priorities, host store retention and backups: the host file (`[pools.<name>]`, `[store]`).
+- Tool locations: `[tools.paths]` in the host file for every project, or `theseus.local.toml` for one checkout. `[tools] need` stays in `theseus.toml`.
+- Everything that describes the project itself: `theseus.toml`.
+
+`theseus setup host` writes a commented starter host file; see [Host configuration](#host-configuration).
+
+```sh
+theseus config show              # resolved project configuration (JSON)
+theseus config show --sources    # every resolved value with the layer it came from
+theseus config get paths.data    # one value
+theseus config check             # validate the host file and, inside a project, the project files
+```
+
+### Example
+
+`~/.config/theseus/config.toml`:
+
+```toml
+[defaults]
+limits.heavy_runs = 4
+
+[workers.gateway]
+preset = "claude-code"
+command = "agent-launcher"
+model = "provider/model-name"
+model_flag = ""
+env = { GATEWAY_MODEL = "{model}" }
+mcp_servers = ["theseus"]
+extra_args = ["--settings", "~/.config/theseus/worker-settings.json"]
+pool = "gateway"
+
+[pools.gateway]
+max = 4
+priority = ["first-project", "second-project"]
+
+[tools.paths]
+ghidra = "/opt/ghidra"
+```
+
+A project's `theseus.toml`:
+
+```toml
+[workers]
+default = "gateway"
+
+[workers.gateway]
+capacity = 2       # everything else comes from the host profile
+```
+
+`theseus config show --sources` then prints lines such as `workers.gateway.command = "agent-launcher"    # host`, `workers.gateway.capacity = 2    # project` and `workers.gateway.interactive.busy_pattern = "esc to interrupt"    # package (preset claude-code)`.
+
 ## Files
 
 - `theseus.toml` in the project root holds all project settings and is committed.
 - `theseus.local.toml` is merged over it and is Git-ignored. Use it for machine-specific values such as where the original software or a tool is installed.
 - The environment variables `THESEUS_DATA`, `THESEUS_SCRATCH` and `THESEUS_WORKTREES` override the folder settings for one shell.
-
-Useful commands:
-
-```sh
-theseus config show              # resolved configuration
-theseus config get paths.data    # one value
-theseus config check             # validate
-```
 
 ## Reference
 
@@ -32,11 +89,39 @@ theseus config check             # validate
 | `[tools]` | `need`: external tools this project requires |
 | `[consumers]` | Per file extension, a pattern for the names a file declares (defaults cover common languages) |
 
-The scaffolded `theseus.toml` documents every key with comments.
+The scaffolded `theseus.toml` documents every key with comments. It sets `[workers] default` and `[workers.claude-code]` explicitly; remove a key there to let the host file decide it.
+
+## Host configuration
+
+`~/.config/theseus/config.toml` is optional. Its sections:
+
+| Section | Keys |
+| --- | --- |
+| `[workers.<name>]` | Host-wide agent profiles, the same fields as in `theseus.toml` (see [Agent profiles](agent-profiles.md)). A project section with the same name overrides only the keys it sets; `env` and `interactive` merge key by key |
+| `[pools.<name>]` | `max`, `priority` (see [Sharing agents between projects](#sharing-agents-between-projects)) |
+| `[store]` | `[store.retention]` and `[store.backups]` (see [Host store](#host-store)) |
+| `[tools.paths]` | Tool locations on this machine, by tool name (see [External tools](#external-tools)) |
+| `[defaults]` | Values for project keys a project leaves unset: `workers.default`, `workers.retries`, `limits.heavy_runs`, `paths.data`, `paths.scratch`, `paths.worktrees`, `instances.idle_minutes`, `instances.handoff_settle_seconds`, `queue.interval`, `re.clients` |
+
+`theseus config check` reports an unknown section, an unknown profile key, pool key or store key as an error naming the file and the key, and an unknown `[defaults]` key as a warning (it is ignored). A file that does not parse, or has an unknown section, stops every command with the same message.
+
+```sh
+theseus setup host                          # write a commented starter (refuses to replace an existing file)
+theseus setup host --print                  # print it instead
+theseus setup host --force                  # replace an existing file with the starter
+theseus setup host --import-project PATH --dry-run   # what would move from a project
+theseus setup host --import-project PATH    # move it
+```
+
+`--import-project` copies the project's `[workers.<name>]` tables (from `theseus.toml`, and from `theseus.local.toml` for profiles not already in `theseus.toml`) and the `[tools.paths]` table of its `theseus.local.toml` into the host file, comments included: into a new starter file, or appended to an existing host file, refusing a profile or table the host file already has. It never edits the project files; it prints the line ranges you can remove from them once `theseus config check` passes. Keep project-specific keys such as `capacity` in the project.
+
+### Deprecated host files
+
+`~/.config/theseus/pools.toml` (`THESEUS_POOLS`) and `~/.config/theseus/store.toml` (`THESEUS_STORE_CONFIG`) are still read, below `config.toml`: `config.toml` wins on each conflicting key. `theseus doctor` and `theseus config check` print a one-line note for each one found. Move their tables into `[pools.<name>]` and `[store]` of `config.toml` and delete them; they will stop being read in a later release.
 
 ## Sharing agents between projects
 
-When several projects run on one machine against the same provider limit (for example a model gateway that allows four concurrent agents), declare a pool in `~/.config/theseus/pools.toml`:
+When several projects run on one machine against the same provider limit (for example a model gateway that allows four concurrent agents), declare a pool in the host configuration, `~/.config/theseus/config.toml`:
 
 ```toml
 [pools.gateway]
@@ -44,20 +129,20 @@ max = 4                                   # agents working a task at once, acros
 priority = ["laser-port", "game-port"]    # earlier projects win when the pool is full
 ```
 
-Each project's profile joins it with `pool = "gateway"` in `[workers.<profile>]`. Only agents working a task hold a slot; idle sessions cost nothing. When a project has ready work but the pool is full, it records a claim; lower-priority projects then start no new tasks, so their running tasks finish and the slots come back. `theseus pool` shows who holds each slot, and `theseus top` shows the pool on the PROJECT line. The slots themselves are kept in the host store.
+A profile joins it with `pool = "gateway"` in `[workers.<profile>]`, usually in the host file too. Only agents working a task hold a slot; idle sessions cost nothing. When a project has ready work but the pool is full, it records a claim; lower-priority projects then start no new tasks, so their running tasks finish and the slots come back. `theseus pool` shows who holds each slot, and `theseus top` shows the pool on the PROJECT line. The slots themselves are kept in the host store.
 
 ## Host store
 
 Runtime state shared by every project on the machine (projects, registered agents, queue events, pool slots, deliveries and agent-state samples) lives in one SQLite database, `~/.local/share/theseus/theseus.db`. Task records stay in each project's `tasks.json`. The first command run in a project imports its old `agents.json` and `queue/events.jsonl` once and leaves the files in place; `queue/events.jsonl` still receives a copy of every event as a deprecated audit trail. See [Design notes](architecture.md#host-store) for how it works.
 
-`~/.config/theseus/store.toml` is optional; these are the defaults:
+Retention and backups are set in `[store]` of the host configuration; these are the defaults:
 
 ```toml
-[retention]
+[store.retention]
 samples_days = 14   # agent-state samples older than this are trimmed
 events_days = 0     # 0 keeps every event; a number trims older events
 
-[backups]
+[store.backups]
 directory = ""      # default: the backups directory next to the database
 daily = 7           # keep the newest backup of each of this many recent days
 weekly = 4          # and of each of this many recent ISO weeks
@@ -73,7 +158,7 @@ theseus db prune [--yes]       # list (and with --yes delete) projects whose roo
 
 The work queue runs `maintain` and `backup` by itself at most once a day across the host, so a machine that runs a queue needs no cron job. `theseus doctor` shows the database path, schema version, size, last backup, last maintenance and any project name claimed by two different roots (give one of them a different `[project] name`).
 
-Environment overrides, mainly for tests: `THESEUS_DB` (database file), `THESEUS_BACKUPS` (backup directory), `THESEUS_STORE_CONFIG` (`store.toml`).
+Environment overrides, mainly for tests: `THESEUS_DB` (database file), `THESEUS_BACKUPS` (backup directory, above `[store.backups] directory`), `THESEUS_CONFIG` (the host `config.toml`), `THESEUS_STORE_CONFIG` (the deprecated `store.toml`).
 
 ## External tools
 
@@ -81,9 +166,13 @@ theseus finds reverse-engineering and capture tools on each machine without hard
 
 A tool is looked up in this order:
 1. its environment variable (`GHIDRA_INSTALL_DIR`, `JAVA_HOME` or `THESEUS_TOOL_<NAME>`);
-2. `theseus tools set NAME PATH`, saved in `theseus.local.toml`;
-3. `PATH`;
-4. common install locations, newest version first.
+2. `[tools.paths]` in the project's `theseus.local.toml`, written by `theseus tools set NAME PATH`;
+3. `[tools.paths]` in the project's `theseus.toml` (discouraged: locations are per machine);
+4. `[tools.paths]` in the host configuration, written by `theseus tools set --host NAME PATH`;
+5. `PATH`;
+6. common install locations, newest version first.
+
+A configured location that does not work (a missing directory, a file that is not executable) is skipped and the next step is tried. `theseus tools` shows which step found each tool.
 
 Found tools are passed to every command and worker as `THESEUS_TOOL_<NAME>`. `eval "$(theseus tools env)"` sets the same variables in your shell. If a tool listed in `[tools] need` is missing, `theseus doctor` reports a failure.
 
