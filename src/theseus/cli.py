@@ -1,4 +1,5 @@
-"""theseus command line. Every subcommand prints its usage with --help."""
+"""theseus command line. Every subcommand prints its usage with --help; `theseus` alone on a terminal opens the control
+console (`theseus console`, also `theseus top`)."""
 import argparse
 import json
 import os
@@ -523,7 +524,7 @@ def cmd_tools(args):
 
 
 AGENT_ACTIONS = ("list", "ls", "add", "remove", "enable", "disable", "profiles", "up", "down", "restart", "attach", "logs",
-                 "migrate", "_exec", "_died")
+                 "migrate", "scale", "_exec", "_died")
 
 
 def cmd_agents(args):
@@ -537,7 +538,7 @@ def cmd_agents(args):
             sys.exit("usage: theseus agents _exec PROJECT AGENT GEN")
         sys.exit(supervisor.exec_agent(*args.targets))
     args.name, args.pane = (args.targets + [None, None])[:2]
-    if args.action in ("up", "down", "restart", "attach", "logs", "migrate", "ls"):
+    if args.action in ("up", "down", "restart", "attach", "logs", "migrate", "ls", "scale"):
         return cmd_supervised(args)
     conf = load()
     action = args.action
@@ -613,6 +614,17 @@ def cmd_supervised(args):
         conf = load()
         if action == "ls":
             return list_supervised(conf, args.json)
+        if action == "scale":
+            if len(names) != 2 or not names[1].isdigit():
+                sys.exit("usage: theseus agents scale PROFILE COUNT")
+            if not supervisor.managed(conf):
+                sys.exit(f"theseus: {conf.name} does not supervise its agents; set [agents] managed = true in {cfg.LOCAL_NAME}")
+            from . import workqueue
+            print(supervisor.set_count(conf, names[0], int(names[1])))
+            conf = load()
+            with workqueue.locked(conf):
+                print_actions(supervisor.reconcile(conf, wait=True))
+            return
         if action == "down":
             if not names and not args.all:
                 sys.exit("usage: theseus agents down NAME... | --all [--force] [--now]")
@@ -1092,7 +1104,8 @@ def build_parser():
                                    "them itself on a private tmux server: `up` reconciles toward [agents.counts], `down` "
                                    "stops, `restart` restarts (resuming the conversation unless --fresh), `attach` opens the "
                                    "pane (C-q detaches), `logs` prints its screen, `migrate` moves a hand-made pane's agent "
-                                   "onto the private server.")
+                                   "onto the private server, `scale PROFILE COUNT` sets [agents.counts] in "
+                                   "theseus.local.toml and reconciles.")
     p.add_argument("action", nargs="?", default="list", choices=AGENT_ACTIONS, metavar="ACTION",
                    help=", ".join(a for a in AGENT_ACTIONS if not a.startswith("_")))
     p.add_argument("targets", nargs="*", metavar="NAME", help="agent names (add: NAME PANE)")
@@ -1134,7 +1147,9 @@ def build_parser():
     p.add_argument("--no-assign", action="store_true", help="tick: report deliveries and stalls but assign nothing")
     p.add_argument("--no-drive", action="store_true", help="wait: only watch events, do not run ticks")
     p.set_defaults(func=guarded(cmd_queue))
-    p = sub.add_parser("top", help="interactive dashboard of every project on this host: agents, queue, pools, events")
+    p = sub.add_parser("console", aliases=["top"], help="the control console of every project on this host (also `theseus` "
+                                                        "alone on a terminal): agents, coordinator, queue, pools, events "
+                                                        "and actions; --once and --json print one frame for scripts")
     p.add_argument("interval", nargs="?", type=int, default=5, help="refresh seconds (default 5)")
     p.add_argument("--interval", dest="every", type=float, help="refresh seconds, fractions allowed")
     p.add_argument("--once", action="store_true", help="print one plain frame and exit")
@@ -1175,6 +1190,8 @@ SHELL_COMMANDS = {"status": "status.sh", "stop": "stop.sh", "followup": "followu
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    if not argv and sys.stdin.isatty() and sys.stdout.isatty():
+        argv = ["console"]
     if argv == ["--schema-version"]:
         from . import store
         print(store.SCHEMA_VERSION)

@@ -198,6 +198,31 @@ def desired(conf):
     return found
 
 
+def set_count(conf, profile, count):
+    """Write [agents.counts] <profile> = count to the project's theseus.local.toml, keeping the rest of the file."""
+    import re as _re
+    if not _re.fullmatch(r"[A-Za-z0-9_-]+", profile):
+        raise SupervisorError(f"profile name {profile!r} cannot be a TOML key")
+    if count < 0:
+        raise SupervisorError("a count cannot be negative")
+    path = conf.root / cfg.LOCAL_NAME
+    text = path.read_text() if path.exists() else ""
+    line = f"{profile} = {count}"
+    found = _re.search(r"^\[agents\.counts\][ \t]*$", text, _re.MULTILINE)
+    if found:
+        start = found.end()
+        end = text.find("\n[", start)
+        end = len(text) if end == -1 else end
+        section = text[start:end]
+        pattern = _re.compile(rf"^{_re.escape(profile)}\s*=.*$", _re.MULTILINE)
+        section = pattern.sub(line, section) if pattern.search(section) else section.rstrip("\n") + "\n" + line + "\n"
+        text = text[:start] + section + text[end:]
+    else:
+        text = text.rstrip("\n") + ("\n\n" if text.strip() else "") + "[agents.counts]\n" + line + "\n"
+    path.write_text(text)
+    return f"[agents.counts] {profile} = {count} in {cfg.LOCAL_NAME}"
+
+
 def problems(conf):
     """(errors, warnings) of a project's [agents] table."""
     errors, warnings = [], []

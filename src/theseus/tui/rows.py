@@ -9,7 +9,26 @@ from .. import host, top
 from . import charts, theme
 
 AGENT_COLUMNS = ("agent", "pane", "state", "task", "CPU (core %)", "MEM (RAM)", "context", "room", "on task", "quiet",
-                 "note")
+                 "up", "restarts", "session", "model", "pool", "note")
+PROJECT_COLUMNS = ("project", "milestone", "coordinator", "watcher", "ready", "working on", "review", "attention", "agents",
+                   "pool", "gateway", "today")
+# Columns that drop out, first to last, when a table is too narrow for all of them.
+OPTIONAL = {"agents": ("model", "pool", "session", "note", "restarts", "up", "room", "quiet", "on task", "context"),
+            "projects": ("watcher", "today", "gateway", "pool", "working on", "ready", "attention"),
+            "gateway": ("pool", "attempt", "outcome"), "waiting": ("posted", "room")}
+# Stable column widths: an int is fixed, a float shares the remaining width in proportion.
+WIDTHS = {
+    "agents": {"agent": 14, "pane": 7, "state": 10, "task": 1.0, "CPU (core %)": 12, "MEM (RAM)": 11, "context": 14,
+               "room": 6, "on task": 8, "quiet": 6, "up": 6, "restarts": 8, "session": 8, "model": 0.8, "pool": 8,
+               "note": 0.5},
+    "waiting": {"status": 10, "task": 1.0, "room": 6, "for": 8, "posted": 12, "reason": 1.2},
+    "events": {"time": 8, "kind": 11, "agent": 16, "task": 0.7, "detail": 1.6},
+    "host-events": {"time": 8, "project": 12, "kind": 11, "agent": 16, "task": 0.7, "detail": 1.6},
+    "pools": {"pool": 12, "working": 1.0, "holders": 1.5, "claims": 1.0},
+    "gateway": {"time": 8, "project": 12, "agent": 16, "task": 0.8, "error": 1.0, "attempt": 8, "outcome": 0.8, "pool": 1.0},
+    "projects": {"project": 14, "milestone": 1.0, "coordinator": 13, "watcher": 9, "ready": 6, "working on": 10,
+                 "review": 13, "attention": 1.0, "agents": 1.0, "pool": 10, "gateway": 9, "today": 11},
+}
 WAITING_COLUMNS = ("status", "task", "room", "for", "posted", "reason")
 EVENT_COLUMNS = ("time", "kind", "agent", "task", "detail")
 HOST_EVENT_COLUMNS = ("time", "project", "kind", "agent", "task", "detail")
@@ -21,7 +40,6 @@ CPU_HELP = "CPU (core %): the agent's processes in percent of one core; 250% is 
 MEM_HELP = (f"MEM (RAM): resident memory and its share of system RAM; yellow from {MEM_WARN:.0%}, red from {MEM_ALARM:.0%}")
 CTX_HELP = (f"context: tokens in the agent's context after its last answer (Claude Code transcript, else the pane's "
             f"/clear hint) of the profile's context_limit; yellow from {CTX_WARN:.0%}, red from {CTX_ALARM:.0%}")
-USAGE_LEGEND = f"MEM yellow from {MEM_WARN:.0%} of RAM, red from {MEM_ALARM:.0%} · context red from {CTX_ALARM:.0%}"
 
 
 def cell(text, style=""):
@@ -87,20 +105,26 @@ def agent_rows(state):
         cpu = "-" if agent.get("cpu") is None else Text(f"{agent['cpu']:.0f}%", justify="right")
         mem = "-" if agent.get("rss") is None else memory(agent["rss"], total)
         glow_style = f"bold {theme.KIND.get(glow[0]['kind'], '')}" if glow else ""
+        restarts = agent.get("restarts")
         rows.append(row(f"agent:{agent['name']}:{agent['pane']}", [
-            marked(agent["name"], color), agent["pane"], cell(agent["state"], color),
+            marked(agent.get("display") or agent["name"], color), "private" if agent.get("managed") else agent["pane"],
+            cell(agent["state"], color),
             cell(agent.get("task") or "-", "bold"), cpu, mem, context(agent.get("context")),
             cell(agent.get("room") or "-", theme.ROOM.get(agent.get("room"), "")),
             cell(top.duration(on_task), theme.aged(on_task, top.SLOW, top.VERY_SLOW)),
             cell(top.duration(quiet), theme.aged(quiet, top.QUIET_WARN, 2 * top.QUIET_WARN)),
-            cell(note, theme.RED if agent.get("tainted") else glow_style)]))
+            cell(top.duration(agent.get("uptime")), "dim"),
+            cell("-" if restarts is None else str(restarts), theme.YELLOW if restarts else "dim"),
+            cell((agent.get("session") or "-")[:8], "dim"), cell(agent.get("model") or "-", "dim"),
+            cell(agent.get("pool") or "-", "dim"),
+            cell(note, theme.RED if agent.get("tainted") else glow_style)], agent["name"]))
     for worker in state.get("workers", []):
         on_task = top.age(times.get(worker["task"], (None, None))[1])
         rows.append(row(f"worker:{worker['name']}:{worker['task']}", [
             marked(worker["name"], theme.CYAN, marker="◆"), "-", cell(worker["kind"], theme.CYAN), cell(worker["task"], "bold"),
             "-", "-", "-", cell(worker.get("room") or "-", theme.ROOM.get(worker.get("room"), "")),
-            cell(top.duration(on_task), theme.aged(on_task, top.SLOW, top.VERY_SLOW)), "-",
-            cell(worker.get("model") or "", "dim")]))
+            cell(top.duration(on_task), theme.aged(on_task, top.SLOW, top.VERY_SLOW)), "-", "-", "-", "-",
+            cell(worker.get("model") or "-", "dim"), "-", ""]))
     return rows
 
 
@@ -227,8 +251,8 @@ def gateway_title(health):
     parts = []
     for entry in health or []:
         state, _ = pool_state(entry)
-        parts.append(f"{entry['pool']} {state}, {entry['errors']} error(s) in 24 h")
-    return "GATEWAY " + (" · ".join(parts) if parts else "no errors in 24 h")
+        parts.append(f"{entry['pool']} {state} · {entry['errors']} err 24 h")
+    return "GATEWAY " + (" · ".join(parts) if parts else "24 h ok")
 
 
 def matches(rows, text):
@@ -288,6 +312,191 @@ def card_text(item):
     line.append("   ")
     line.append("PAUSED" if counts["paused"] else "running", style=f"bold {theme.YELLOW}" if counts["paused"] else theme.GREEN)
     return line
+
+
+def labeled(lines):
+    """Text of (label, value, style) lines, labels dim."""
+    text = Text()
+    for number, (label, value, style) in enumerate(lines):
+        if number:
+            text.append("\n")
+        text.append(f"{label} ", style="dim")
+        text.append_text(value if isinstance(value, Text) else Text(str(value), style=style or ""))
+    return text
+
+
+def ago(epoch):
+    return "-" if not epoch else top.duration(time.time() - epoch) + " ago"
+
+
+def coordinator_lines(state):
+    coordinator = state.get("coordinator")
+    watcher = state.get("watcher")
+    if coordinator:
+        style = {"busy": theme.GREEN, "idle": theme.YELLOW, "waiting": theme.RED, "offline": theme.RED}.get(
+            coordinator["state"], "")
+        shown = coordinator["state"] + (f" ({coordinator['waiting']})" if coordinator.get("waiting") else "")
+        lines = [("coordinator", Text.assemble((f"{coordinator['name']} ", "bold"), (shown, f"bold {style}")), ""),
+                 ("active", ago(coordinator.get("lastActivity")), ""), ("context", context(coordinator.get("context")), "")]
+    else:
+        lines = [("coordinator", "-", "dim")]
+    if watcher and watcher.get("alive"):
+        wake = max(0, (watcher.get("next") or 0) - time.time())
+        lines.append(("watcher", f"queue {watcher.get('command')} · tick {ago(watcher.get('tick'))} · next {int(wake)}s",
+                      theme.GREEN))
+    else:
+        lines.append(("watcher", "none", theme.YELLOW))
+    return lines
+
+
+def oldest_review(state):
+    entries = [e for e in top.waiting_entries(state) if e["key"] == "review" and e["since"] is not None]
+    return max(entries, key=lambda e: e["since"]) if entries else None
+
+
+def agent_counts(state):
+    counts = {}
+    for agent in state["agents"]:
+        counts[agent["state"]] = counts.get(agent["state"], 0) + 1
+    return counts
+
+
+def pool_line(state):
+    parts = []
+    for pool in state.get("pools") or []:
+        cut = f" -{pool['capCut']}" if pool.get("capCut") else ""
+        parts.append(f"{pool['pool']} {pool['active']}/{pool['max']}{cut}")
+    return " · ".join(parts) or "no pool"
+
+
+def gateway_line(state):
+    for entry in state.get("gateway") or []:
+        text, style = pool_state(entry)
+        if text != "ok":
+            return text, style
+    return "ok", theme.GREEN
+
+
+def overview(state, width=200):
+    """The first panel of a project tab: project, coordinator, queue, agents and today, in aligned labeled columns
+    (five side by side on a wide panel, fewer per row on a narrow one)."""
+    from rich.console import Group
+    from rich.table import Table as Grid
+    queue = state["queue"]
+    git, verification = state["git"], state["verification"]
+    done = state.get("progress")
+    milestone = Text(state.get("milestone") or "no milestone", style="bold")
+    if done and done[1]:
+        milestone.append(" ")
+        milestone.append_text(progress(*done, width=8))
+    last = verification.get("last")
+    verified = (Text("pass", style=theme.GREEN) if last and last["passed"] else Text("FAIL" if last else "never",
+                style=f"bold {theme.RED}" if last else theme.YELLOW))
+    if last:
+        verified.append(f" {top.duration(last['age'])} ago · {verification.get('unverified') or 0} unverified", style="dim")
+    project = [("milestone", milestone, ""),
+               ("branch", Text.assemble((git["branch"], "bold"), (f" {git['dirty']} dirty" if git["dirty"] else " clean",
+                                                                  theme.YELLOW if git["dirty"] else theme.GREEN)), ""),
+               ("verified", verified, ""),
+               ("queue", "PAUSED" if state.get("paused") else "running", f"bold {theme.YELLOW}" if state.get("paused") else "")]
+    review = oldest_review(state)
+    issues = top.issues(state)
+    work = [("ready", f"{len(queue['ready'])} · held {len(queue['held'])} · blocked {len(queue['blocked'])}", ""),
+            ("working on", str(len(queue["in_progress"])), ""),
+            ("review", f"{len(queue['review'])}" + (f" · oldest {review['task']} {top.duration(review['since'])}"
+                                                    if review else ""), theme.MAGENTA if queue["review"] else ""),
+            ("attention", str(len(issues)), f"bold {theme.RED}" if issues else theme.GREEN)]
+    counts = agent_counts(state)
+    busy = counts.get("working", 0) + counts.get("busy", 0)
+    trouble = {k: v for k, v in counts.items() if k in ("blocked", "failed", "waiting", "offline", "stalled", "thrashing")}
+    text, style = gateway_line(state)
+    agents = [("agents", f"{busy} working · {counts.get('free', 0)} free of {len(state['agents'])}", ""),
+              ("trouble", ", ".join(f"{v} {k}" for k, v in trouble.items()) or "none",
+               f"bold {theme.RED}" if trouble else theme.GREEN),
+              ("pool", pool_line(state), ""), ("gateway", text, style)]
+    today = state.get("today") or {}
+    last_merge = top.age(today["lastMerge"]) if today.get("lastMerge") else None
+    outcomes = [("merged", str(today.get("merged", 0)), "bold"), ("completed", str(today.get("completed", 0)), "bold"),
+                ("delivered", str(today.get("delivered", 0)), "bold"),
+                ("last merge", "-" if last_merge is None else top.duration(last_merge) + " ago", "")]
+    groups = [labeled(lines) for lines in (project, coordinator_lines(state), work, agents, outcomes)]
+    per_row = 5 if width >= 150 else 3 if width >= 96 else 2
+    grid = Grid.grid(padding=(0, 2), expand=True)
+    for _ in range(per_row):
+        grid.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
+    for start in range(0, len(groups), per_row):
+        chunk = groups[start:start + per_row]
+        grid.add_row(*chunk, *[""] * (per_row - len(chunk)))
+    if not issues:
+        return grid
+    shown = [Text.from_ansi(line, no_wrap=True, overflow="ellipsis") for line in issues[:3]]
+    return Group(grid, *shown)
+
+
+def project_rows(projects):
+    """One row per project for the Host tab: the key figures of its overview."""
+    rows = []
+    for item in projects:
+        name = item["name"]
+        accent = f"bold {theme.project_color(name)}"
+        if not item["available"]:
+            rows.append(row(f"project:{item['root']}", [cell(name, accent), cell(f"unavailable: {item['error']}", theme.RED),
+                                                        *["-"] * (len(PROJECT_COLUMNS) - 2)]))
+            continue
+        state = item["snapshot"]
+        queue = state["queue"]
+        done = state.get("progress")
+        milestone = Text(state.get("milestone") or "-", style="bold")
+        if done and done[1]:
+            milestone.append(" ")
+            milestone.append_text(progress(*done, width=6))
+        coordinator = state.get("coordinator")
+        coord = (cell(coordinator["state"], {"busy": theme.GREEN, "idle": theme.YELLOW}.get(coordinator["state"], theme.RED))
+                 if coordinator else cell("-", "dim"))
+        watcher = state.get("watcher")
+        watching = cell(watcher["command"], theme.GREEN) if watcher and watcher.get("alive") else cell("none", theme.YELLOW)
+        review = oldest_review(state)
+        issues = top.issues(state)
+        counts = agent_counts(state)
+        busy = counts.get("working", 0) + counts.get("busy", 0)
+        trouble = sum(v for k, v in counts.items() if k in ("blocked", "failed", "waiting", "offline", "stalled", "thrashing"))
+        text, style = gateway_line(state)
+        today = state.get("today") or {}
+        rows.append(row(f"project:{item['root']}", [
+            cell(name, accent), milestone, coord, watching, str(len(queue["ready"])), str(len(queue["in_progress"])),
+            cell(f"{len(queue['review'])}" + (f" · {top.duration(review['since'])}" if review else ""),
+                 theme.MAGENTA if queue["review"] else ""),
+            cell(Text.from_ansi(issues[0]).plain if issues else "none", f"bold {theme.RED}" if issues else theme.GREEN),
+            cell(f"{busy}/{len(state['agents'])} working" + (f" · {trouble} trouble" if trouble else ""),
+                 f"bold {theme.RED}" if trouble else ""),
+            pool_line(state), cell(text, style), f"{today.get('merged', 0)} merged"]))
+    return rows
+
+
+def agent_events(events, name):
+    """The events of one agent (None: events without an agent), newest first, one line each."""
+    lines = Text()
+    for record in reversed(events):
+        if record.get("agent") != name:
+            continue
+        if lines:
+            lines.append("\n")
+        strong = "bold " if record["kind"] in theme.STRONG_KINDS else ""
+        lines.append(f"{top.local_clock(record['time'])} ", style="dim")
+        lines.append(f"{record['kind']:<11}", style=strong + theme.KIND.get(record["kind"], ""))
+        lines.append(f" {record.get('task') or '-'} ", style="bold")
+        lines.append(top.event_detail(record), style="dim")
+    return lines or Text("-", style="dim")
+
+
+def coordinator_text(coordinator):
+    detail = Detail().section(f"coordinator {coordinator['name']}")
+    detail.add("state", coordinator["state"] + (f" ({coordinator['waiting']})" if coordinator.get("waiting") else ""), "bold")
+    detail.add("pane", coordinator.get("pane") or "-")
+    detail.add("session", coordinator.get("session") or "-")
+    detail.add("active", ago(coordinator.get("lastActivity")))
+    detail.add("context", context(coordinator.get("context")))
+    return detail.render()
 
 
 def attention(state):
@@ -485,21 +694,27 @@ def gateway_text(error):
 
 
 def agent_text(agent, task=None, total=0):
-    """An agent for its popup: state, pane, profile, CPU, memory, context and taint, then its current task."""
-    detail = Detail().section(f"agent {agent.get('name')}")
+    """An agent for its popup: state, supervision facts, profile, CPU, memory, context and taint, then its task."""
+    detail = Detail().section(f"agent {agent.get('display') or agent.get('name')}")
     detail.add("state", agent.get("state"), f"bold {theme.STATE.get(agent.get('state'), '')}")
-    detail.add("pane", agent.get("pane"), "bold")
+    detail.add("name", agent.get("name"))
     detail.add("profile", agent.get("profile") or agent.get("provider"))
+    detail.add("model", agent.get("model") or "-")
+    detail.add("launcher", agent.get("command") or "-")
+    detail.add("session", (agent.get("session") or "-")[:8])
+    detail.add("pool", agent.get("pool") or "-")
+    if agent.get("managed"):
+        detail.add("run", f"gen {agent.get('gen') or '-'} · restarts {agent.get('restarts') or 0} · up "
+                          f"{top.duration(agent.get('uptime'))}")
+    else:
+        detail.add("pane", agent.get("pane"), "bold")
+        detail.add("run", f"up {top.duration(agent.get('uptime'))}")
     detail.add("CPU", "-" if agent.get("cpu") is None else f"{agent['cpu']:.0f}% of one core")
     rss = agent.get("rss")
     detail.add("memory", "-" if rss is None else top.size(rss) + (f"  ({rss / total:.1%} of RAM)" if total else ""))
-    use = agent.get("context")
-    if use and use.get("tokens"):
-        detail.add("context", Text.assemble(context(use), (f"  from the {use.get('source')}"
-                                                            + (f", {use['model']}" if use.get("model") else ""), "dim")))
-    else:
-        detail.add("context", "-")
-    detail.add("worktree", "dirty" if agent.get("tainted") else "clean", theme.RED if agent.get("tainted") else theme.GREEN)
+    detail.add("context", context(agent.get("context")))
+    detail.add("worktree", agent.get("worktree") or "-")
+    detail.add("room", "dirty" if agent.get("tainted") else "clean", theme.RED if agent.get("tainted") else theme.GREEN)
     if agent.get("task"):
         if task:
             task_detail(detail, task, title=f"current task {task['id']}")

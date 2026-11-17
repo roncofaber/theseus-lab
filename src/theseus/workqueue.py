@@ -444,13 +444,16 @@ def housekeeping():
 
 
 def run(conf, interval=30, once=False):
+    started = time.time()
     while True:
         for record in tick(conf):
             print(f"{record['time']} {record['kind']:<10} {record['agent'] or '-':<18} {record['task'] or '-'} {record['detail']}")
             sys.stdout.flush()
         if once:
             return
-        time.sleep(next_sleep(conf, interval, time.time()))
+        pause = next_sleep(conf, interval, time.time())
+        heartbeat(conf, "run", started, pause)
+        time.sleep(pause)
 
 
 def still_open(conf, record):
@@ -462,6 +465,16 @@ def still_open(conf, record):
 
 
 WAKE_SLACK = 0.5
+
+
+def heartbeat(conf, command, started, sleep_seconds, now=None):
+    """Record the queue loop of this process (pid, command, last tick, next wake) for the console."""
+    now = time.time() if now is None else now
+    beat = {"pid": os.getpid(), "command": command, "started": started, "tick": now, "next": now + sleep_seconds}
+    try:
+        (queue_dir(conf) / "watcher.json").write_text(json.dumps(beat) + "\n")
+    except OSError:
+        pass
 
 
 def next_sleep(conf, interval, now):
@@ -479,7 +492,8 @@ def wait(conf, timeout=10800, interval=30, drive=True, clock=time.time, sleep=ti
     next interval or the earliest pending gateway resend or agent restart, whichever comes first."""
     latest = events(conf, 1)
     start = latest[-1]["id"] if latest else 0
-    deadline = clock() + timeout
+    started = clock()
+    deadline = started + timeout
     while clock() < deadline:
         if drive:
             tick(conf)
@@ -490,7 +504,10 @@ def wait(conf, timeout=10800, interval=30, drive=True, clock=time.time, sleep=ti
                 print(f"{record['time']} {record['kind']:<10} {record['agent'] or '-':<18} {record['task'] or '-'} {record['detail']}")
             return 0
         now = clock()
-        sleep(min(next_sleep(conf, interval, now) if drive else float(interval), max(0.0, deadline - now)))
+        pause = min(next_sleep(conf, interval, now) if drive else float(interval), max(0.0, deadline - now))
+        if drive:
+            heartbeat(conf, "wait", started, pause, now)
+        sleep(pause)
     print(f"queue wait: nothing needed the coordinator within {timeout}s")
     return 1
 

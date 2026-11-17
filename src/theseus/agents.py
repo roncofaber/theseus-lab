@@ -63,6 +63,17 @@ def entry(row):
     return record
 
 
+def display_name(conf, agent):
+    """A short name for the console: a supervised slot is <profile>-<n>; otherwise the name without the project prefix."""
+    if agent.get("managed") and agent.get("slot") and agent.get("profile"):
+        return f"{agent['profile']}-{agent['slot']}"
+    name = agent["name"]
+    for prefix in (f"{conf.name}-", f"{conf.prefix}-"):
+        if name.startswith(prefix) and len(name) > len(prefix):
+            return name[len(prefix):]
+    return name
+
+
 def load(conf):
     with store.for_project(conf) as conn:
         seed(conf, conn)
@@ -446,7 +457,8 @@ def state(conf, agent):
     from . import tasks as t
     pane = agent["pane"]
     task = current_task(conf, agent["name"])
-    info = {"name": agent["name"], "pane": pane, "provider": agent.get("provider", ""), "enabled": agent.get("enabled", True),
+    info = {"name": agent["name"], "display": display_name(conf, agent), "pane": pane, "provider": agent.get("provider", ""),
+            "enabled": agent.get("enabled", True),
             "task": task["id"] if task else None, "room": (task or {}).get("room"), "idleMinutes": None,
             "tainted": rooms.ledger(conf)["tainted"].get(agent["name"]) if rooms.enabled(conf) else None}
     server, _ = where(agent)

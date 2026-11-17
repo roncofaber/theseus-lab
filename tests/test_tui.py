@@ -19,7 +19,7 @@ from theseus import config as cfg
 from theseus import host, registry, store, top
 from theseus import workqueue as wq
 
-ALLOWED_GLYPHS = re.compile("[\u00b7\u2190-\u21ff\u2500-\u257f\u2580-\u259f\u25a0-\u25ff]")
+ALLOWED_GLYPHS = re.compile("[\u00b7\u2026\u2190-\u21ff\u2500-\u257f\u2580-\u259f\u25a0-\u25ff]")
 
 
 def fake_conf(root, name="alpha"):
@@ -225,22 +225,21 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             panes = list(self.app.query_one(TabbedContent).query(TabPane))
             self.assertEqual(["Host", "alpha", "beta"], [str(p._title) for p in panes])
-            await self.settle(pilot, lambda: len(self.app.active_view().cards()) == 2)
-            self.assertEqual(["alpha", "beta"], [card.project for card in self.app.active_view().cards()])
+            await self.settle(pilot, lambda: len(self.app.active_view().project_names()) == 2)
+            self.assertEqual(["alpha", "beta"], self.app.active_view().project_names())
 
-    async def test_enter_or_a_click_on_a_project_card_opens_its_tab(self):
+    async def test_enter_or_a_double_click_on_a_project_row_opens_its_tab(self):
         from textual.widgets import TabbedContent
         from theseus.tui.app import pane_id
         async with self.app.run_test(size=(170, 60)) as pilot:
             await self.settle(pilot)
-            await self.settle(pilot, lambda: self.app.focused is next(iter(self.app.active_view().cards()), None))
+            table = self.app.query_one("#projects-table")
+            await self.settle(pilot, lambda: self.app.focused is table and table.row_count == 2)
             await pilot.press("enter")
             await self.settle(pilot, lambda: self.app.query_one(TabbedContent).active == pane_id(self.project))
             await pilot.press("1")
             await self.settle(pilot, lambda: self.app.query_one(TabbedContent).active == "tab-host")
-            card = self.app.query_one(f"#card-{pane_id(self.second)}")
-            await self.settle(pilot, lambda: self.app.screen.get_widget_at(card.region.x + 2, card.region.y + 1)[0] is card)
-            await pilot.click(card, offset=(2, 1))
+            await pilot.click(table, offset=(4, 2), times=2)
             await self.settle(pilot, lambda: self.app.query_one(TabbedContent).active == pane_id(self.second))
 
     async def test_charts_show_every_project_and_kind_with_a_time_axis(self):
@@ -259,7 +258,7 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
             self.assertIn("■ assigned 1", project_chart)
             self.assertIn("■ errors/stalled 0", project_chart)
 
-    async def test_cards_follow_projects_appearing_and_disappearing(self):
+    async def test_project_rows_follow_projects_appearing_and_disappearing(self):
         from textual.widgets import DataTable
         from theseus.tui.app import TopApp
         self.event("alpha", "assigned", 5)
@@ -273,11 +272,11 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
         app = TopApp(interval=3600, snapshot_fn=snapshot)
         self.app = app
         async with app.run_test(size=(170, 60)) as pilot:
-            await self.settle(pilot, lambda: [c.project for c in app.query_one("#host-view").cards()] == ["alpha", "beta"])
+            await self.settle(pilot, lambda: app.query_one("#host-view").project_names() == ["alpha", "beta"])
             for count, names in ((1, ["alpha"]), (2, ["alpha", "beta"])):
                 shown["count"] = count
                 await pilot.press("r")
-                await self.settle(pilot, lambda: [c.project for c in app.query_one("#host-view").cards()] == names
+                await self.settle(pilot, lambda: app.query_one("#host-view").project_names() == names
                                   and app.query_one("#host-view #events", DataTable).row_count == 1)
 
     async def test_screen_shows_only_box_block_geometric_and_arrow_glyphs(self):
@@ -556,7 +555,8 @@ class TopPolishTests(DashboardBase):
             self.assertEqual(2, len(self.app.screen_stack))
             screen = self.app.screen
             await self.settle(pilot, lambda: "ready for input" in screen.query_one("#mirror-text").render().plain)
-            self.assertIn("live mirror", screen.query_one("#note").render().plain.lower())
+            self.assertEqual("worker-a · live", str(screen.query_one("#mirror").border_title))
+            self.assertFalse(screen.query("#note"))
             await pilot.click("#send")
             await pilot.press(*"hello", "enter")
             await self.settle(pilot, lambda: self.sent == [("%1", "hello", True)])
@@ -833,7 +833,9 @@ class RoundTwoTests(DashboardBase):
                 await self.start(pilot)
                 table = self.table("agents")
                 labels = [column.label.plain for column in table.columns.values()]
-                self.assertEqual(["CPU (core %)", "MEM (RAM)", "context"], labels[4:7])
+                self.assertEqual(["agent", "pane", "state", "task", "CPU (core %)", "MEM (RAM)"], labels[:6])
+                if size[0] >= 120:
+                    self.assertEqual("context", labels[6])
                 extra = next(row for row in table.ordered_rows if row.key.value.startswith("agent:extra-00"))
                 cells = [cell.plain if hasattr(cell, "plain") else cell for cell in table.get_row(extra.key)]
                 self.assertEqual("3%", cells[4])
@@ -841,7 +843,80 @@ class RoundTwoTests(DashboardBase):
                 screen = "\n".join(strip.text for strip in self.app.screen._compositor.render_strips())
                 self.assertIn("CPU (core %)  MEM (RAM)", screen, size)
                 self.assertRegex(screen, r"\d[KMG] +\d+%  ")
-                self.assertNotIn("…", screen)
+                self.assertLessEqual(max(len(line.rstrip()) for line in screen.splitlines()), size[0])
+
+
+class ConsoleTests(DashboardBase):
+    """The console's supervised-agent popup (tabs, lifecycle actions behind a confirm), the coordinator popup, the
+    PROJECT overview and the command palette's actions, with the CLI and attach replaced by recorders."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.ran = []
+        state = self.base["projects"][0]["snapshot"]
+        state["agents"][0].update({"managed": True, "display": "fake-1", "gen": 2, "restarts": 1, "session": "abcdef1234567",
+                                   "model": "some/model", "command": "fake-agent", "pool": "shared", "uptime": 600})
+        state["coordinator"] = {"name": "lead", "state": "busy", "pane": "%9", "session": "s-1", "pid": 1,
+                                "context": None, "lastActivity": None, "waiting": None}
+        state["watcher"] = {"pid": os.getpid(), "command": "wait", "tick": time.time(), "next": time.time() + 20,
+                            "alive": True}
+        state["agentCounts"] = {"fake": 2}
+        self.app.cli_fn = lambda root, argv: self.ran.append(argv) or (True, "done")
+
+    def screen_text(self):
+        return "\n".join(strip.text for strip in self.app.screen._compositor.render_strips())
+
+    async def test_the_overview_shows_coordinator_watcher_and_supervised_agents(self):
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            screen = self.screen_text()
+            for words in ("coordinator lead busy", "watcher queue wait", "fake-1", "private"):
+                self.assertIn(words, screen)
+
+    async def test_a_supervised_agent_popup_has_tabs_fields_and_confirmed_lifecycle_actions(self):
+        from theseus.tui.popups import AgentScreen, Confirm
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            await pilot.press("a", "enter")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen))
+            popup = self.app.screen
+            body = popup.text()
+            for words in ("some/model", "fake-agent", "abcdef12", "shared", "gen 2 · restarts 1"):
+                self.assertIn(words, body)
+            self.assertNotIn("abcdef1234567", body)
+            self.assertEqual("fake-1 · live", str(popup.query_one("#mirror").border_title))
+            await pilot.press("v")
+            await self.settle(pilot, lambda: popup.query_one("#tabs").active == "events")
+            await pilot.press("R")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, Confirm))
+            await pilot.press("n")
+            await self.settle(pilot, lambda: self.app.screen is popup)
+            self.assertEqual([], self.ran)
+            await pilot.press("R")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, Confirm))
+            await pilot.press("y")
+            await self.settle(pilot, lambda: self.ran == [["agents", "restart", "worker-a"]])
+
+    async def test_the_coordinator_opens_with_c_and_mirrors_its_pane(self):
+        from theseus.tui.popups import AgentScreen
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            await pilot.press("C")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen) and "%9" in self.captures)
+            self.assertEqual("lead · live", str(self.app.screen.query_one("#mirror").border_title))
+
+    def test_palette_actions_are_cli_commands_and_destructive_ones_ask(self):
+        from theseus.tui import commands
+        item = grown(self.base, tasks=2)["projects"][0]
+        found = {title: (argv, question) for title, _, argv, question in commands.project_commands(item)}
+        self.assertEqual((["queue", "tick"], None), found["Queue tick"])
+        self.assertEqual(["agents", "scale", "fake", "3"], found["Add a fake agent (2 to 3)"][0])
+        self.assertTrue(found["Remove a fake agent (2 to 1)"][1])
+        self.assertEqual(["agents", "restart", "worker-a"], found["Restart fake-1"][0])
+        self.assertTrue(found["Restart fake-1"][1])
+        self.assertEqual((["tasks", "hold", "task-000"], None), found["Hold task-000"])
+        self.assertTrue(found["Dispatch task-000"][1])
+        self.assertEqual(["tasks", "priority", "task-000", "1"], found["Raise the priority of task-000 (0 to 1)"][0])
 
 
 class TranscriptTests(Sandbox):

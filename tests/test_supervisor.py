@@ -382,6 +382,16 @@ class SupervisorTests(Sandbox):
         self.assertEqual(1234, agents.session_transcript(self.conf(), rec)["tokens"])
         self.assertEqual(1234, agents.state(self.conf(), rec)["context"]["tokens"])
 
+    def test_scale_writes_the_local_count_and_reconciles(self):
+        self.up()
+        out = self.theseus("agents", "scale", "fake", "3", timeout=60).stdout
+        self.assertIn("[agents.counts] fake = 3 in theseus.local.toml", out)
+        self.assertRegex(out, r"demo-fake-3\s+started")
+        self.assertIn("[agents.counts]\nfake = 3", (self.project / "theseus.local.toml").read_text())
+        self.theseus("agents", "scale", "fake", "2", timeout=60)
+        self.assertIn("fake = 2", (self.project / "theseus.local.toml").read_text())
+        self.assertEqual(1, (self.project / "theseus.local.toml").read_text().count("fake ="))
+
     def add_task(self, task_id):
         self.theseus("tasks", "milestone", "M1")
         self.theseus("tasks", "add", task_id, "--role", "research", "--owned", f"docs/investigations/{task_id}.md",
@@ -512,6 +522,26 @@ class TmuxSequenceTests(unittest.TestCase):
         self.assertTrue(server.alive())
         self.assertTrue(server.has_session("a--y"))
         self.assertEqual("on", server.run("show-options", "-gv", "remain-on-exit").stdout.strip())
+
+
+class ConfigAndEntryTests(Sandbox):
+    def test_config_check_warns_about_pane_ids_in_the_tracked_file(self):
+        self.scaffold("demo")
+        self.replace_config("panes = []", 'panes = [{ name = "w-1", pane = "%3" }]')
+        out = self.theseus("config", "check").stdout
+        self.assertIn("[instances] panes lists tmux pane ids", out)
+        self.replace_config('panes = [{ name = "w-1", pane = "%3" }]', "panes = []")
+        (self.project / "theseus.local.toml").write_text('[instances]\npanes = [{ name = "w-1", pane = "%3" }]\n')
+        self.assertNotIn("pane ids", self.theseus("config", "check").stdout)
+
+    def test_theseus_alone_on_a_terminal_opens_the_console(self):
+        from unittest import mock
+        from theseus import cli
+        opened = []
+        with mock.patch.object(cli, "cmd_top", lambda args: opened.append(args.command)), \
+                mock.patch("sys.stdin.isatty", return_value=True), mock.patch("sys.stdout.isatty", return_value=True):
+            cli.main([])
+        self.assertEqual(["console"], opened)
 
 
 class SeamTests(unittest.TestCase):

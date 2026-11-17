@@ -12,11 +12,12 @@ from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Input, Static, TabbedContent, TabPane
 
 from . import theme
 
 MIRROR_LINES = 200
+DIFF_SECONDS = 5.0
 ESCAPE_SECONDS = 0.5
 TMUX_KEYS = {"enter": "Enter", "backspace": "BSpace", "delete": "DC", "up": "Up", "down": "Down", "left": "Left",
              "right": "Right", "tab": "Tab", "shift+tab": "BTab", "home": "Home", "end": "End", "pageup": "PPage",
@@ -137,21 +138,33 @@ class Mirror(ScrollableContainer, can_focus=True):
 
 
 class AgentScreen(Dialog):
-    """An agent's details over a live mirror of its tmux pane, polled while the popup is open (faster while typing
-    through), with a line to send whole lines, type-through mode for single keys and buttons for common keys.
-    `actions` supplies capture(pane), send(text), keys(*keys) for the buttons, type(*keys) for type-through and jump()
-    (None hides Open tmux pane); every one of them runs in a worker thread, keys in order through one queue."""
+    """An agent's details over tabs: Live (a mirror of its tmux pane, polled while shown, faster while typing through,
+    with a line to send whole lines, type-through mode for single keys and buttons for common keys), Diff (its task
+    worktree against the task's base, refreshed while shown), Task and Events. `actions` supplies capture(pane),
+    send(text), keys(*keys), type(*keys), jump() (None hides Open tmux pane) and optionally diff(), task(), events(),
+    attach() (a callable run while the app is suspended, None for panes it cannot attach) and restart(), stop(),
+    start() (None hides them; each asks first). Everything but attach runs in a worker thread."""
 
     BINDINGS = [Binding("escape", "close", "Close the popup"),
                 Binding("i", "type_through", "Type into the pane (Esc Esc or Ctrl-] leaves)"),
+                Binding("enter", "attach", "Attach to the pane here (C-q detaches)"),
                 Binding("o", "open_pane", "Open tmux pane"),
-                Binding("s", "focus_send", "Type a line to send")]
+                Binding("s", "focus_send", "Type a line to send"),
+                Binding("R", "lifecycle('restart')", "Restart the agent (asks first)"),
+                Binding("X", "lifecycle('stop')", "Stop the agent (asks first)"),
+                Binding("U", "lifecycle('start')", "Start the agent (asks first)"),
+                Binding("l", "show_tab('live')", "Live tab"), Binding("d", "show_tab('diff')", "Diff tab"),
+                Binding("t", "show_tab('task')", "Task tab"), Binding("v", "show_tab('events')", "Events tab")]
     DEFAULT_CSS = """
     AgentScreen > #dialog { height: 90%; }
     AgentScreen #body { height: auto; max-height: 30%; }
-    AgentScreen #note { color: $warning; text-style: bold; margin-top: 1; }
+    AgentScreen #tabs { height: 1fr; }
+    AgentScreen TabPane { padding: 0; }
+    AgentScreen #note { color: $warning; text-style: bold; }
     AgentScreen #mirror { height: 1fr; min-height: 4; border: round $primary 50%; background: $background;
                           overflow-x: auto; overflow-y: auto; }
+    AgentScreen .sheet { height: 1fr; overflow-x: auto; overflow-y: auto; }
+    AgentScreen .sheet > Static { width: auto; }
     AgentScreen #mirror-text { width: auto; }
     AgentScreen.-typing #mirror { border: heavy $warning; border-title-color: $warning; border-title-style: bold; }
     """
@@ -170,12 +183,23 @@ class AgentScreen(Dialog):
         self.outbox = queue.Queue()
         self.pumping = False
         self.lock = threading.Lock()
+        self.diff_timer = None
+
+    def live_title(self):
+        return f"{self.heading.split(' ', 1)[-1]} · live"
+
+    def action_of(self, name):
+        return getattr(self.actions, name, None)
 
     def content(self):
         yield VerticalScroll(Static(self.body, id="text"), id="body")
-        yield Static(f"Live mirror of tmux pane {self.pane}: what you send here goes to the running agent.", id="note")
-        yield Mirror(Static(Text("capturing the pane ...", style="dim"), id="mirror-text"), id="mirror")
-        yield Input(placeholder="type a line and press Enter to send it to the agent", id="send")
+        with TabbedContent(id="tabs", initial="live"):
+            with TabPane("Live", id="live"):
+                yield Mirror(Static(Text("…", style="dim"), id="mirror-text"), id="mirror")
+                yield Input(placeholder="send", id="send")
+            for name, label in (("diff", "Diff"), ("task", "Task"), ("events", "Events")):
+                with TabPane(label, id=name):
+                    yield ScrollableContainer(Static(Text("…", style="dim"), id=f"{name}-text"), classes="sheet")
 
     def buttons(self):
         yield Button("Type into pane (i)", id="type", variant="warning", compact=True)
@@ -183,14 +207,99 @@ class AgentScreen(Dialog):
         yield Button("Escape", id="key-escape", compact=True)
         yield Button("Interrupt", id="interrupt", variant="error", compact=True)
         yield Button("/compact", id="compact", compact=True)
+        if self.action_of("attach") is not None:
+            yield Button("Attach (Enter)", id="attach", variant="primary", compact=True)
         if self.actions.jump is not None:
             yield Button("Open tmux pane (o)", id="open", variant="primary", compact=True)
+        for name, label in (("restart", "Restart (R)"), ("stop", "Stop (X)"), ("start", "Start (U)")):
+            if self.action_of(name) is not None:
+                yield Button(label, id=f"life-{name}", variant="error" if name == "stop" else "default", compact=True)
 
     def on_mount(self):
         super().on_mount()
-        self.query_one("#mirror").border_title = "mirror"
+        self.query_one("#mirror").border_title = self.live_title()
         self.timer = self.set_interval(self.poll_seconds, self.poll)
         self.poll()
+        for name in ("task", "events"):
+            self.load_sheet(name)
+
+    def load_sheet(self, name):
+        source = self.action_of(name)
+        if source is None:
+            self.fill_sheet(name, Text("-", style="dim"))
+            return
+
+        def run():
+            try:
+                content = source()
+            except Exception as problem:
+                content = Text(f"failed: {problem}", style="red")
+            try:
+                self.app.call_from_thread(self.fill_sheet, name, content)
+            except Exception:
+                pass
+        self.run_worker(run, thread=True, group=f"sheet-{name}", exclusive=True)
+
+    def fill_sheet(self, name, content):
+        try:
+            self.query_one(f"#{name}-text", Static).update(content if content else Text("-", style="dim"))
+        except NoMatches:
+            pass
+
+    @on(TabbedContent.TabActivated, "#tabs")
+    def tab_activated(self, event):
+        active = event.pane.id
+        if self.diff_timer is not None:
+            self.diff_timer.stop()
+            self.diff_timer = None
+        if active == "diff":
+            self.load_sheet("diff")
+            self.diff_timer = self.set_interval(DIFF_SECONDS, lambda: self.load_sheet("diff"))
+        elif active in ("task", "events"):
+            self.load_sheet(active)
+
+    def action_show_tab(self, name):
+        self.query_one("#tabs", TabbedContent).active = name
+
+    def action_attach(self):
+        attach = self.action_of("attach")
+        if attach is None:
+            self.app.notify("not supervised: o opens the pane", severity="warning")
+            return
+        with self.app.suspend():
+            message = attach()
+        self.app.refresh(layout=True)
+        if message:
+            self.app.notify(message)
+
+    @on(Button.Pressed, "#attach")
+    def attach_pressed(self):
+        self.action_attach()
+
+    QUESTIONS = {"restart": "Restart {name}?", "stop": "Stop {name}?", "start": "Start {name}?"}
+
+    def action_lifecycle(self, name):
+        function = self.action_of(name)
+        if function is None:
+            self.app.notify("not supervised", severity="warning")
+            return
+
+        def answered(yes):
+            if yes:
+                self.in_thread(function)
+        self.app.push_screen(Confirm(self.QUESTIONS[name].format(name=self.heading.split(" ", 1)[-1])), answered)
+
+    @on(Button.Pressed, "#life-restart")
+    def restart_pressed(self):
+        self.action_lifecycle("restart")
+
+    @on(Button.Pressed, "#life-stop")
+    def stop_pressed(self):
+        self.action_lifecycle("stop")
+
+    @on(Button.Pressed, "#life-start")
+    def start_pressed(self):
+        self.action_lifecycle("start")
 
     def press(self, *keys):
         """Queue tmux keys for the pane; one worker sends them in order and ends when the queue is empty."""
@@ -203,6 +312,8 @@ class AgentScreen(Dialog):
 
     def check_action(self, action, parameters):
         if action == "open_pane" and self.actions.jump is None:
+            return False
+        if self.typing and action in ("attach", "lifecycle", "show_tab", "focus_send", "open_pane"):
             return False
         return True
 
@@ -232,7 +343,7 @@ class AgentScreen(Dialog):
             return
         at_bottom = scroller.scroll_y >= scroller.max_scroll_y - 1
         mirror.update(Text.from_ansi(text.rstrip("\n"), no_wrap=True) if text.strip()
-                      else Text("the pane shows nothing", style="dim"))
+                      else Text("-", style="dim"))
         if at_bottom:
             scroller.call_after_refresh(scroller.scroll_end, animate=False, x_axis=False)
 
@@ -261,7 +372,7 @@ class AgentScreen(Dialog):
         self.typing = typing
         self.set_class(typing, "-typing")
         mirror = self.query_one("#mirror", Mirror)
-        mirror.border_title = (f"INSERT  keys go to pane {self.pane}  (Esc Esc or Ctrl-] leaves)" if typing else "mirror")
+        mirror.border_title = "INSERT" if typing else self.live_title()
         if self.timer is not None:
             self.timer.stop()
         self.timer = self.set_interval(self.fast_seconds if typing else self.poll_seconds, self.poll)
@@ -337,7 +448,7 @@ class AgentScreen(Dialog):
         def answered(yes):
             if yes:
                 self.press("C-c")
-        self.app.push_screen(Confirm(f"Send Ctrl-C to the agent in pane {self.pane}? It interrupts its current turn."),
+        self.app.push_screen(Confirm(f"Interrupt {self.heading.split(' ', 1)[-1]} (Ctrl-C)?"),
                              answered)
 
     @on(Button.Pressed, "#open")

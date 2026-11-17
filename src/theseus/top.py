@@ -244,7 +244,7 @@ def milestone_progress(conf):
 def today_stats(history):
     """Deliveries and completions since local midnight, and the median minutes from assignment to delivery."""
     midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
-    assigned, handoffs, delivered, completed = {}, [], 0, 0
+    assigned, handoffs, delivered, completed, merged, last_merge = {}, [], 0, 0, 0, None
     for record in history:
         try:
             moment = datetime.fromisoformat(record["time"].replace("Z", "+00:00"))
@@ -259,9 +259,13 @@ def today_stats(history):
                 handoffs.append((moment - start).total_seconds())
         elif record["kind"] == "completed" and moment >= midnight:
             completed += 1
+        if record["kind"] == "merged":
+            last_merge = record["time"]
+            merged += moment >= midnight
     handoffs.sort()
     median = handoffs[len(handoffs) // 2] if handoffs else None
-    return {"delivered": delivered, "completed": completed, "medianHandoff": median}
+    return {"delivered": delivered, "completed": completed, "merged": merged, "lastMerge": last_merge,
+            "medianHandoff": median}
 
 
 def merge_resets(history):
@@ -365,8 +369,101 @@ def recent(state, kinds, seconds=AFTERGLOW):
     return found
 
 
+def supervised_facts(conf, states):
+    """Generation, restarts, start time and session of each supervised agent, merged into its state."""
+    from . import supervisor
+    if not supervisor.managed(conf):
+        return
+    try:
+        facts = {item["name"]: item for item in supervisor.snapshot(conf)}
+    except Exception:
+        return
+    for info in states:
+        found = facts.get(info["name"])
+        if found:
+            info.update({"gen": found["gen"], "restarts": found["restarts"], "started": found["started"],
+                         "session": found["sessionId"], "phase": found["phase"]})
+
+
+def profile_facts(conf, states):
+    """Model, launcher command, pool and task worktree of each agent, for the console."""
+    from . import profiles
+    tasks = {}
+    for info in states:
+        profile_name = wq.launched(conf, info)
+        try:
+            profile = profiles.resolve(conf, profile_name)
+        except profiles.ProfileError:
+            profile = {}
+        use = info.get("context") or {}
+        info.update({"model": use.get("model") or profile.get("model") or None, "command": profile.get("command") or None,
+                     "pool": profile.get("pool") or None, "profile": profile_name})
+        if info.get("task"):
+            if not tasks:
+                tasks = {x["id"]: x for x in t.Queue(conf).load().get("tasks", [])}
+            info["worktree"] = (tasks.get(info["task"]) or {}).get("worktree")
+
+
+def coordinator_state(conf):
+    """The coordinator session ([instances] coordinator, a Claude Code session name) as its CLI reports it: state,
+    session id, pid, the tmux pane on the user's server that runs it, context use and last activity from its
+    transcript. None when the project names no coordinator."""
+    from . import profiles, supervisor, transcripts
+    name = conf.section("instances").get("coordinator") or ""
+    if not name:
+        return None
+    info = {"name": name, "state": "unknown", "pane": None, "session": None, "pid": None, "context": None,
+            "lastActivity": None, "waiting": None}
+    try:
+        settings = profiles.interactive(conf, None)
+        entries = supervisor.status_entries(conf, profiles.default_name(conf)) or []
+    except Exception:
+        return info
+    root = str(conf.root)
+    candidates = [e for e in entries if isinstance(e, dict) and e.get("name") == name and e.get("pid")]
+    entry = next((e for e in candidates if e.get("cwd") == root), candidates[0] if candidates else None)
+    if entry is None:
+        info["state"] = "offline"
+        return info
+    info.update({"state": entry.get("status") or "unknown", "session": entry.get("sessionId"), "pid": entry.get("pid"),
+                 "waiting": entry.get("waitingFor")})
+    table = process_table()
+    for pane in tm.Server.legacy().run("list-panes", "-a", "-F", "#{pane_id} #{pane_pid}").stdout.splitlines():
+        pane_id, _, pid = pane.partition(" ")
+        if pid.isdigit() and info["pid"] in descendants(table, int(pid)):
+            info["pane"] = pane_id
+            break
+    directory = settings.get("sessions_dir")
+    if directory and info["session"]:
+        path = transcripts.transcript_path(directory, info["session"], entry.get("cwd") or root)
+        try:
+            state = transcripts.read(path)
+            info["lastActivity"] = path.stat().st_mtime
+        except OSError:
+            state = None
+        info["context"] = ag.context_use(conf, None, state, None)
+    return info
+
+
+def watcher_state(conf):
+    """The `theseus queue wait|run` loop of the project, from the heartbeat it writes each tick."""
+    try:
+        beat = json.loads((conf.data / "queue" / "watcher.json").read_text())
+    except (OSError, ValueError):
+        return None
+    pid = beat.get("pid")
+    try:
+        os.kill(int(pid), 0)
+        beat["alive"] = True
+    except (OSError, TypeError, ValueError):
+        beat["alive"] = False
+    return beat
+
+
 def snapshot(conf, sample=False, host=None):
     states = ag.states(conf)
+    supervised_facts(conf, states)
+    profile_facts(conf, states)
     if sample:
         agent_processes(states)
         time.sleep(0.5)
@@ -388,7 +485,15 @@ def snapshot(conf, sample=False, host=None):
         "paused": wq.paused(conf), "git": git_state(conf), "verification": verification_state(conf),
         "events": merge_resets(wq.events(conf, 200)),
         "today": today_stats(wq.events(conf)), "progress": milestone_progress(conf),
+        "coordinator": coordinator_state(conf), "watcher": watcher_state(conf), **supervision(conf),
     }
+
+
+def supervision(conf):
+    from . import supervisor
+    if not supervisor.managed(conf):
+        return {"managed": False, "agentCounts": {}}
+    return {"managed": True, "agentCounts": supervisor.counts(conf)}
 
 
 # presentation

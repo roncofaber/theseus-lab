@@ -10,7 +10,7 @@ from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ItemGrid, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
 from textual.widget import Widget
@@ -19,7 +19,7 @@ from textual.widgets import DataTable, Footer, Header, Input, Static, TabbedCont
 from .. import config as cfg
 from .. import host, top
 from .. import workqueue as wq
-from . import charts, popups, resources, theme
+from . import charts, commands, popups, resources, theme
 from . import rows as R
 
 HOST_TAB = "tab-host"
@@ -48,7 +48,10 @@ def same(before, after):
 
 def fill(table, rows):
     """Bring table to rows [(key, cells, search)] in place: remove, update and add rows by key, then reorder; the
-    highlighted row keeps its key."""
+    highlighted row keeps its key. Cells longer than their column end in an ellipsis (Table.clip)."""
+    if isinstance(table, Table):
+        table.full = rows
+        rows = [(key, table.clip(key, cells), search) for key, cells, search in rows]
     highlighted = None
     if table.show_cursor and table.row_count:
         try:
@@ -77,14 +80,79 @@ def fill(table, rows):
 
 class Table(DataTable):
     """A row table without a highlighted row until the user asks for one (a click, a cursor key, or a/w/e); losing
-    focus (a click elsewhere or Escape) hides it again. A sortable table sorts by a column (header click, or s/S)."""
+    focus (a click elsewhere or Escape) hides it again. A sortable table sorts by a column (header click, or s/S).
+    Columns have stable widths: an int in `widths` is fixed, a float shares what is left in proportion, so columns do
+    not shift as rows come and go; a longer cell ends in an ellipsis and its row's popup shows it whole."""
 
-    def __init__(self, columns, sort=None, **kwargs):
+    def __init__(self, columns, sort=None, widths=None, optional=(), **kwargs):
         super().__init__(cursor_type="row", zebra_stripes=True, show_cursor=False, **kwargs)
         self.names = columns
         self.sort_by = sort
+        self.widths = widths or {}
+        self.optional = tuple(optional)
+        self.shown_columns = list(columns)
+        self.fitted = {}
+        self.full = []
+        self.clipped = {}
         for name in columns:
             self.add_column(self.label(name), key=name)
+
+    def fit(self, width):
+        """(visible columns, widths) for a table `width` cells wide: optional columns drop out, in order, until the
+        rest fits."""
+        visible = list(self.names)
+        while True:
+            fixed = {name: self.widths[name] for name in visible if isinstance(self.widths.get(name), int)}
+            flexible = {name: float(self.widths.get(name, 1.0)) for name in visible if name not in fixed}
+            spare = width - 1 - 2 * len(visible)
+            needed = sum(fixed.values()) + 6 * len(flexible)
+            dropping = [name for name in self.optional if name in visible]
+            if needed <= spare or not dropping:
+                break
+            visible.remove(dropping[0])
+        rest = max(4 * len(flexible), spare - sum(fixed.values()))
+        weight = sum(flexible.values()) or 1.0
+        return visible, {**fixed, **{name: max(4, int(rest * share / weight)) for name, share in flexible.items()}}
+
+    def on_resize(self, event):
+        visible, fitted = self.fit(event.size.width)
+        if fitted == self.fitted and visible == self.shown_columns:
+            return
+        if visible != self.shown_columns:
+            self.shown_columns = visible
+            self.clear(columns=True)
+            for name in visible:
+                self.add_column(self.label(name), key=name)
+        self.fitted = fitted
+        for key, column in self.columns.items():
+            column.auto_width = False
+            column.width = fitted[key.value]
+        self._require_update_dimensions = True
+        self._clear_caches()
+        self.clipped = {}
+        if self.full:
+            fill(self, self.full)
+        self.refresh()
+
+    def clip(self, key, cells):
+        """The visible cells cut to the fitted widths with an ellipsis, cached per row and width."""
+        if not self.fitted:
+            return cells
+        widths = tuple(self.fitted[name] for name in self.shown_columns)
+        found = self.clipped.get(key)
+        if found and found[0] is cells and found[1] == widths:
+            return found[2]
+        shown = []
+        for name, width in zip(self.shown_columns, widths):
+            value = cells[self.names.index(name)]
+            if isinstance(value, Text) and value.cell_len > width:
+                value = value.copy()
+                value.truncate(width, overflow="ellipsis")
+            shown.append(value)
+        if len(self.clipped) > 4 * max(len(self.full), 100):
+            self.clipped = {}
+        self.clipped[key] = (cells, widths, shown)
+        return shown
 
     def label(self, name):
         if self.sort_by is None:
@@ -165,7 +233,7 @@ class BarChart(Widget):
 
     def render(self):
         if not self.series:
-            return Text("no activity data", style="dim")
+            return Text("-", style="dim")
         key = charts.legend(self.series, self.size.width)
         lines = [*key, *charts.stacked_bars(self.series, self.size.width, self.size.height - len(key))]
         return Text("\n").join(lines)
@@ -181,56 +249,10 @@ class HistoryChart(Widget):
 
     def render(self):
         if not len(self.ring):
-            return Text("CPU history: collecting samples", style="dim")
+            return Text("CPU history", style="dim")
         title = Text("CPU history", style="bold")
         return Text("\n").join([title, *charts.history(self.ring.values(), self.size.width, self.size.height - 1,
                                                        style="level", seconds=self.seconds)])
-
-
-class ProjectCard(Static, can_focus=True):
-    """A project on the Host tab: its accent border, name and summary; Enter or a click opens its tab."""
-
-    BINDINGS = [Binding("enter", "open", "Open tab", key_display="Enter")]
-
-    class Open(Message):
-        def __init__(self, root):
-            super().__init__()
-            self.root = root
-
-    def __init__(self, item, **kwargs):
-        super().__init__(R.card_text(item), id=f"card-{pane_id(item['root'])}", **kwargs)
-        self.root = item["root"]
-        self.project = item["name"]
-        self.search = ""
-        self.border_title = Content.styled(item["name"], "bold")
-        self.body = None
-
-    def on_mount(self):
-        self.paint()
-
-    def paint(self):
-        accent = theme.css(theme.project_color(self.project))
-        self.styles.border = ("heavy" if self.has_focus else "round", accent)
-        self.styles.border_title_color = accent
-
-    def on_focus(self):
-        self.paint()
-
-    def on_blur(self):
-        self.paint()
-
-    def show(self, item):
-        body = R.card_text(item)
-        self.search = f"{item['name']} {body.plain}".lower()
-        if not same(self.body, body):
-            self.body = body
-            self.update(body)
-
-    def action_open(self):
-        self.post_message(self.Open(self.root))
-
-    def on_click(self):
-        self.action_open()
 
 
 def resource_text(state, cpu):
@@ -278,7 +300,7 @@ def gpu_text(gpus):
 def core_text(cpu, width):
     """One small bar per CPU thread, as many per line as fit in `width`."""
     if not cpu or not cpu["cores"]:
-        return Text("per-core CPU: collecting samples", style="dim")
+        return Text("…", style="dim")
     line = Text()
     per_row = max(1, width // 18)
     for index, value in enumerate(cpu["cores"]):
@@ -301,32 +323,27 @@ class HostView(VerticalScroll):
         self.gateway_records = {}
 
     def compose(self) -> ComposeResult:
+        with Panel("PROJECTS", id="projects"):
+            yield Table(R.PROJECT_COLUMNS, widths=R.WIDTHS["projects"], optional=R.OPTIONAL["projects"], id="projects-table")
         with Panel(f"HOST {socket.gethostname()}", id="resources"):
             with Horizontal(id="resource-row"):
                 yield Static(id="meters")
                 yield HistoryChart(self.history, self.seconds, id="cpu-history")
                 yield Static(id="gpus")
             yield Static(id="cores")
-        with Panel("ACTIVITY all projects, events per 15 minutes over the last 12 hours", id="host-activity",
+        with Panel("ACTIVITY 12 h", id="host-activity",
                    classes="grow"):
             yield BarChart(id="host-chart", classes="chart")
-        with Panel("PROJECTS Enter or click opens the tab", id="projects"):
-            yield ItemGrid(id="cards", min_column_width=44, regular=False)
         with Panel("POOLS", id="pools-panel"):
-            yield Table(R.POOL_COLUMNS, id="pools")
+            yield Table(R.POOL_COLUMNS, widths=R.WIDTHS["pools"], id="pools")
         with Panel("GATEWAY", id="gateway-panel"):
-            yield Table(R.GATEWAY_COLUMNS, id="gateway")
-        with Panel("EVENTS across projects", id="events-panel", classes="grow"):
-            yield Table(R.HOST_EVENT_COLUMNS, sort=("time", True), id="events")
+            yield Table(R.GATEWAY_COLUMNS, widths=R.WIDTHS["gateway"], optional=R.OPTIONAL["gateway"], id="gateway")
+        with Panel("EVENTS", id="events-panel", classes="grow"):
+            yield Table(R.HOST_EVENT_COLUMNS, sort=("time", True), widths=R.WIDTHS["host-events"], id="events")
 
-    def cards(self):
-        return list(self.query(ProjectCard))
-
-    async def sync_cards(self, projects):
-        if [card.root for card in self.cards()] != [item["root"] for item in projects]:
-            grid = self.query_one("#cards", ItemGrid)
-            await grid.remove_children()
-            await grid.mount(*[ProjectCard(item) for item in projects])
+    def project_names(self):
+        table = self.query_one("#projects-table", Table)
+        return [table.get_row(row.key)[0].plain for row in table.ordered_rows]
 
     def update(self, snap, text):
         state = snap["host"]
@@ -344,12 +361,7 @@ class HostView(VerticalScroll):
             cores.update(core_text(self.cpu, self.size.width - 4))
         self.query_one("#cpu-history", HistoryChart).refresh()
         self.query_one("#host-chart", BarChart).plot(charts.project_series(snap["projects"]))
-        needle = text.strip().lower()
-        items = {item["root"]: item for item in snap["projects"]}
-        for card in self.cards():
-            if card.root in items:
-                card.show(items[card.root])
-                card.display = not needle or needle in card.search
+        fill(self.query_one("#projects-table", Table), R.matches(R.project_rows(snap["projects"]), text))
         fill(self.query_one("#pools", Table), R.matches(R.pool_rows(snap["pools"]), text))
         self.query_one("#gateway-panel", Panel).border_title = R.gateway_title(snap.get("gateway"))
         errors = snap.get("gatewayErrors") or []
@@ -358,6 +370,24 @@ class HostView(VerticalScroll):
         events = self.query_one("#events", Table)
         self.records = {R.event_key(record, index): record for index, record in enumerate(snap["events"])}
         fill(events, R.matches(R.event_rows(snap["events"], project=True, sort=events.sort_by), text))
+
+
+class Overview(Static):
+    """The first panel of a project tab, laid out for its width; a double-click opens the coordinator's popup."""
+
+    state = None
+
+    def show(self, state):
+        self.state = state
+        self.update(R.overview(state, self.size.width or 200))
+
+    def on_resize(self, event):
+        if self.state is not None:
+            self.update(R.overview(self.state, event.size.width))
+
+    def on_click(self, event):
+        if event.chain >= 2:
+            self.app.action_coordinator()
 
 
 class ProjectView(VerticalScroll):
@@ -376,21 +406,16 @@ class ProjectView(VerticalScroll):
     def compose(self) -> ComposeResult:
         accent = self.accent
         with Panel("PROJECT", id="status-panel", accent=accent):
-            yield Static(id="status")
-        with Panel("STATUS", id="attention-panel", accent=accent):
-            yield Static(id="attention")
-        with Panel("AGENTS Enter or double-click: details", id="agents-panel", accent=accent, classes="grow"):
-            yield Table(R.AGENT_COLUMNS, id="agents")
+            yield Overview(id="status")
+        with Panel("AGENTS", id="agents-panel", accent=accent, classes="grow"):
+            yield Table(R.AGENT_COLUMNS, widths=R.WIDTHS["agents"], optional=R.OPTIONAL["agents"], id="agents")
         with Panel("WAITING", id="waiting-panel", accent=accent, classes="grow"):
-            yield Table(R.WAITING_COLUMNS, id="waiting")
-        with Panel("ACTIVITY events per 15 minutes over the last 12 hours", id="activity-panel", accent=accent,
+            yield Table(R.WAITING_COLUMNS, widths=R.WIDTHS["waiting"], optional=R.OPTIONAL["waiting"], id="waiting")
+        with Panel("ACTIVITY 12 h", id="activity-panel", accent=accent,
                    classes="grow"):
             yield BarChart(id="chart", classes="chart")
         with Panel("EVENTS", id="events-panel", accent=accent, classes="grow"):
-            yield Table(R.EVENT_COLUMNS, sort=("time", True), id="events")
-
-    def on_mount(self):
-        self.query_one("#agents-panel", Panel).border_subtitle = R.USAGE_LEGEND
+            yield Table(R.EVENT_COLUMNS, sort=("time", True), widths=R.WIDTHS["events"], id="events")
 
     def repaint(self):
         for panel in self.query(Panel):
@@ -399,7 +424,7 @@ class ProjectView(VerticalScroll):
 
     def update(self, item, text):
         self.item = item
-        status = self.query_one("#status", Static)
+        status = self.query_one("#status", Overview)
         agents, waiting, events = (self.query_one(f"#{name}", Table) for name in ("agents", "waiting", "events"))
         status_panel = self.query_one("#status-panel", Panel)
         status_panel.border_title = Content.styled(item["name"], "bold")
@@ -409,14 +434,9 @@ class ProjectView(VerticalScroll):
                 fill(widget, [])
             return
         state = item["snapshot"]
-        status_panel.border_subtitle = item["root"]
-        status.update(R.project_status(state))
         found = top.issues(state)
-        attention = self.query_one("#attention-panel", Panel)
-        attention.border_title = f"ACTION NEEDED {len(found)}" if found else "STATUS"
-        attention.styles.border_title_color = (self.app.theme_variables.get("warning", "yellow") if found
-                                               else theme.css(self.accent))
-        self.query_one("#attention", Static).update(R.attention(state))
+        status_panel.border_subtitle = Content.styled(f"ACTION NEEDED {len(found)}", "bold") if found else ""
+        status.show(state)
         queue = state["queue"]
         self.query_one("#waiting-panel", Panel).border_title = (
             f"WAITING review {len(queue['review'])} · merged {len(queue['merged'])} · ready {len(queue['ready'])}"
@@ -430,7 +450,8 @@ class ProjectView(VerticalScroll):
 
 
 class TopApp(App):
-    TITLE = "theseus top"
+    TITLE = "theseus"
+    COMMANDS = App.COMMANDS | {commands.ConsoleCommands}
     AUTO_FOCUS = None
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (120, "-wide")]
     VERTICAL_BREAKPOINTS = [(0, "-short"), (32, "-tall")]
@@ -457,9 +478,6 @@ class TopApp(App):
     Screen.-narrow #resource-row { layout: vertical; }
     Screen.-short #activity-panel, Screen.-short #host-activity { display: none; }
     #cores { display: none; }
-    #cards { grid-gutter: 0 1; }
-    ProjectCard { border: round $primary; border-title-style: bold; height: auto; padding: 0 1; }
-    ProjectCard:focus { background: $boost; }
     """
     BINDINGS = [
         Binding("q", "quit", "Quit"),
@@ -469,6 +487,7 @@ class TopApp(App):
         Binding("shift+tab", "previous_tab", "Previous tab", show=False, priority=True),
         Binding("r", "refresh", "Refresh", tooltip="Refresh now"),
         Binding("p", "pause", "Pause", tooltip="Pause or resume this project's queue"),
+        Binding("C", "coordinator", "Coordinator", key_display="C", tooltip="The coordinator's mirror and send line"),
         Binding("c", "cores", "Cores", tooltip="Per-core CPU on the Host tab"),
         Binding("/", "filter", "Filter", key_display="/", tooltip="Filter rows"),
         Binding("escape", "clear", "Clear the filter and the row highlight", show=False),
@@ -481,7 +500,8 @@ class TopApp(App):
     ]
 
     def __init__(self, interval=5.0, current=None, roots=(), snapshot_fn=None, jump_fn=None, loader=None, sampler=None,
-                 capture_fn=None, send_fn=None, keys_fn=None, tmux_ok=None, mirror_seconds=1.0):
+                 capture_fn=None, send_fn=None, keys_fn=None, tmux_ok=None, mirror_seconds=1.0, cli_fn=None,
+                 attach_fn=None, diff_fn=None):
         super().__init__()
         self.interval = interval
         self.current = str(Path(current).resolve()) if current else None
@@ -492,6 +512,9 @@ class TopApp(App):
         self.capture_fn = capture_fn or (lambda pane: top.capture(pane, popups.MIRROR_LINES))
         self.send_fn = send_fn or send_verified
         self.keys_fn = keys_fn or top.send_keys
+        self.cli_fn = cli_fn or run_theseus
+        self.attach_fn = attach_fn or attach_supervised
+        self.diff_fn = diff_fn or task_diff
         self.tmux_ok = (bool(os.environ.get("TMUX")) and shutil.which("tmux") is not None) if tmux_ok is None else tmux_ok
         self.mirror_seconds = mirror_seconds
         self.history = resources.Ring(HISTORY_SAMPLES)
@@ -514,7 +537,7 @@ class TopApp(App):
         with TabbedContent(initial=HOST_TAB):
             with Pane("Host", id=HOST_TAB):
                 yield HostView(self.history, self.interval, id="host-view")
-        yield Input(placeholder="filter: task, agent, kind, room, status (Esc clears)", id="filter")
+        yield Input(placeholder="filter", id="filter")
         yield Footer()
 
     def on_mount(self):
@@ -528,8 +551,6 @@ class TopApp(App):
         current = self.current_theme
         variables = {**current.to_color_system().generate(), **current.variables}
         theme.apply(variables, current.dark, current.ansi, self.console.color_system)
-        for card in self.base.query(ProjectCard):
-            card.paint()
         for identifier, view in self.views.items():
             view.repaint()
             try:
@@ -540,7 +561,7 @@ class TopApp(App):
         self.redraw()
 
     def check_action(self, action, parameters):
-        if len(self.screen_stack) > 1 and action not in ("quit",):
+        if len(self.screen_stack) > 1 and action not in ("quit", "command_palette"):
             return False
         return True
 
@@ -571,7 +592,7 @@ class TopApp(App):
                 self.cpu = cpu
                 self.history.push(cpu["total"])
             if snap is None:
-                self.title = f"theseus top · refresh failed: {error}"
+                self.title = f"theseus · refresh failed: {error}"
                 return
             await self.apply(snap)
         finally:
@@ -593,8 +614,7 @@ class TopApp(App):
         if self.pending_open and pane_id(self.pending_open) in self.views:
             tabs.active = pane_id(self.pending_open)
         self.pending_open = None
-        await self.base.query_one(HostView).sync_cards(snap["projects"])
-        self.title = f"theseus top · {len(snap['projects'])} project(s) · updated {top.local_clock(snap['time'])}"
+        self.title = f"theseus · {len(snap['projects'])} project(s) · updated {top.local_clock(snap['time'])}"
         self.redraw()
         if self.greet and snap["projects"]:
             self.greet = False
@@ -700,6 +720,8 @@ class TopApp(App):
 
     @on(TabbedContent.TabActivated)
     def tab_changed(self, event):
+        if event.tabbed_content is not self.base.query_one(TabbedContent):
+            return
         view = self.active_view()
         if isinstance(view, HostView):
             self.call_after_refresh(self.focus_first_card)
@@ -707,16 +729,12 @@ class TopApp(App):
             self.call_after_refresh(lambda: view.query_one("#agents", Table).focus())
 
     def focus_first_card(self):
-        view = self.base.query_one(HostView)
         if self.base.query_one(TabbedContent).active != HOST_TAB:
             return
-        cards = view.cards()
-        if cards:
-            cards[0].focus()
-
-    @on(ProjectCard.Open)
-    def open_project(self, event):
-        self.base.query_one(TabbedContent).active = pane_id(event.root)
+        table = self.base.query_one("#projects-table", Table)
+        if table.row_count:
+            table.focus()
+            table.reveal()
 
     def action_pause(self):
         item = self.active_item()
@@ -742,7 +760,7 @@ class TopApp(App):
         self.refresh_now()
 
     def action_help(self):
-        self.push_screen(popups.HelpScreen("theseus top: keys and mouse", self.help_body()))
+        self.push_screen(popups.HelpScreen("theseus console: keys and mouse", self.help_body()))
 
     def help_body(self):
         display = self.get_key_display
@@ -751,9 +769,19 @@ class TopApp(App):
                     ("Mouse", list(MOUSE_HELP)),
                     ("Agent popup", popups.binding_rows(popups.AgentScreen.BINDINGS,
                                                         lambda key: display(Binding(key, "")))
-                     + [("buttons", "Type into pane, Enter, Escape, Interrupt (asks first), /compact, Open tmux pane"),
+                     + [("buttons", "Type into pane, Enter, Escape, Interrupt (asks first), /compact, Attach, Open tmux "
+                                    "pane, Restart, Stop, Start (supervised agents; each asks first)"),
+                        ("tabs", "Live: the pane mirror and a send line; Diff: the task worktree against its base, "
+                                 "refreshed every 5 s while shown; Task: the record and its handoff; Events: this agent's"),
                         ("type-through", "every key goes to the pane: text, Enter, Backspace, arrows, Tab, Ctrl-<key>;"
-                                         " Ctrl-C asks first; Esc Esc or Ctrl-] leaves")])]
+                                         " Ctrl-C asks first; Esc Esc or Ctrl-] leaves (the INSERT border)"),
+                        ("attach", "Enter suspends the console and attaches this terminal to a supervised agent's own "
+                                   "pane; C-q detaches back")]),
+                    ("Actions (Ctrl+P)", [("palette", "every action of the active project: queue tick, agents up, add or "
+                                                      "remove an agent (theseus.local.toml), restart, stop, start, attach; "
+                                                      "dispatch, hold, release, priority, reopen; pool hold and release; "
+                                                      "the coordinator; a delivered task's handoff. Each runs the theseus "
+                                                      "command of the same name; destructive ones ask first")])]
         legend = Text()
         legend.append("Columns\n", style="bold underline")
         legend.append(f"  {R.CPU_HELP}\n  {R.MEM_HELP}\n  {R.CTX_HELP}\n\n")
@@ -761,9 +789,17 @@ class TopApp(App):
         for name, label in theme.SERIES_LABEL.items():
             legend.append("  ■ ", style=theme.SERIES[name])
             legend.append(f"{label}\n")
+        legend.append("\nPanels\n", style="bold underline")
+        legend.append("  PROJECT: milestone, branch, verification and queue state; the coordinator (state, last activity,\n"
+                      "  context; C or a double-click opens its mirror) and the queue watcher (queue wait or run, last tick,\n"
+                      "  next wake); ready, held, blocked, in progress, review and the oldest delivery waiting; agents by\n"
+                      "  state, pool slots with a cap cut (-N) and the gateway; today's merges, completions, deliveries.\n"
+                      "  PROJECTS (Host tab): the same figures, one row per project; Enter opens its tab.\n"
+                      "  Agents show short names (profile-slot for supervised agents; pane private: theseus's own tmux).\n"
+                      "  A cut cell ends in an ellipsis; its row's popup shows it whole. ~ marks an estimated context.\n")
         legend.append("\ntmux\n", style="bold underline")
-        legend.append("  tmux is only needed to open an agent's pane (and to run interactive agents). After a jump, the\n"
-                      "  tmux key shown in the status line or `theseus top --back` returns to this dashboard.\n")
+        legend.append("  After a jump to a hand-made pane, the tmux key shown in the status line or `theseus top --back`\n"
+                      "  returns here; supervised agents open in a new window of your tmux (o) or in place (Enter).\n")
         return popups.help_text(sections, legend)
 
     @on(DataTable.RowSelected)
@@ -773,7 +809,9 @@ class TopApp(App):
         key = event.row_key.value or ""
         view = self.active_view()
         name = event.data_table.id
-        if name == "agents" and isinstance(view, ProjectView):
+        if name == "projects-table" and key.startswith("project:"):
+            self.base.query_one(TabbedContent).active = pane_id(key.split(":", 1)[1])
+        elif name == "agents" and isinstance(view, ProjectView):
             self.open_agent(view, key)
         elif name == "waiting" and isinstance(view, ProjectView):
             self.open_task(view, key)
@@ -817,13 +855,135 @@ class TopApp(App):
         task = (state.get("tasks") or {}).get(agent.get("task"))
         body = R.agent_text(agent, task, (state.get("host") or {}).get("memTotal") or 0)
         root, pane = view.root_path, agent["pane"]
+        supervised = bool(agent.get("managed"))
+        name = agent["name"]
+
+        def cli(*argv):
+            return self.cli_fn(root, list(argv))[1]
         actions = SimpleNamespace(
             capture=self.capture_fn,
             send=lambda text: self.send_fn(self.loader(root), agent, text, expect_busy=not text.startswith("/")),
             keys=lambda *keys: self.keys_fn(pane, *keys) or f"sent {' '.join(keys)} to {pane}",
             type=lambda *keys: self.keys_fn(pane, *keys),
-            jump=(lambda: self.jump_fn(pane)) if self.tmux_ok and pane else None)
-        self.push_screen(popups.AgentScreen(f"agent {agent['name']}", body, pane, actions, poll=self.mirror_seconds))
+            jump=(lambda: self.jump_fn(pane)) if (self.tmux_ok or supervised) and pane else None,
+            diff=(lambda: self.diff_fn(task)) if task else None,
+            task=(lambda: task_sheet(task, view.project)) if task else None,
+            events=lambda: R.agent_events(state["events"], name),
+            attach=(lambda: self.attach_fn(root, name)) if supervised else None,
+            restart=(lambda: cli("agents", "restart", name)) if supervised else None,
+            stop=(lambda: cli("agents", "down", name)) if supervised else None,
+            start=(lambda: cli("agents", "up", name)) if supervised else None)
+        self.push_screen(popups.AgentScreen(f"agent {agent.get('display') or name}", body, pane, actions,
+                                            poll=self.mirror_seconds))
+
+    def action_coordinator(self):
+        view, item = self.active_view(), self.active_item()
+        if not isinstance(view, ProjectView) or not item or not item.get("available"):
+            self.notify("no project tab", severity="warning")
+            return
+        coordinator = item["snapshot"].get("coordinator")
+        if not coordinator:
+            self.notify("no coordinator", severity="warning")
+            return
+        pane = coordinator.get("pane")
+        if not pane:
+            self.notify(f"{coordinator['name']}: {coordinator['state']}, no pane", severity="warning")
+            return
+        root = view.root_path
+        target = {"name": coordinator["name"], "pane": pane}
+        actions = SimpleNamespace(
+            capture=self.capture_fn,
+            send=lambda text: self.send_fn(self.loader(root), target, text, expect_busy=not text.startswith("/")),
+            keys=lambda *keys: self.keys_fn(pane, *keys) or f"sent {' '.join(keys)} to {pane}",
+            type=lambda *keys: self.keys_fn(pane, *keys),
+            jump=(lambda: self.jump_fn(pane)) if self.tmux_ok else None,
+            events=lambda: R.agent_events(item["snapshot"]["events"], None))
+        self.push_screen(popups.AgentScreen(f"coordinator {coordinator['name']}", R.coordinator_text(coordinator), pane,
+                                            actions, poll=self.mirror_seconds))
+
+    def run_cli(self, root, argv, question=None):
+        """Run a theseus command for a project in a worker, after a confirmation when question is set; notify the
+        result and refresh."""
+        def go():
+            def work():
+                ok, message = self.cli_fn(root, argv)
+                self.call_from_thread(self.notify, message, severity="information" if ok else "error")
+                self.call_from_thread(self.refresh_now)
+            self.run_worker(work, thread=True, group="cli")
+        if question:
+            self.push_screen(popups.Confirm(question), lambda yes: go() if yes else None)
+        else:
+            go()
+
+    def attach_agent(self, root, name):
+        with self.suspend():
+            message = self.attach_fn(root, name)
+        if message:
+            self.notify(message)
+
+    def open_handoff(self, item, task_id):
+        task = (item["snapshot"].get("tasks") or {}).get(task_id)
+
+        def work():
+            text = handoff_text(task)
+            self.call_from_thread(self.push_screen, popups.Dialog(f"handoff {task_id}", text))
+        self.run_worker(work, thread=True, group="handoff")
+
+
+def run_theseus(root, argv):
+    """(ok, last line of output) of `theseus ARGV` run in a project root: the console's actions are the CLI."""
+    import subprocess
+    from .. import supervisor
+    try:
+        result = subprocess.run([*supervisor.theseus_argv(), *argv], cwd=root, capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.TimeoutExpired) as problem:
+        return False, f"theseus {' '.join(argv)}: {problem}"
+    lines = [line for line in (result.stdout + "\n" + result.stderr).splitlines() if line.strip()]
+    return result.returncode == 0, lines[-1] if lines else f"theseus {' '.join(argv)}: done"
+
+
+def attach_supervised(root, name):
+    """Attach this terminal to a supervised agent's pane until C-q (runs while the app is suspended)."""
+    import subprocess
+    from .. import supervisor
+    rec = supervisor.record(cfg.load(root=root), name)
+    if not rec or not rec.get("managed"):
+        return f"{name} is not a supervised agent"
+    result = subprocess.run(supervisor.attach_argv(rec))
+    return "" if result.returncode == 0 else f"attach to {name} failed"
+
+
+def task_diff(task):
+    """The task worktree against the task's base commit: the stat, then the patch, colored."""
+    import subprocess
+    worktree, base = task.get("worktree"), task.get("baseCommit")
+    if not worktree or not Path(worktree).is_dir():
+        return Text("-", style="dim")
+    args = ["git", "-C", worktree, "diff", *([base] if base else [])]
+    stat = subprocess.run([*args, "--stat"], capture_output=True, text=True, timeout=30).stdout
+    patch = subprocess.run(args, capture_output=True, text=True, timeout=30).stdout.splitlines()[:3000]
+    text = Text(stat or "no changes\n", style="bold")
+    for line in patch:
+        style = (theme.GREEN if line.startswith("+") and not line.startswith("+++") else
+                 theme.RED if line.startswith("-") and not line.startswith("---") else
+                 theme.CYAN if line.startswith("@@") else "dim" if line.startswith(("diff ", "index ")) else "")
+        text.append("\n" + line, style=style)
+    return text
+
+
+def handoff_text(task):
+    path = Path((task or {}).get("execution", {}).get("logDir") or "") / "handoff.md"
+    try:
+        return Text(path.read_text())
+    except OSError:
+        return Text(f"no handoff at {path}", style="dim")
+
+
+def task_sheet(task, project):
+    """The task record and, when written, its handoff."""
+    from rich.console import Group
+    handoff = handoff_text(task)
+    return Group(R.task_text(task, project=project), Text("\nhandoff", style="bold underline"), handoff)
 
 
 def send_verified(conf, agent, text, expect_busy=True):
