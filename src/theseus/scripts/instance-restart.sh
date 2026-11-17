@@ -11,12 +11,15 @@ set -uo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 [[ $# -ge 1 ]] || { echo "usage: instance-restart.sh PANE [--dry-run]" >&2; exit 2; }
 pane=$1 dry=${2:-}
-sessions=${THESEUS_AGENT_SESSIONS:-$HOME/.claude/sessions}
-launch=${THESEUS_AGENT_LAUNCH:-claude}
-resume_template=${THESEUS_RESUME_TEMPLATE:-"{launch} --resume {session}"}
-missing=${THESEUS_RESUME_MISSING-No conversation found with session ID}
+sessions=${THESEUS_AGENT_SESSIONS-}
+launch=${THESEUS_AGENT_LAUNCH-}
+resume_template=${THESEUS_RESUME_TEMPLATE-}
+missing=${THESEUS_RESUME_MISSING-}
+exit_command=${THESEUS_EXIT_COMMAND-}
 [[ "$pane" != =*--*: ]] || { echo "$pane is a supervised agent; theseus agents restart NAME restarts it" >&2; exit 2; }
 [[ -n "$sessions" && -d "$sessions" ]] || { echo "$pane: the agent profile records no sessions; restart is unsupported" >&2; exit 1; }
+[[ -n "$launch" && -n "$resume_template" && -n "$exit_command" ]] || {
+    echo "$pane: the agent profile has no interactive launch, resume or exit command; restart is unsupported" >&2; exit 1; }
 shell_pid=$(tmux display -p -t "$pane" '#{pane_pid}') || { echo "$pane: no such pane" >&2; exit 1; }
 agent() { for pid in $(pgrep -P "$shell_pid"); do [[ -f "$sessions/$pid.json" ]] && { echo "$pid"; return; }; done; }
 agent_pid=$(agent)
@@ -38,9 +41,9 @@ fi
 for _ in $(seq 1 36); do pane_busy "$pane" || break; sleep 5; done
 pane_busy "$pane" && { echo "$pane still busy after 3 minutes; not restarting" >&2; exit 1; }
 type_line() { tmux send-keys -t "$pane" -l "$1" && sleep 0.3 && tmux send-keys -t "$pane" Enter; }
-type_line "/exit"
+type_line "$exit_command"
 for _ in $(seq 1 60); do kill -0 "$agent_pid" 2>/dev/null || break; sleep 1; done
-kill -0 "$agent_pid" 2>/dev/null && { echo "$pane: pid $agent_pid did not exit after /exit" >&2; exit 1; }
+kill -0 "$agent_pid" 2>/dev/null && { echo "$pane: pid $agent_pid did not exit after $exit_command" >&2; exit 1; }
 type_line "$resume"
 new_pid="" fresh=""
 for _ in $(seq 1 90); do

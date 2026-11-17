@@ -34,6 +34,8 @@ def run_script(name, args, conf=None, pane=None):
         agent = next((a for a in agents.agents(conf) if a["pane"] == pane), None)
         if agent is not None:
             env.update(profiles.instance_env(conf, workqueue.launched(conf, agent), agent["name"]))
+        else:
+            env = {**conf.environment(), **profiles.instance_env(conf), **os.environ}
     return subprocess.run(["bash", script(name), *args], cwd=conf.root, env=env).returncode
 
 

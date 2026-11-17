@@ -406,6 +406,7 @@ def instance_env(conf, profile_name=None, agent=None):
         "THESEUS_RESUME_MISSING": interactive.get("resume_missing") or "",
         "THESEUS_AGENT_SESSIONS": os.path.expanduser(instances.get("sessions_dir") or interactive.get("sessions_dir") or ""),
         "THESEUS_MESSAGING": "1" if interactive.get("messaging") else "0",
+        "THESEUS_EXIT_COMMAND": interactive.get("exit") or "",
     }
 
 
