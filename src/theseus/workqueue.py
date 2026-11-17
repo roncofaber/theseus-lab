@@ -226,6 +226,14 @@ def run(conf, interval=30, once=False):
         time.sleep(interval)
 
 
+def still_open(conf, record):
+    """A delivery the coordinator already merged (theseus merge records the delivery itself) needs no wake-up."""
+    if record["kind"] not in ("delivered", "partial", "blocked") or not record.get("task"):
+        return True
+    task = t.Queue(conf).index().get(record["task"])
+    return bool(task) and task.get("status") == "verification"
+
+
 def wait(conf, timeout=10800, interval=30, drive=True):
     """Block until an event that needs the coordinator appears after the call started; print it and return 0.
     With drive, also run ticks meanwhile so the queue makes progress without a separate runner."""
@@ -235,7 +243,7 @@ def wait(conf, timeout=10800, interval=30, drive=True):
         if drive:
             tick(conf)
         new = events(conf)[start:]
-        hits = [e for e in new if e["kind"] in ATTENTION]
+        hits = [e for e in new if e["kind"] in ATTENTION and still_open(conf, e)]
         if hits:
             for record in new:
                 print(f"{record['time']} {record['kind']:<10} {record['agent'] or '-':<18} {record['task'] or '-'} {record['detail']}")

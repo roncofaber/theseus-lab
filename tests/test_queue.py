@@ -201,6 +201,18 @@ class QueueTests(Sandbox):
         self.assertRegex(self.theseus("agents").stdout, r"worker-a\s+%1\s+quiet")
         self.assertNotIn("nudged", self.theseus("queue", "tick").stdout)
 
+    def test_wait_ignores_deliveries_already_merged(self):
+        from theseus import config as cfg, workqueue as wq
+        self.add("merged-quickly")
+        self.theseus("queue", "tick")
+        self.deliver("merged-quickly")
+        self.theseus("queue", "tick")
+        conf = cfg.load(root=self.project)
+        record = [e for e in wq.events(conf) if e["kind"] == "delivered"][-1]
+        self.assertTrue(wq.still_open(conf, record))
+        self.theseus("tasks", "merged", "merged-quickly", "--commit", "abc1234")
+        self.assertFalse(wq.still_open(conf, record))
+
     def test_wait_returns_when_a_delivery_needs_the_coordinator(self):
         self.add("watched-task")
         self.theseus("queue", "tick")
