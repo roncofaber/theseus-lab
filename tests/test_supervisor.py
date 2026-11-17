@@ -300,6 +300,8 @@ class SupervisorTests(Sandbox):
         self.assertEqual(["demo-fake-1", "demo-fake-2"], names)
         from theseus import top
         self.assertIn("ready", top.capture("=demo--demo-fake-1:"))
+        self.assertEqual("", top.send_keys("=demo--demo-fake-1:", "Escape"))
+        top.agent_processes([{"name": "demo-fake-1", "pane": "=demo--demo-fake-1:"}])
         self.assertEqual("", self.legacy_calls())
 
     def test_a_queue_cycle_on_supervised_agents(self):
