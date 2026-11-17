@@ -13,7 +13,7 @@ theseus itself is user- and site-agnostic: anything specific to one person or ma
 | env | `THESEUS_DATA`, `THESEUS_SCRATCH`, `THESEUS_WORKTREES` and other `THESEUS_*` variables, and command line flags such as `--profile` | one shell or one command | one command |
 
 What belongs where:
-- A launcher, a gateway model and its environment, the MCP servers your agents start with, a client settings file passed with `extra_args`: a `[workers.<name>]` profile in the host file. A project then names the profile (`[workers] default = "gateway"`) and sets only what is about the project, such as `capacity`.
+- A launcher, a gateway model and its environment, the MCP servers your agents start with, a client settings file passed with `extra_args`, the profile's `capability` rank (default 1, see [Agent profiles](agent-profiles.md#capability)): a `[workers.<name>]` profile in the host file. A project then names the profile (`[workers] default = "gateway"`) and sets only what is about the project, such as `capacity`.
 - Pools and their priorities, host store retention and backups: the host file (`[pools.<name>]`, `[store]`).
 - Tool locations: `[tools.paths]` in the host file for every project, or `theseus.local.toml` for one checkout. `[tools] need` stays in `theseus.toml`.
 - Everything that describes the project itself: `theseus.toml`.

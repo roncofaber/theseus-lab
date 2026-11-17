@@ -23,7 +23,7 @@ extra_args: arguments appended to the headless, resume and persistent-instance c
 the same placeholders filled and a leading ~ expanded, for example a client settings file.
 
 [workers.<name>] selects or overrides a profile: a section named after a preset adjusts it; any other name sets
-`preset = "<preset>"` and overrides fields; `capacity` and `model` apply to every profile. The section is the merge of
+`preset = "<preset>"` and overrides fields; `capacity`, `capability` and `model` apply to every profile. The section is the merge of
 the host configuration and the project's files (theseus.config), so a project section that shares a host profile's
 name overrides only the keys it sets.
 """
@@ -165,7 +165,9 @@ def model_context_limit(conf, model):
     matches = [key for key in table if key.endswith("*") and model.startswith(key[:-1])]
     return int(table[max(matches, key=len)]) if matches else None
 DEFAULT = "claude-code"
-OVERRIDABLE = set(PRESETS["claude-code"]) | {"preset", "fallback", "pool", "mcp_servers", "mcp_flags", "extra_args"}
+OVERRIDABLE = set(PRESETS["claude-code"]) | {"preset", "fallback", "pool", "mcp_servers", "mcp_flags", "extra_args",
+                                             "capability"}
+CAPABILITY = 1
 INTERACTIVE_KEYS = set(CLAUDE_INTERACTIVE) | {"launch", "resume"}
 THESEUS_MCP = {"command": "theseus", "args": ["mcp", "--role", "worker"]}
 
@@ -189,6 +191,9 @@ def problems(name, section):
         if interactive["transcript"] not in adapters.NAMES:
             found.append(f"interactive.transcript {interactive['transcript']!r} is not an adapter; known: "
                          f"{', '.join(adapters.NAMES)}")
+    capability = section.get("capability")
+    if capability is not None and (isinstance(capability, bool) or not isinstance(capability, int) or capability < 0):
+        found.append("capability must be a non-negative integer")
     preset = section.get("preset")
     if preset is not None and preset not in PRESETS:
         found.append(f"preset {preset!r} is not a preset; presets: {', '.join(sorted(PRESETS))}")
@@ -223,6 +228,19 @@ def resolve(conf, name=None):
     profile["name"] = name
     profile["preset"] = base_name
     return profile
+
+
+def capability(conf, name=None):
+    """The profile's capability ([workers.<name>] capability, default 1): tasks with a higher min_capability never go to
+    its agents. An unknown profile counts as 0."""
+    try:
+        value = resolve(conf, name).get("capability")
+    except ProfileError:
+        return 0
+    try:
+        return CAPABILITY if value is None else int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 PLACEHOLDER = re.compile(r"\{(\w+)\}")
@@ -391,7 +409,7 @@ def instance_env(conf, profile_name=None, agent=None):
     }
 
 
-RELAUNCH_FREE = ("name", "label", "notes", "verified", "capacity", "mcp_servers", "env")
+RELAUNCH_FREE = ("name", "label", "notes", "verified", "capacity", "capability", "mcp_servers", "env")
 
 
 def relaunch_compatible(conf, current, target):

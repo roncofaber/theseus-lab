@@ -318,6 +318,20 @@ def eligibility(conf, states):
     return result
 
 
+def capability_gated(conf, states, eligible):
+    """task id -> minCapability for pending tasks that no agent may take only because of their minimum capability."""
+    infos = {a["name"]: a for a in states}
+    registered = [a for a in ag.agents(conf) if a.get("enabled", True)]
+    found = {}
+    for task in t.Queue(conf).load().get("tasks", []):
+        need = int(task.get("minCapability") or 0)
+        if task.get("status") != "pending" or not need or eligible.get(task["id"]):
+            continue
+        if any(wq.fits(conf, agent, task, infos.get(agent["name"], {}), gate=False)[0] for agent in registered):
+            found[task["id"]] = need
+    return found
+
+
 def pool_states(conf):
     from . import pools
     try:
@@ -471,10 +485,12 @@ def snapshot(conf, sample=False, host=None):
     agent_processes(states)
     summary = wq.summary(conf)
     records = t.Queue(conf).load().get("tasks", [])
+    eligible = eligibility(conf, states)
     return {
         "project": conf.name, "milestone": t.Queue(conf).milestone(), "time": datetime.now(timezone.utc).isoformat(),
         "host": host if host is not None else host_state(), "agents": states, "workers": other_workers(conf, states),
-        "eligible": eligibility(conf, states), "pools": pool_states(conf), "gateway": gateway_health(),
+        "eligible": eligible, "gated": capability_gated(conf, states, eligible), "pools": pool_states(conf),
+        "gateway": gateway_health(),
         "queue": {k: [x["id"] for x in v] for k, v in summary.items()},
         "rooms": {x["id"]: x.get("room") for v in summary.values() for x in v},
         "profiles": {x["id"]: x["profile"] for v in summary.values() for x in v if x.get("profile")},
@@ -482,6 +498,7 @@ def snapshot(conf, sample=False, host=None):
         "times": task_times(conf),
         "capacity": {k: list(v) for k, v in t.capacity_use(conf).items()},
         "priorities": {x["id"]: int(x.get("priority") or 0) for x in records if x.get("priority")},
+        "capabilities": {x["id"]: int(x.get("minCapability") or 0) for x in records if x.get("minCapability")},
         "tasks": {x["id"]: x for x in records},
         "paused": wq.paused(conf), "git": git_state(conf), "verification": verification_state(conf),
         "events": merge_resets(wq.events(conf, 200)),
@@ -670,6 +687,8 @@ def waiting_reason(state, key, task_id):
         return "paused", "queue paused"
     allowed = state.get("eligible", {}).get(task_id, [])
     if not allowed:
+        if state.get("gated", {}).get(task_id):
+            return "none", f"needs capability >= {state['gated'][task_id]}"
         if state.get("profiles", {}).get(task_id):
             return "none", f"needs profile {state['profiles'][task_id]}"
         room = state["rooms"].get(task_id)

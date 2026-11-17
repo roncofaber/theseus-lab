@@ -86,6 +86,46 @@ class QueueTests(Sandbox):
                          [(s["state"], s["task"]) for s in samples])
         self.assertEqual(("first-task", "worker-a", "delivered"), (delivery["task"], delivery["agent"], delivery["result"]))
 
+    def test_a_minimum_capability_limits_which_agents_take_it(self):
+        (self.tmp / "config.toml").write_text('[workers.strong]\npreset = "claude-code"\ncapability = 3\n'
+                                              '[workers.strong-mcp]\npreset = "claude-code"\ncapability = 3\n'
+                                              'mcp_servers = ["theseus"]\n[workers.with-mcp]\npreset = "claude-code"\n'
+                                              'mcp_servers = ["theseus"]\n')
+        self.theseus("tasks", "add", "hard-task", "--role", "research", "--owned", "docs/investigations/hard-task.md",
+                     "--objective", "Do it.", "--contract", "All variants.", "--accept", "Done.", "--min-capability", "2")
+        self.git("commit", "-q", "-am", "queue hard-task")
+        self.assertEqual(2, json.loads(self.theseus("tasks", "show", "hard-task").stdout)["minCapability"])
+        self.assertNotIn("assigned", self.theseus("queue", "tick").stdout, "capability 1 is below the minimum")
+        self.assertIn("needs capability >= 2", " ".join(self.theseus("top", "--once").stdout.split()))
+        snapshot = json.loads(self.theseus("top", "--json").stdout)
+        self.assertEqual({"hard-task": 2}, snapshot["gated"])
+        self.theseus("agents", "add", "worker-b", "%2", "--profile", "strong")
+        self.assertRegex(self.theseus("queue", "tick").stdout, r"assigned\s+worker-b\s+hard-task")
+        self.theseus("tasks", "release", "hard-task", "--reason", "test")
+        self.theseus("tasks", "capability", "hard-task", "0")
+        self.assertNotIn("minCapability", json.loads(self.theseus("tasks", "show", "hard-task").stdout))
+        from theseus import config as cfg, profiles
+        from theseus import workqueue as wq
+        conf = cfg.load(root=self.project)
+        self.assertEqual((1, 3, 0), (profiles.capability(conf, "claude-code"), profiles.capability(conf, "strong"),
+                                     profiles.capability(conf, "nope")))
+        weak, strong = {"name": "weak", "provider": "claude-code"}, {"name": "strong", "provider": "strong"}
+        cases = [({"minCapability": 2}, weak, False), ({"minCapability": 2}, strong, True),
+                 ({"minCapability": 5, "profile": "claude-code"}, weak, True),
+                 ({"minCapability": 2, "profile": "with-mcp"}, strong, False),
+                 ({"minCapability": 2, "profile": "strong-mcp"}, strong, True),
+                 ({"minCapability": 2, "profile": "strong-mcp"}, weak, False)]
+        for task, agent, expected in cases:
+            self.assertEqual(expected, wq.fits(conf, agent, {"id": "x", **task}, {})[0], (task, agent["name"]))
+        self.assertTrue(wq.fits(conf, weak, {"id": "x", "minCapability": 2}, {}, gate=False)[0])
+        self.assertTrue(profiles.relaunch_compatible(conf, "claude-code", "strong-mcp"), "capability is not a launch key")
+        self.assertIn("capability must be a non-negative integer", " ".join(profiles.problems("x", {"capability": "high"})))
+        from theseus.tui import commands
+        state = {"agents": [], "queue": {"ready": ["hard-task"]}, "capabilities": {"hard-task": 2}, "project": "demo-port"}
+        titles = [title for title, *_ in commands.project_commands({"snapshot": state})]
+        self.assertIn("Raise the minimum capability of hard-task (2 to 3)", titles)
+        self.assertIn("Lower the minimum capability of hard-task (2 to 1)", titles)
+
     def test_wait_returns_when_a_delivery_needs_the_coordinator(self):
         self.add("watched-task")
         self.theseus("queue", "tick")

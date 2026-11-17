@@ -555,9 +555,9 @@ def project_status(state):
     return line
 
 
-TASK_FIELDS = ("id", "status", "role", "room", "priority", "profile", "owner", "dependencies", "ownedPaths")
+TASK_FIELDS = ("id", "status", "role", "room", "priority", "profile", "minCapability", "owner", "dependencies", "ownedPaths")
 TASK_TEXTS = (("objective", "objective"), ("generalContract", "contract"), ("acceptance", "acceptance"))
-TASK_LABELS = {"ownedPaths": "owned paths", "dependencies": "depends on"}
+TASK_LABELS = {"ownedPaths": "owned paths", "dependencies": "depends on", "minCapability": "min capability"}
 TASK_STATUS = {"pending": "YELLOW", "in_progress": "GREEN", "completed": "CYAN", "released": "MAGENTA", "failed": "RED",
                "blocked": "RED"}
 

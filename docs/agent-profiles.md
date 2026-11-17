@@ -88,6 +88,7 @@ A project section with the same name as a host profile overrides only the keys i
 | `env` | Extra environment for the run; `{model}` is substituted |
 | `retry` | Resume automatically after a retryable gateway error (Claude JSON output with status 429, 5xx or 529) |
 | `capacity` | Concurrent active tasks under this profile |
+| `capability` | An integer rank of what the profile's agents can handle (default 1); a task with a higher minimum capability never goes to them (see [Capability](#capability)) |
 | `extra_args` | Arguments appended to the headless run, the resume and the persistent-instance launch, after the MCP flags. Placeholders are filled as in the templates and a leading `~` is expanded, for example `["--settings", "~/.config/theseus/worker-settings.json"]` to give workers their own client settings file |
 | `mcp_servers` | MCP servers the agent starts with, and only those (`--strict-mcp-config --mcp-config <data>/mcp/<profile>.json`, from `mcp_flags`); each is copied from your Claude Code configuration, and `theseus` is the theseus server. Unset: the client's own servers |
 | `pool` | A host-wide pool shared with other projects (see [Configuration](configuration.md#sharing-agents-between-projects)) |
@@ -142,9 +143,22 @@ env = { CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS = "10000" }
 
 A task can require a profile: `theseus tasks add ID ... --profile NAME`, or `theseus tasks profile ID NAME` later (`theseus tasks profile ID` with no name clears it; no profile means any agent). The queue gives such a task only to:
 - an agent registered with that profile;
-- an agent whose registered profile differs from it only in `mcp_servers`, `env` or `interactive.env` (same command, pool, model, templates and `extra_args`; `capacity` may differ). Before the task the queue restarts that agent's pane with the task profile's launch line, resuming its session, then compacts or clears it as usual, and records a `relaunched` event.
+- an agent whose registered profile differs from it only in `mcp_servers`, `env` or `interactive.env` (same command, pool, model, templates and `extra_args`; `capacity` and `capability` may differ). Before the task the queue restarts that agent's pane with the task profile's launch line, resuming its session, then compacts or clears it as usual, and records a `relaunched` event.
 
 The profile an agent currently runs is kept in the queue's runtime state, and the agent is switched back to its registered profile (another `relaunched` event) before its next task that does not require the special one. `theseus instance restart PANE` keeps whichever profile the agent currently runs. The task's assignment still records the agent's registered profile, so capacity counts it there. When no registered agent can take a task, the dashboard's waiting list says `needs profile NAME`.
+
+## Capability
+
+`capability` ranks profiles by what their agents can handle, for example a stronger model above a cheaper one. It is an integer set in the host config (default 1; the package sets no other value, and the numbers mean only what you decide):
+
+```toml
+[workers.strong]
+preset = "claude-code"
+model = "provider/large-model"
+capability = 3
+```
+
+A task can ask for a minimum: `theseus tasks add ID ... --min-capability N`, `theseus tasks capability ID N` later (0 removes it), or the console's actions (Ctrl+P, "Raise/Lower the minimum capability"). The queue then gives the task only to an agent whose registered profile has at least that capability. Exact profile routing wins: an agent registered with the task's `--profile` takes it whatever the numbers say. An agent relaunched onto a compatible task profile (above) must meet the minimum with both its registered profile and the task profile; `capability` itself never decides whether two profiles are relaunch compatible. When the minimum is the only thing that keeps every agent from a task, the console's WAITING reason says `needs capability >= N`. Capability works the same for every preset.
 
 ### Example: an MCP server only for the tasks that need it
 

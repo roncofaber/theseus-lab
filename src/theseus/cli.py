@@ -211,7 +211,7 @@ def cmd_tasks(args):
     action = args.task_action
     if action == "add":
         emit(t.add(queue, args.id, args.role, args.owned, args.objective, args.contract, args.accept, args.depends, args.milestone,
-                   args.room, args.priority, args.profile))
+                   args.room, args.priority, args.profile, args.min_capability))
     elif action == "list":
         emit(t.list_tasks(queue, args.status, args.all, args.evidence))
     elif action == "ready":
@@ -236,6 +236,8 @@ def cmd_tasks(args):
         emit(t.set_priority(queue, args.id, args.value))
     elif action == "profile":
         emit(t.set_profile(queue, args.id, args.profile))
+    elif action == "capability":
+        emit(t.set_min_capability(queue, args.id, args.level))
     elif action in ("hold", "release-hold"):
         emit(t.hold(queue, args.id, action == "hold"))
     elif action == "reopen":
@@ -919,6 +921,8 @@ def build_parser():
     p.add_argument("--room", choices=("clean", "dirty"), help="clean-room separation (see [rooms] in theseus.toml)")
     p.add_argument("--priority", type=int, default=0, help="higher is assigned first among ready tasks (default 0)")
     p.add_argument("--profile", help="agent profile the task needs (default: any); see theseus tasks profile")
+    p.add_argument("--min-capability", type=int, default=0, metavar="N",
+                   help="lowest profile capability that may take the task (default 0: any); see theseus tasks capability")
     p = ts.add_parser("list", help="one line per task with readiness or blocking reasons")
     p.add_argument("--status", choices=("pending", "in_progress", "verification", "merged", "completed"))
     p.add_argument("--all", action="store_true", help="include archived tasks")
@@ -952,6 +956,10 @@ def build_parser():
                                       "profile differs only in MCP servers or env are relaunched onto it first; no NAME: any")
     p.add_argument("id")
     p.add_argument("profile", nargs="?", default="")
+    p = ts.add_parser("capability", help="set the lowest profile capability ([workers.NAME] capability, default 1) an "
+                                         "agent needs to take a task; 0: any")
+    p.add_argument("id")
+    p.add_argument("level", type=int)
     p = ts.add_parser("note", help="set the coordinator note carried in the task message")
     p.add_argument("id")
     p.add_argument("text")

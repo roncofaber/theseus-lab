@@ -178,7 +178,7 @@ def check_profile(queue, profile):
 
 
 def add(queue, task_id, role, owned, objective, contract, accept, depends=(), milestone=None, room=None, priority=0,
-        profile=None):
+        profile=None, min_capability=0):
     if not TASK_ID.fullmatch(task_id):
         raise TaskError(f"{task_id} is not a kebab-case task id")
     known = queue.index()
@@ -217,6 +217,10 @@ def add(queue, task_id, role, owned, objective, contract, accept, depends=(), mi
     if profile:
         check_profile(queue, profile)
         record["profile"] = profile
+    if int(min_capability or 0) < 0:
+        raise TaskError("--min-capability must be 0 or more")
+    if min_capability:
+        record["minCapability"] = int(min_capability)
     size = record_size(record)
     if size > TASK_RECORD_LIMIT:
         raise TaskError(f"record is {size} bytes; the limit is {TASK_RECORD_LIMIT}")
@@ -690,6 +694,21 @@ def set_profile(queue, task_id, profile):
         task.pop("profile", None)
     queue.save(document)
     return f"{task_id}: {f'needs profile {profile}' if profile else 'any profile'}"
+
+
+def set_min_capability(queue, task_id, level):
+    """The lowest profile capability an agent needs to take the task ([workers.<name>] capability); 0 removes it."""
+    level = int(level)
+    if level < 0:
+        raise TaskError("the minimum capability must be 0 or more")
+    document = queue.load()
+    task = queue.open_task(document, task_id)
+    if level:
+        task["minCapability"] = level
+    else:
+        task.pop("minCapability", None)
+    queue.save(document)
+    return f"{task_id}: {f'needs capability >= {level}' if level else 'any capability'}"
 
 
 def hold(queue, task_id, held):

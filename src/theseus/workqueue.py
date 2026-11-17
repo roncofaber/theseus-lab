@@ -12,6 +12,8 @@ A tick looks at every registered agent and acts on its state:
 - free (enabled, no open task, its gateway pool not paused): if a ready task fits its room, the agent is reset (a full
   /clear when it carries dirty context into clean work, a /compact otherwise), the task is assigned on a fresh
   worktree, and its message is sent.
+A task with "minCapability" goes only to agents whose profile capability ([workers.<name>] capability, default 1) is at
+least that, unless they are registered with exactly the task's profile.
 A task with a "profile" goes only to agents registered with that profile, or to agents whose profile differs from it only in
 MCP servers or environment: those are relaunched onto it in their pane first (session resumed, a `relaunched` event),
 and back onto their registered profile before their next task that does not need it. The profile an agent currently
@@ -116,12 +118,20 @@ def run_script(conf, name, args, agent=None, profile=None):
     return subprocess.run(["bash", script(name), *args], cwd=conf.root, env=env, capture_output=True, text=True)
 
 
-def fits(conf, agent, task, info):
-    """Whether this agent may take this task now, and the reset it needs first (None, 'compact' or 'clear')."""
+def fits(conf, agent, task, info, gate=True):
+    """Whether this agent may take this task now, and the reset it needs first (None, 'compact' or 'clear'). A task's
+    minCapability is met by the agent's registered profile and, when the task names another profile it is relaunched
+    onto, by that profile too; an agent registered with exactly the task's profile always qualifies. gate=False skips
+    the capability check (the console uses it to name capability as the reason a task waits)."""
     from . import profiles
     required = task.get("profile")
-    if required and not profiles.relaunch_compatible(conf, registered_profile(conf, agent), required):
+    registered = registered_profile(conf, agent)
+    if required and not profiles.relaunch_compatible(conf, registered, required):
         return False, None
+    need = int(task.get("minCapability") or 0)
+    if gate and need and required != registered:
+        if min(profiles.capability(conf, registered), profiles.capability(conf, required or registered)) < need:
+            return False, None
     allowed = agent.get("rooms")
     room = task.get("room")
     if allowed and room and room not in allowed:
