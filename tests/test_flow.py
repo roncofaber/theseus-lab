@@ -166,6 +166,15 @@ class TaskFlowTests(Sandbox):
         self.assertNotEqual(0, self.git("cat-file", "-e", "HEAD:src/capture/old.py", check=False).returncode)
         self.theseus("tasks", "complete", TASK, "--summary", "moved", "--check", "manual", "--log", str(worktree / ".theseus/handoff.md"))
 
+    def test_a_released_task_can_retire_its_old_worktree(self):
+        self.add_task()
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        worktree = self.tmp / "worktrees/worker-1-a"
+        self.theseus("tasks", "release", TASK, "--reason", "contract revised")
+        self.theseus("tasks", "retire", TASK, "--force")
+        self.assertFalse(worktree.exists())
+        self.assertNotIn("work/worker-1-a", self.git("branch", "--list", "work/*").stdout)
+
     def test_worker_commit_and_outside_paths_are_refused(self):
         self.add_task()
         self.theseus("instance", "assign", TASK, "worker-1", "a")

@@ -512,6 +512,11 @@ def outside_consumers(queue, task):
 def retire(queue, task_id, force=False):
     task = queue.get(task_id)
     worktree = task.get("worktree")
+    released = False
+    if not worktree and task["status"] == "pending":
+        # A released task keeps its old worktree in previousAttempts; it would block the next assignment's worktree.
+        worktree = next((a.get("worktree") for a in reversed(task.get("previousAttempts") or []) if a.get("worktree")), None)
+        released = True
     if not worktree or not Path(worktree).is_dir():
         raise TaskError(f"{task_id} has no live worktree")
     missing = unintegrated_files(worktree, queue.root, (task.get("merge") or {}).get("commit") or "HEAD")
@@ -525,7 +530,7 @@ def retire(queue, task_id, force=False):
                             capture_output=True, text=True).stdout.strip()
     subprocess.run(["git", "-C", str(queue.root), "worktree", "remove", "--force", str(worktree)], check=True)
     note = ""
-    if branch.startswith("work/") and task["status"] in SATISFIES_DEPENDENCY:
+    if branch.startswith("work/") and (task["status"] in SATISFIES_DEPENDENCY or released):
         subprocess.run(["git", "-C", str(queue.root), "branch", "-D", branch], capture_output=True)
         note = f", deleted branch {branch}"
     return f"archived {worktree}/{cfg.WORKER_LOG} to {target} and removed the worktree{note}"
