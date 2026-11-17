@@ -26,8 +26,9 @@ HOST_TAB = "tab-host"
 HISTORY_SAMPLES = 720
 MOUSE_HELP = (("click a row", "highlight it (click elsewhere or Escape clears the highlight)"),
               ("double-click a row", "open its details (agents: with a live mirror of the tmux pane)"),
+              ("double-click PROJECT", "open the coordinator's mirror and send line"),
               ("click an EVENTS header", "sort by that column; click again to reverse"),
-              ("click a project card", "open the project's tab"),
+              ("double-click a project row", "open the project's tab"),
               ("click outside a popup", "close the popup"),
               ("wheel", "scroll the section under the pointer"))
 TABLE_HELP = (("up, down", "highlight a row (the first press shows the highlight)"),
@@ -63,14 +64,19 @@ def fill(table, rows):
     for key in present - set(wanted):
         table.remove_row(key)
     columns = list(table.columns)
+    shown = getattr(table, "shown_rows", None)
     for key, cells, _ in rows:
         if key in present:
+            if shown is not None and shown.get(key) is cells:
+                continue
             for column, before, after in zip(columns, table.get_row(key), cells):
                 if not same(before, after):
                     resized = not isinstance(before, Text) or not isinstance(after, Text) or before.cell_len != after.cell_len
                     table.update_cell(key, column, after, update_width=resized)
         else:
             table.add_row(*cells, key=key)
+    if shown is not None:
+        table.shown_rows = {key: cells for key, cells, _ in rows}
     if [row.key.value for row in table.ordered_rows] != wanted:
         position = {id(table.get_row(key)[0]): index for index, key in enumerate(wanted)}
         table.sort(key=lambda values: position[id(values[0])])
@@ -94,6 +100,7 @@ class Table(DataTable):
         self.fitted = {}
         self.full = []
         self.clipped = {}
+        self.shown_rows = {}
         for name in columns:
             self.add_column(self.label(name), key=name)
 
@@ -120,6 +127,7 @@ class Table(DataTable):
             return
         if visible != self.shown_columns:
             self.shown_columns = visible
+            self.shown_rows = {}
             self.clear(columns=True)
             for name in visible:
                 self.add_column(self.label(name), key=name)

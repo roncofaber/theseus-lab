@@ -508,7 +508,7 @@ class TopPolishTests(DashboardBase):
             body = self.app.screen.text()
             for binding in TopApp.BINDINGS:
                 self.assertIn(binding.tooltip or binding.description, body)
-            for words in ("double-click", "click an EVENTS header", "Open tmux pane", "of system RAM", "tmux is only needed"):
+            for words in ("double-click", "click an EVENTS header", "Open tmux pane", "of system RAM", "Actions (Ctrl+P)", "C-q detaches"):
                 self.assertIn(words, body)
             conf = cfg.load(root=self.project)
             await pilot.press("p", "r", "1")

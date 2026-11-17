@@ -431,13 +431,27 @@ def status_entries(conf, profile_name):
     return entries
 
 
+_process_cache = {}
+
+
+def process_table(ttl=1.0):
+    """top.process_table(), reused for a second: one status pass looks up several agents."""
+    from . import top
+    cached = _process_cache.get("table")
+    if cached and time.monotonic() - cached[0] < ttl:
+        return cached[1]
+    table = top.process_table()
+    _process_cache["table"] = (time.monotonic(), table)
+    return table
+
+
 def status_of(conf, profile_name, pane_pid):
     """The status entry of the agent whose pid is pane_pid or one of its descendants, or None."""
     entries = status_entries(conf, profile_name)
     if not entries or not pane_pid:
         return None
     from . import top
-    table = top.process_table()
+    table = process_table()
     tree = set(top.descendants(table, int(pane_pid))) | {int(pane_pid)}
     return next((e for e in entries if isinstance(e, dict) and e.get("pid") in tree), None)
 
