@@ -211,8 +211,6 @@ def touch_project(conn, name):
     conn.execute("INSERT OR IGNORE INTO projects (name) VALUES (?)", (name,))
 
 
-# Projects and coordinator sessions
-
 def upsert_project(conn, name, root=None, data=None, coordinator=None, seen=None):
     """Record a project and mark it seen now; a field passed as None keeps its stored value."""
     text, epoch = stamp(seen)
@@ -272,8 +270,6 @@ def sessions(conn, project=None, active=None):
     return [dict(row) for row in conn.execute(sql + " ORDER BY started_epoch, id", args)]
 
 
-# Agents
-
 def agent_row(row):
     record = dict(row)
     record["rooms"] = json.loads(record["rooms"]) if record["rooms"] else None
@@ -308,8 +304,6 @@ def remove_agent(conn, project, name):
     with transaction(conn):
         return conn.execute("DELETE FROM agents WHERE project = ? AND name = ?", (project, name)).rowcount == 1
 
-
-# Events
 
 EVENT_COLUMNS = "id, project, time, epoch, kind, agent, task, detail"
 
@@ -370,8 +364,6 @@ def event_bins(conn, project, since, bin_seconds, kinds=None, until=None):
     totals = {row[0]: row[1] for row in rows}
     return [(start + n * width, totals.get(n, 0)) for n in range(count)]
 
-
-# Pools: the same rules as pools.py (claims, priority yielding, expiry), with every check-and-write in one transaction.
 
 def pool_spec(pool, spec):
     if spec is None:
@@ -507,8 +499,6 @@ def status(conn, pool, spec=None):
             "claims": sorted(claims), "leases": leases}
 
 
-# Deliveries and samples
-
 def add_delivery(conn, project, task, agent=None, handoff=None, result=None, at=None, origin=None):
     text, epoch = stamp(at)
     with transaction(conn):
@@ -548,8 +538,6 @@ def samples(conn, project=None, agent=None, since=None, until=None):
     return [dict(row) for row in conn.execute(sql, args)]
 
 
-# Read-only task index (tasks.json in the project's repository stays the source of truth)
-
 def task_updated(task):
     execution = task.get("execution") or {}
     stamps = [task.get("createdAt"), execution.get("assignedAt"), execution.get("deliveredAt"),
@@ -580,8 +568,6 @@ def task_index(conn, project=None, status=None):
         args.append(status)
     return [dict(row) for row in conn.execute(sql + " ORDER BY project, id", args)]
 
-
-# Import of the JSON state files, for the migration. Each importer can run any number of times.
 
 DELIVERY_KINDS = ("delivered", "partial", "blocked")
 
