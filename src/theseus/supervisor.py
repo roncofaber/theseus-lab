@@ -34,6 +34,7 @@ from . import tmux as tm
 ENV_ALLOW = ("HOME", "USER", "LOGNAME", "SHELL", "PATH", "LANG", "TMPDIR", "TMUX_TMPDIR")
 ENV_ALLOW_PREFIX = ("LC_", "XDG_", "THESEUS_")
 RESUME_MODES = ("task", "always", "never")
+RESET_INTENTS = ("start", "restart", "migrate")
 STATUS_TTL = 2.0
 _status_cache = {}
 
@@ -168,8 +169,19 @@ def template(conf):
 
 
 def counts(conf):
-    raw = section(conf).get("counts") or {}
-    return {str(k): int(v) for k, v in raw.items()}
+    """[agents.counts] of the project's own files, or the host's [defaults] agents.counts when they set none: the
+    host value is a fallback, never merged into a project's counts."""
+    own = {}
+    found = False
+    for label, _, data in conf.layers:
+        if label in ("project", "project-local", "env"):
+            present, value = cfg.lookup(data, "agents.counts")
+            if present and isinstance(value, dict):
+                own.update(value)
+                found = True
+    if not found:
+        own = section(conf).get("counts") or {}
+    return {str(k): int(v) for k, v in own.items()}
 
 
 def desired(conf):
@@ -555,8 +567,9 @@ def crash_history(conf, name, now=None):
     now = time.time() if now is None else now
     window = float(settings()["restart"]["window_minutes"]) * 60
     with store.for_project(conf) as conn:
-        rows = [r for r in store.runs(conn, conf.name, name, since=now - window)
-                if r.get("stop_reason") in ("crash", "exit") and r.get("ended_epoch")]
+        recent = store.runs(conn, conf.name, name, since=now - window)
+        reset = max([r["gen"] for r in recent if r["intent"] in RESET_INTENTS] or [0])
+        rows = [r for r in recent if r["gen"] >= reset and r.get("stop_reason") in ("crash", "exit") and r.get("ended_epoch")]
     if not rows:
         return 0, None, 0
     return len(rows), max(r["ended_epoch"] for r in rows), sum(1 for r in rows if r["stop_reason"] == "exit")
@@ -723,9 +736,10 @@ def reconcile_one(conf, srv, slot, rec, wait, dry_run, reset, names, lost, runni
         session = resume_session(conf, name, "crash") if rec and rec.get("managed") else None
         if dry_run:
             return ("would restart" if rec and rec.get("managed") else "would start"), (f"resume {session}" if session else "fresh")
-        intent = "resume" if name in lost and session else ("restart" if rec and rec.get("managed") else "start")
-        if rec and rec.get("managed") and not session:
-            intent = "fresh" if rec.get("session_id") else "start"
+        if not (rec and rec.get("managed")):
+            intent = "start"
+        else:
+            intent = "restart" if reset else ("resume" if session else "fresh")
         from . import workqueue
         spawn(conf, slot, intent=intent, session=session, srv=srv,
               profile=workqueue.launched(conf, agent_entry(rec)) if rec else None)
@@ -759,7 +773,7 @@ def reconcile_one(conf, srv, slot, rec, wait, dry_run, reset, names, lost, runni
         session = resume_session(conf, name, "crash")
         if dry_run:
             return "would restart", f"resume {session}" if session else "fresh"
-        intent = "resume" if session else "fresh"
+        intent = "restart" if reset else ("resume" if session else "fresh")
         spawn(conf, {**slot, "profile": rec.get("profile") or slot["profile"]}, intent=intent, session=session, srv=srv,
               profile=run.get("profile"))
         if not session:
@@ -777,6 +791,10 @@ def reconcile_one(conf, srv, slot, rec, wait, dry_run, reset, names, lost, runni
             phase, detail = wait_ready(conf, name)
         else:
             phase, detail = observe(conf, rec, info, srv)
+            limit = float(settings().get("ready_seconds") or 90)
+            started = (last_run(conf, name) or {}).get("started_epoch") or time.time()
+            if phase == "starting" and time.time() - started > limit:
+                phase, detail = "timeout", f"not ready after {limit:g}s"
         label = settle(conf, rec, phase, detail, wait)
         if label and label != "ready":
             return label, detail
@@ -881,6 +899,16 @@ def kill_pane(srv, rec):
             return
 
 
+def at_prompt(conf, rec, info):
+    """Whether typing the exit command reaches the agent's prompt: it is ready and its CLI does not say it waits for
+    an answer. A startup dialog or a permission prompt would take the keystrokes as an answer, so those are killed."""
+    from . import workqueue
+    if (record(conf, rec["name"]) or rec).get("phase") != "ready":
+        return False
+    entry = status_of(conf, workqueue.launched(conf, rec), info.get("pane_pid"))
+    return not (entry and entry.get("status") == "waiting")
+
+
 def plan_stop(conf, name, reason):
     run = last_run(conf, name)
     if run and not run.get("ended"):
@@ -898,6 +926,8 @@ def stop(conf, rec, graceful=True, wait=True, reason="down", idle_timeout=180):
     if info is None:
         return True, "not running"
     plan_stop(conf, name, reason)
+    if graceful and not at_prompt(conf, rec, info):
+        graceful = False
     if info.get("pane_dead") != "1" and graceful:
         if wait and not wait_idle(conf, rec, idle_timeout, poll=float(os.environ.get("THESEUS_STOP_POLL") or 5)):
             return False, f"still busy after {idle_timeout}s"
@@ -958,7 +988,7 @@ def restart(conf, name, fresh=False, intent="restart", profile=None, wait=True, 
         ok, detail = stop(conf, rec, graceful=graceful, reason="relaunch" if intent == "relaunch" else "restart")
         if not ok:
             return False, detail
-    spawn(conf, slot, intent=intent if session else "fresh", session=session, profile=profile, srv=srv)
+    spawn(conf, slot, intent=intent, session=session, profile=profile, srv=srv)
     if not wait:
         return True, "started"
     phase, detail = wait_ready(conf, name)
@@ -1041,14 +1071,16 @@ def migrate(conf, names=None, with_task=False, timeout=60):
         if agents.pane_alive(pane):
             pid = legacy.display(pane, "#{pane_pid}")
             entry = status_of(conf, workqueue.launched(conf, rec), pid) if pid and pid.isdigit() else None
-            session = entry.get("sessionId") if entry else legacy_session(conf, rec, pid)
+            if entry:
+                session, agent_pid = entry.get("sessionId"), entry.get("pid")
+            else:
+                session, agent_pid = legacy_session(conf, rec, pid)
             if agents.pane_busy(conf, pane, workqueue.launched(conf, rec)):
                 results.append((name, "deferred", "busy; migrate it once idle"))
                 continue
-            if entry is None and session is None:
+            if session is None or agent_pid is None:
                 results.append((name, "skipped", f"no agent session found in pane {pane}"))
                 continue
-            agent_pid = entry.get("pid") if entry else None
             exit_text = profiles.interactive(conf, workqueue.launched(conf, rec)).get("exit") or "/exit"
             legacy.run("send-keys", "-t", pane, "-l", exit_text)
             time.sleep(0.3)
@@ -1071,20 +1103,21 @@ def migrate(conf, names=None, with_task=False, timeout=60):
 
 
 def legacy_session(conf, rec, pane_pid):
-    """The session id from the Claude Code session record of the pane shell's child, the pre-supervisor way."""
+    """(session id, agent pid) from the Claude Code session record of a process in the pane, the pre-supervisor way;
+    (None, None) when there is none."""
     from . import workqueue
     folder = os.path.expanduser(profiles.interactive(conf, workqueue.launched(conf, rec)).get("sessions_dir") or "")
     if not folder or not pane_pid or not pane_pid.isdigit():
-        return None
+        return None, None
     from . import top
     for pid in top.descendants(top.process_table(), int(pane_pid)):
         path = Path(folder) / f"{pid}.json"
         if path.is_file():
             try:
-                return json.loads(path.read_text()).get("sessionId")
+                return json.loads(path.read_text()).get("sessionId"), pid
             except ValueError:
-                return None
-    return None
+                return None, None
+    return None, None
 
 
 def pid_alive(pid):

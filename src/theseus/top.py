@@ -25,7 +25,8 @@ R, B, DIM = "\033[0m", "\033[1m", "\033[2m"
 RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN = (f"\033[{c}m" for c in (31, 32, 33, 34, 35, 36))
 ANSI = re.compile(r"\033\[[0-9;]*m")
 STATE_COLOR = {"working": GREEN, "quiet": YELLOW, "busy": CYAN, "free": YELLOW, "delivered": MAGENTA, "stalled": RED, "offline": RED,
-               "disabled": DIM, "thrashing": RED, "gateway_error": RED}
+               "disabled": DIM, "thrashing": RED, "gateway_error": RED, "starting": CYAN, "blocked": RED, "failed": RED,
+               "waiting": RED}
 KIND_COLOR = {"relaunched": YELLOW, "delivered": MAGENTA, "partial": YELLOW, "blocked": BLUE, "stalled": RED, "error": RED, "assigned": GREEN,
               "nudged": YELLOW, "compacted": BLUE, "cleared": CYAN, "merged": CYAN, "completed": GREEN,
               "reopened": YELLOW, "released": YELLOW, "gateway_error": RED, "resent": YELLOW, "send_failed": RED,
@@ -480,7 +481,7 @@ class Frame:
 def issues(state):
     found = []
     for agent in state["agents"]:
-        if agent["state"] in ("stalled", "offline"):
+        if agent["state"] in ("stalled", "offline", "blocked", "failed", "waiting"):
             found.append(f"{RED}●{R} {agent['name']} is {agent['state']}")
     for entry in state.get("gateway") or []:
         if entry.get("pausedUntil"):

@@ -34,7 +34,8 @@ case "$mode" in
     trust)
         echo "Quick safety check: Is this a project you created or one you trust?"
         echo " > 1. Yes, I trust this folder"
-        exec sleep 600 ;;
+        while IFS= read -r answer; do echo "answer $name: $answer" >> "$FAKE_STATE/agent.log"; done
+        exit 0 ;;
     crash) echo "fake agent $name crashing"; sleep 0.3; exit 3 ;;
     exit-clean) exit 0 ;;
     resume-missing)
@@ -48,6 +49,7 @@ while true; do
     case "$line" in
         /exit) echo bye; exit 0 ;;
         /*) echo "ran $line" ;;
+        *thrash*) echo "Autocompact is thrashing: the context refills right after compacting" ;;
         *)
             echo "working (esc to interrupt)"
             log=$(printf '%s' "$line" | sed -n 's/.*Log directory (handoff.md, changed.sha256): \([^ ]*\)\. .*/\1/p')
@@ -57,6 +59,33 @@ while true; do
             echo "done" ;;
     esac
 done
+"""
+
+FAKE_STATUS = r"""#!/usr/bin/env python3
+# A stand-in for `claude agents --json`: one entry per running fake agent, with status, waitingFor and sessionId
+# overridable through $FAKE_STATE/{status,waiting,session,hidden}-<name>.
+import glob, json, os
+state = os.environ["FAKE_STATE"]
+found = []
+for folder in glob.glob("/proc/[0-9]*"):
+    try:
+        args = [a.decode(errors="replace") for a in open(folder + "/cmdline", "rb").read().split(b"\0") if a]
+    except OSError:
+        continue
+    if len(args) < 2 or not args[1].endswith("fake-agent"):
+        continue
+    rest = args[2:]
+    def arg(flag):
+        return rest[rest.index(flag) + 1] if flag in rest else ""
+    name = arg("--name")
+    def read(key, default=None):
+        path = os.path.join(state, f"{key}-{name}")
+        return open(path).read().strip() if os.path.exists(path) else default
+    if read("hidden"):
+        continue
+    found.append({"pid": int(folder[6:]), "name": name, "sessionId": read("session", arg("--session-id") or arg("--resume")),
+                  "status": read("status", "idle"), "waitingFor": read("waiting")})
+print(json.dumps(found))
 """
 
 WRAPPER = """#!/usr/bin/env bash
@@ -106,6 +135,8 @@ class SupervisorTests(Sandbox):
         bin_dir.mkdir()
         (bin_dir / "fake-agent").write_text(FAKE_AGENT)
         (bin_dir / "fake-agent").chmod(0o755)
+        (bin_dir / "fake-status").write_text(FAKE_STATUS)
+        (bin_dir / "fake-status").chmod(0o755)
         (bin_dir / "tmux").write_text(WRAPPER.format(real=REAL_TMUX))
         (bin_dir / "tmux").chmod(0o755)
         legacy = short_dir() / "u"
@@ -223,8 +254,10 @@ class SupervisorTests(Sandbox):
         out = self.up("demo-fake-1").stdout
         self.assertRegex(out, r"demo-fake-1\s+started\s+fresh session; blocked")
         self.assertTrue(any("startup dialog" in e["detail"] for e in self.events("error")))
-        self.assertNotIn("input demo-fake-1", self.log())
+        self.assertNotIn("answer demo-fake-1", self.log())
         self.assertRegex(self.theseus("agents").stdout, r"demo-fake-1\s+\S+\s+blocked")
+        self.assertRegex(self.theseus("agents", "down", "demo-fake-1", timeout=60).stdout, r"demo-fake-1\s+stopped")
+        self.assertNotIn("answer demo-fake-1", self.log())
 
     def test_config_drift_is_reported_not_applied(self):
         self.up()
@@ -268,6 +301,72 @@ class SupervisorTests(Sandbox):
         self.assertRegex(out, r"demo-fake-2\s+restarted\s+fresh session")
         self.assertIn(f"resume={first}", self.log().splitlines()[-1] + self.log())
         self.assertEqual("server-lost", self.runs("demo-fake-1")[1]["stop_reason"])
+
+    def use_status(self):
+        self.replace_config("status_command = []", 'status_command = ["fake-status"]')
+        self.git("commit", "-q", "-am", "status command")
+
+    def assign(self, task_id, agent="demo-fake-1"):
+        self.add_task(task_id)
+        from theseus import integrate
+        integrate.assign(self.conf(), task_id, f"{agent}-{task_id}", "fake", "persistent-instance",
+                         owner=f"fake:{agent}:{agent}-{task_id}", instance=agent)
+
+    def test_the_status_command_marks_ready_and_its_session_changes_are_stored(self):
+        self.use_status()
+        self.assertRegex(self.up().stdout, r"demo-fake-1\s+started\s+fresh session; ready")
+        fresh = "99999999-8888-7777-6666-555555555555"
+        (self.state / "session-demo-fake-1").write_text(fresh)
+        self.theseus("queue", "tick", "--no-assign", timeout=60)
+        self.assertEqual(fresh, self.record("demo-fake-1")["session_id"])
+
+    def test_an_agent_missing_from_the_status_list_times_out_as_blocked(self):
+        self.use_status()
+        (self.tmp / "config.toml").write_text(HOST.replace("ready_seconds = 15", "ready_seconds = 2"))
+        (self.state / "hidden-demo-fake-1").write_text("1")
+        self.assertRegex(self.up("demo-fake-1").stdout, r"demo-fake-1\s+started\s+fresh session; blocked")
+        self.assertTrue(any("not ready after 2s" in e["detail"] for e in self.events("error")))
+
+    def test_waiting_for_input_with_a_task_raises_one_stalled_event(self):
+        self.use_status()
+        self.up()
+        self.assign("t-wait")
+        (self.state / "status-demo-fake-1").write_text("waiting")
+        (self.state / "waiting-demo-fake-1").write_text("permission prompt")
+        self.theseus("queue", "tick", timeout=60)
+        self.theseus("queue", "tick", timeout=60)
+        stalled = [e for e in self.events("stalled") if "waiting for permission prompt" in e["detail"]]
+        self.assertEqual(1, len(stalled))
+        self.assertRegex(self.theseus("agents").stdout, r"demo-fake-1\s+\S+\s+waiting")
+
+    def test_the_queue_relaunches_a_supervised_agent_onto_a_compatible_profile(self):
+        self.set_config('\n[workers.fake2]\npreset = "claude-code"\ncommand = "fake-agent"\ncapacity = 3\n'
+                        'env = { FAKE_SECRET = "other-value" }\n\n[workers.fake2.interactive]\nstatus_command = []\n')
+        self.git("commit", "-q", "-am", "fake2")
+        self.up()
+        session = self.record("demo-fake-1")["session_id"]
+        self.add_task("t-rea")
+        self.theseus("tasks", "profile", "t-rea", "fake2")
+        self.git("commit", "-q", "-am", "profile")
+        out = self.theseus("queue", "tick", timeout=120).stdout
+        self.assertIn("relaunched", out)
+        self.assertIn("assigned", out)
+        self.assertRegex(self.log(), rf"start name=demo-fake-1 session= resume={session} pid=\d+ secret=other-value")
+        self.assertEqual("fake2", self.runs("demo-fake-1")[0]["profile"])
+        self.assertIn("input demo-fake-1: /exit", self.log())
+
+    def test_a_thrashing_agent_restarts_fresh_and_gets_its_restart_prompt(self):
+        self.up()
+        self.assign("t-thrash")
+        from theseus import supervisor
+        supervisor.send(self.conf(), "demo-fake-1", "please thrash", expect_busy=False)
+        out = self.theseus("queue", "tick", "--no-assign", timeout=60).stdout
+        self.assertRegex(out, r"restarted\s+demo-fake-1\s+t-thrash thrashing: restarted on a fresh session")
+        self.wait_for(lambda: self.theseus("queue", "tick", "--no-assign", timeout=60) and
+                      "Your context was cleared" in self.log(), timeout=30, message="the restart prompt")
+        starts = [line for line in self.log().splitlines() if line.startswith("start name=demo-fake-1")]
+        self.assertEqual(2, len(starts))
+        self.assertIn("resume= ", starts[-1])
 
     def add_task(self, task_id):
         self.theseus("tasks", "milestone", "M1")
@@ -352,6 +451,39 @@ class TmuxSequenceTests(unittest.TestCase):
     def setUp(self):
         self.socket = short_dir() / "s"
         self.addCleanup(drop_tmux, self.socket)
+
+    def test_attach_resizes_to_the_client_and_the_detach_key_restores_the_agent_size(self):
+        import pty
+        import select
+        import struct
+        import fcntl
+        import termios
+        from theseus import supervisor, tmux as tm
+        server = tm.Server("-S", str(self.socket), conf_file=supervisor.tmux_conf(), env=supervisor.server_env())
+        server.new_session("a--x", ["sleep", "60"], "/", 220, 50)
+        server.run("resize-window", "-x", "220", "-y", "50", "-t", "=a--x:")
+        argv = supervisor.attach_argv({"name": "x", "managed": True, "server": f"path:{self.socket}", "target": "a--x"})
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.environ["TERM"] = "xterm-256color"
+            os.execvp(argv[0], argv)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+
+        def drain(seconds):
+            end = time.monotonic() + seconds
+            while time.monotonic() < end:
+                ready, _, _ = select.select([fd], [], [], 0.1)
+                if ready:
+                    try:
+                        os.read(fd, 65536)
+                    except OSError:
+                        return
+        drain(1.5)
+        self.assertEqual("100x29 1", server.display("=a--x:", "#{window_width}x#{window_height} #{session_attached}"))
+        os.write(fd, b"\x11")
+        drain(1.0)
+        self.assertEqual(pid, os.waitpid(pid, 0)[0])
+        self.assertEqual("220x50 0", server.display("=a--x:", "#{window_width}x#{window_height} #{session_attached}"))
 
     def test_spawn_respawn_and_kill_keep_the_server_alive(self):
         from theseus import supervisor, tmux as tm

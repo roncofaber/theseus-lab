@@ -31,7 +31,7 @@ while true; do
         done
     done
     for pp in $panes; do
-        i=${pp%%:*} p=${pp##*:}
+        i=${pp%%:*} p=${pp#*:}
         open=0
         for w in "$root/$i"-*; do [[ -d "$w" && ! -f "$w/$log/handoff.md" ]] && open=1; done
         if ! pane_busy "$p" && [[ "$open" == 1 ]]; then idle[$i]=$(( ${idle[$i]:-0} + 1 )); else idle[$i]=0; fi
