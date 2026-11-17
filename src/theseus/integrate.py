@@ -208,23 +208,36 @@ def apply_patches(root, patches, skip=()):
 
 
 def repoint_folded_links(root, touched):
-    """A delivered report may link to a report the fold archived after the worker's base; point it at the archive."""
-    pattern = re.compile(re.escape(cfg.REPORTS) + r"/([A-Za-z0-9_.-]+)\.md")
-    for relative in touched:
-        path = Path(root) / relative
-        if not relative.startswith(cfg.REPORTS + "/") or not relative.endswith(".md") or not path.is_file():
+    """Point links at reports the fold archived (possibly after the worker's base) to their archived copy, in every
+    Markdown file under docs/ and the delivered files. Returns the repository-relative paths changed."""
+    root = Path(root)
+    link = re.compile(r"(\]\(|`)((?:\.\./|\./)*(?:docs/)?(?:[\w.-]+/)*investigations/([A-Za-z0-9_.-]+)\.md)")
+    candidates = {p for p in touched if p.endswith(".md")}
+    if (root / "docs").is_dir():
+        candidates.update(p.relative_to(root).as_posix() for p in (root / "docs").rglob("*.md"))
+    changed = []
+    for relative in sorted(candidates):
+        path = root / relative
+        if not path.is_file():
             continue
-        text = path.read_text()
+        text = path.read_text(errors="replace")
 
         def replace(match):
-            archived = f"{cfg.FOLDED}/{match.group(1)}.md"
-            if not (Path(root) / match.group(0)).exists() and (Path(root) / archived).exists():
-                return archived
-            return match.group(0)
+            target = match.group(2)
+            base = root if target.startswith("docs/") else path.parent
+            if (base / target).exists():
+                return match.group(0)
+            archived = root / cfg.FOLDED / f"{match.group(3)}.md"
+            if not archived.exists():
+                return match.group(0)
+            new = archived.relative_to(root).as_posix() if target.startswith("docs/") else os.path.relpath(archived, path.parent)
+            return match.group(1) + new
 
-        updated = pattern.sub(replace, text)
+        updated = link.sub(replace, text)
         if updated != text:
             path.write_text(updated)
+            changed.append(relative)
+    return changed
 
 
 def restore(root, touched, existed):
@@ -288,9 +301,9 @@ def merge(conf, task_id, subject=None, accept=(), skip_patches=(), commit=True, 
         if not ok:
             restore(root, touched, existed)
             raise IntegrationError("\n".join(messages + ["a worker patch failed; main restored, nothing committed"]), EXIT_CONFLICT)
-    repoint_folded_links(root, touched)
+    repointed = repoint_folded_links(root, touched)
     generated = docs.regenerate(conf) if regenerate else []
-    paths = sorted({p for p in touched + generated if (root / p).exists() or g.tracked(root, p)})
+    paths = sorted({p for p in touched + repointed + generated if (root / p).exists() or g.tracked(root, p)})
     handoff = worktree / cfg.WORKER_LOG / "handoff.md"
     if task["status"] == "in_progress" and handoff.exists():
         t.deliver(queue, task_id, handoff)

@@ -158,6 +158,20 @@ class TaskRuleTests(Sandbox):
         self.assertEqual([], rules.scratch_script_references(self.conf, files=[self.project / "AGENTS.md"]))
 
 
+class RepointTests(Sandbox):
+    def test_links_to_archived_reports_are_repointed_everywhere(self):
+        from theseus import integrate
+        root = self.tmp / "repo"
+        self.write("docs/project/archive/investigations/old-report.md", "# Old\n", root=root)
+        self.write("docs/protocol/spec.md", "See [it](../investigations/old-report.md#2-x) and `docs/investigations/old-report.md`.\n", root=root)
+        self.write("docs/investigations/live.md", "Live [r](live.md) and [o](old-report.md)?\n", root=root)
+        changed = integrate.repoint_folded_links(root, [])
+        self.assertEqual(["docs/protocol/spec.md"], changed)
+        text = (root / "docs/protocol/spec.md").read_text()
+        self.assertIn("(../project/archive/investigations/old-report.md#2-x)", text)
+        self.assertIn("`docs/project/archive/investigations/old-report.md`", text)
+
+
 class CleanupTests(Sandbox):
     def test_old_unreferenced_scratch_is_removed_and_referenced_is_kept(self):
         self.scaffold()
