@@ -77,6 +77,10 @@ dirty_paths = []
 dirty_data = []
 spec_paths = []
 
+[upgrade]
+# Theseus-managed files this project has made its own; `theseus upgrade` leaves them alone.
+keep = []
+
 [git]
 # Base for new worker worktrees: "HEAD", or "origin/main" to fetch first.
 base = "HEAD"

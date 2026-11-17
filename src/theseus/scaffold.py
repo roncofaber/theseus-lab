@@ -131,10 +131,13 @@ def upgrade(target, dry_run=False):
     conf = cfg.load(root=target)
     values = {"PROJECT": conf.name, "PREFIX": conf.prefix, "DATE": datetime.date.today().isoformat()}
     report = []
+    keep = set(conf.section("upgrade").get("keep") or [])
     for relative, source in walk(template_root()):
         dest = destination(relative)
         path = target / dest
         text = render(source.read_text(), values)
+        if dest in keep and path.exists():
+            continue
         if path.exists() and dest not in OWNED:
             if dest == "theseus.toml":
                 for key in missing_keys(tomllib.loads(text), tomllib.loads(path.read_text())):

@@ -130,6 +130,15 @@ class RoomTests(Sandbox):
 
 
 class UpgradeTests(Sandbox):
+    def test_upgrade_leaves_files_the_project_keeps(self):
+        self.scaffold()
+        readme = self.project / "tools/Supervisor/README.md"
+        readme.write_text("# Our own checks\n")
+        self.replace_config("keep = []", 'keep = ["tools/Supervisor/README.md"]')
+        out = self.theseus("upgrade").stdout
+        self.assertNotIn("tools/Supervisor/README.md", out)
+        self.assertEqual("# Our own checks\n", readme.read_text())
+
     def test_upgrade_refreshes_owned_files_adds_missing_ones_and_keeps_project_files(self):
         self.scaffold()
         skill = self.project / ".agents/skills/theseus-worker/SKILL.md"

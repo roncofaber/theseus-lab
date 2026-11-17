@@ -3,7 +3,10 @@ sample file, a test scenario). Fill SCENARIO_WORDS with the project's fixture na
 from pathlib import Path
 import unittest
 
-from theseus import rules
+try:
+    from theseus import rules
+except ImportError:
+    raise unittest.SkipTest("theseus is not importable here; run the Supervisor suite with `theseus check`")
 
 ROOT = Path(__file__).resolve().parents[2]
 SCENARIO_WORDS = ""

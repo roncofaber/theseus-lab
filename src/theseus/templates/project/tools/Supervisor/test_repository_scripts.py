@@ -3,7 +3,10 @@ at scripts under the scratch root or a temporary directory, which disappear and 
 from pathlib import Path
 import unittest
 
-from theseus import config, rules
+try:
+    from theseus import config, rules
+except ImportError:
+    raise unittest.SkipTest("theseus is not importable here; run the Supervisor suite with `theseus check`")
 
 ROOT = Path(__file__).resolve().parents[2]
 

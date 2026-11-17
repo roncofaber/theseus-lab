@@ -3,7 +3,10 @@ dependencies, blocker records, per-provider capacity from theseus.toml, record b
 from pathlib import Path
 import unittest
 
-from theseus import config, rules
+try:
+    from theseus import config, rules
+except ImportError:
+    raise unittest.SkipTest("theseus is not importable here; run the Supervisor suite with `theseus check`")
 
 ROOT = Path(__file__).resolve().parents[2]
 
