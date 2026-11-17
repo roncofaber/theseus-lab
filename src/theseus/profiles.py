@@ -255,9 +255,12 @@ def mcp_args(conf, profile):
 
 def extra_args(profile, **values):
     """The profile's extra_args with placeholders filled and a leading ~ expanded."""
+    extra = profile.get("extra_args") or []
+    if not (isinstance(extra, list) and all(isinstance(item, str) for item in extra)):
+        raise ProfileError(f"profile {profile.get('name')}: extra_args must be a list of strings")
     data = {"command": profile.get("command") or "", "model": profile.get("model") or "",
             "permission_mode": profile.get("permission_mode") or "", **{k: v for k, v in values.items() if v is not None}}
-    return [os.path.expanduser(fill(item, data)) for item in profile.get("extra_args") or []]
+    return [os.path.expanduser(fill(item, data)) for item in extra]
 
 
 def launch_argv(profile, prompt, session, model, conf=None):

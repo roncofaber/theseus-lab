@@ -52,7 +52,7 @@ def project_snapshot(root, sample_host=None):
 def pool_snapshots():
     try:
         return [pools.status(name) for name in sorted(pools.definitions())]
-    except (OSError, ValueError):
+    except (OSError, ValueError, cfg.ConfigError):
         return []
 
 

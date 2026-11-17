@@ -150,8 +150,10 @@ def config_check():
     errors, warnings = setup.host_check()
     try:
         root = cfg.find_root()
-    except cfg.ConfigError:
+    except cfg.ConfigError as error:
         root = None
+        if os.environ.get("THESEUS_ROOT"):
+            errors.append(str(error))
     if root:
         try:
             conf = cfg.load(root=root)
@@ -494,7 +496,7 @@ def cmd_agents(args):
 
 
 def cmd_pool(args):
-    from . import pools
+    from . import hostconfig, pools
     if args.action in ("hold", "release"):
         if not (args.name and args.agent and args.project):
             sys.exit("usage: theseus pool hold|release POOL AGENT --project NAME [--task ID] [--hours H]")
@@ -504,11 +506,7 @@ def cmd_pool(args):
             sys.exit(0 if ok else 3)
         print("released" if pools.release(args.project, args.name, args.agent) else "no such slot")
         return
-    from . import hostconfig
-    try:
-        names = [args.name] if args.name else sorted(pools.definitions())
-    except hostconfig.ConfigError as error:
-        sys.exit(f"theseus: {error}")
+    names = [args.name] if args.name else sorted(pools.definitions())
     if not names:
         print(f"no pools defined; add [pools.NAME] to {hostconfig.path()} (see `theseus pool --help`)")
         return
@@ -890,7 +888,7 @@ def build_parser():
     p.add_argument("--project", help="hold/release: project name as listed in the pool priority")
     p.add_argument("--task", help="hold: what the worker is doing")
     p.add_argument("--hours", type=float, default=4.0, help="hold: expiry if never released (default 4)")
-    p.set_defaults(func=cmd_pool)
+    p.set_defaults(func=guarded(cmd_pool))
 
     p = sub.add_parser("queue", help="work queue: status, tick, run, wait, pause, resume, log")
     p.add_argument("action", nargs="?", default="status", choices=("status", "tick", "run", "wait", "pause", "resume", "log"))

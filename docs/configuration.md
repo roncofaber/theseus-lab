@@ -103,7 +103,7 @@ The scaffolded `theseus.toml` documents every key with comments. It sets `[worke
 | `[tools.paths]` | Tool locations on this machine, by tool name (see [External tools](#external-tools)) |
 | `[defaults]` | Values for project keys a project leaves unset: `workers.default`, `workers.retries`, `limits.heavy_runs`, `paths.data`, `paths.scratch`, `paths.worktrees`, `instances.idle_minutes`, `instances.handoff_settle_seconds`, `queue.interval`, `re.clients` |
 
-`theseus config check` reports an unknown section, an unknown profile key, pool key or store key as an error naming the file and the key, and an unknown `[defaults]` key as a warning (it is ignored). A file that does not parse, or has an unknown section, stops every command with the same message.
+`theseus config check` reports an unknown section, an unknown profile key, pool key or store key as an error naming the file and the key, and an unknown `[defaults]` key as a warning (it is ignored). A host file that does not parse, or has an unknown section, makes every command that reads it (anything that loads a project, `theseus pool`, the host store settings) stop with that message; `theseus top` leaves the pools out.
 
 ```sh
 theseus setup host                          # write a commented starter (refuses to replace an existing file)

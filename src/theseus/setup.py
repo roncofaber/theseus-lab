@@ -152,8 +152,11 @@ def setup_host(force=False, print_text=False, import_project=None, dry_run=False
         target.write_text(base)
         return 0, [f"wrote {target}; edit it, then `theseus config check`"]
     import tomllib
+    try:
+        current = tomllib.loads(base)
+    except tomllib.TOMLDecodeError as error:
+        return 1, [f"{target}: {error}; fix it or pass --force to start from the starter", "nothing written"]
     slices, notes = import_slices(import_project)
-    current = tomllib.loads(base)
     clashes = [f"{title} already exists in {target}" for _, title, *_ in slices
                if (title.startswith("[workers.") and title[9:-1] in (current.get("workers") or {}))
                or (title == "[tools.paths]" and "paths" in (current.get("tools") or {}))]

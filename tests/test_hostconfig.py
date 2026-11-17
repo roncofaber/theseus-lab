@@ -129,6 +129,9 @@ class ExtraArgsTests(HostCase):
         profile = profiles.resolve(self.conf(), "claude-code")
         self.assertEqual("--verbose", profiles.launch_argv(profile, "p", "S", "")[-1])
         self.assertEqual(["extra_args must be a list of strings"], profiles.problems("x", {"extra_args": "--verbose"}))
+        self.write("theseus.local.toml", '[workers.claude-code]\nextra_args = "--verbose"\n')
+        with self.assertRaisesRegex(profiles.ProfileError, "extra_args must be a list of strings"):
+            profiles.launch_argv(profiles.resolve(self.conf(), "claude-code"), "p", "S", "")
 
 
 class LegacyFileTests(HostCase):
@@ -229,6 +232,16 @@ class ConfigCommandTests(HostCase):
         outside = self.tmp / "elsewhere"
         outside.mkdir()
         self.assertIn("not inside a project; checked the host config only", self.theseus("config", "check", cwd=outside).stdout)
+        broken = self.theseus("config", "check", cwd=outside, env={**self.env, "THESEUS_ROOT": str(outside)}, check=False)
+        self.assertEqual(1, broken.returncode)
+        self.assertIn("has no theseus.toml", broken.stderr)
+
+    def test_a_malformed_host_file_gives_pool_a_clean_error(self):
+        self.host_file("[pools.gw\n")
+        result = self.theseus("pool", check=False)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(f"theseus: {self.host}", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 class SetupHostTests(HostCase):
@@ -275,3 +288,8 @@ class SetupHostTests(HostCase):
         again = self.theseus("setup", "host", "--import-project", self.project, cwd=self.tmp, check=False)
         self.assertEqual(1, again.returncode)
         self.assertIn("[workers.gw] already exists", again.stdout)
+        self.host.write_text("[broken\n")
+        broken = self.theseus("setup", "host", "--import-project", self.project, cwd=self.tmp, check=False)
+        self.assertEqual(1, broken.returncode)
+        self.assertIn("pass --force", broken.stdout)
+        self.assertEqual("[broken\n", self.host.read_text())
