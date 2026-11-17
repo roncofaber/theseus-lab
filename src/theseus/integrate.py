@@ -303,7 +303,9 @@ def merge(conf, task_id, subject=None, accept=(), skip_patches=(), commit=True, 
             raise IntegrationError("\n".join(messages + ["a worker patch failed; main restored, nothing committed"]), EXIT_CONFLICT)
     repointed = repoint_folded_links(root, touched)
     generated = docs.regenerate(conf) if regenerate else []
+    in_head = set(g.out(root, "ls-tree", "-r", "--name-only", "HEAD").splitlines())
     paths = sorted({p for p in touched + repointed + generated if (root / p).exists() or g.tracked(root, p)})
+    deleted = sorted({p for p in touched if p in in_head and p not in paths})
     handoff = worktree / cfg.WORKER_LOG / "handoff.md"
     if task["status"] == "in_progress" and handoff.exists():
         t.deliver(queue, task_id, handoff)
@@ -316,7 +318,7 @@ def merge(conf, task_id, subject=None, accept=(), skip_patches=(), commit=True, 
     if g.git(root, "diff", "--cached", "--quiet", "--", *paths, check=False).returncode == 0:
         raise IntegrationError("nothing to merge: main already holds this delivery")
     staged = set(g.out(root, "diff", "--cached", "--name-only").split())
-    stray = sorted(staged - set(paths))
+    stray = sorted(staged - set(paths) - set(deleted))
     if stray:
         g.git(root, "reset", "-q", "--", *stray)
     # A pathspec commit takes paths from the working tree and drops deleted files, so commit the staged index instead.

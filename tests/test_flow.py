@@ -179,7 +179,9 @@ class TaskFlowTests(Sandbox):
         self.write(".theseus/changed.sha256", f"{digest}  src/capture/new.py\nD src/capture/old.py\n", root=worktree)
         self.theseus("merge", TASK)
         self.assertEqual("", self.git("status", "--porcelain").stdout)
-        self.assertNotEqual(0, self.git("cat-file", "-e", "HEAD:src/capture/old.py", check=False).returncode)
+        merge = json.loads(self.theseus("tasks", "show", TASK).stdout)["merge"]["commit"]
+        self.assertNotEqual(0, self.git("cat-file", "-e", f"{merge}:src/capture/old.py", check=False).returncode,
+                            "the deletion must be in the merge commit itself")
         self.theseus("tasks", "complete", TASK, "--summary", "moved", "--check", "manual", "--log", str(worktree / ".theseus/handoff.md"))
 
     def test_completion_accepts_a_change_main_kept_after_moving_on(self):
