@@ -84,7 +84,7 @@ DEFAULTS = {
     "re": {"targets": [], "evidence": r"ev_[0-9a-f]{64}", "citations": DEFAULT_CITATIONS,
            "address_low": 0, "address_high": 0, "clients": ["claude_code"]},
     "tools": {"need": [], "paths": {}},
-    "queue": {"deadline": "", "nudge": "", "interval": 30},
+    "queue": {"deadline": "", "nudge": "", "interval": 30, "send_budget_seconds": 25},
     "gateway": {"attempts": 3, "backoff": [120, 240, 480], "slow_codes": [530], "slow_factor": 2, "resend": "",
                 "clear_tokens": 120000, "fresh_after_errors": 2, "screen_lines": 15, "stagger_seconds": 30,
                 "recovery_seconds": 900},

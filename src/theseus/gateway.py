@@ -319,38 +319,58 @@ def prompt_file(conf, task):
 
 
 def restart_prompt(conf, task, reason):
+    """The one message that restarts a task in a fresh context: the brief, the task and its record summary, the worktree,
+    the task prompt, the partial report and notes that exist, and how to resume cheaply."""
+    from pathlib import Path
     brief = conf.root / (conf.section("instances").get("brief") or "")
     log_dir = (task.get("execution") or {}).get("logDir")
+    worktree = task.get("worktree")
     where = prompt_file(conf, task)
     text = (f"Read and follow {brief} first. Your context was cleared after {reason}; resume task {task['id']} in worktree "
-            f"{task.get('worktree')}. Continue the partial report or changes in place from the state of the worktree; do not "
-            f"start over. ")
+            f"{worktree}. Objective: {' '.join(str(task.get('objective') or '').split())} Owned paths: "
+            f"{', '.join(task.get('ownedPaths') or []) or '-'}. ")
     text += f"The task prompt is {where}. " if where else f"Read the task with `theseus tasks show {task['id']}`. "
+    reports = [str(Path(worktree) / path) for path in task.get("ownedPaths") or []
+               if worktree and path.endswith(".md") and (Path(worktree) / path).is_file()]
+    if reports:
+        text += f"Your partial report: {', '.join(reports)}. "
+    notes = Path(log_dir) / "notes.md" if log_dir else None
+    if notes and notes.is_file():
+        text += f"Your notes: {notes}. "
     if log_dir:
-        text += f"Log directory (handoff.md, changed.sha256): {log_dir}. "
-    return text + "Finish with the handoff and your done line."
+        text += f"Log directory (handoff.md, changed.sha256, notes.md): {log_dir}. "
+    return text + ("Continue the partial report or changes in place from the state of the worktree (check git status and "
+                   "git diff first); do not start over or re-read what the report already records. Read large files in "
+                   "line ranges, not whole, work in small steps and save progress to the report or notes as you go. "
+                   "Finish with the handoff and your done line.")
 
 
 def recover(conf, agent, task, fresh, reason, text=None):
-    """Get an idle agent going again: a plain resend of text, or (fresh) the profile's clear command and a restart
-    prompt built from the task. Every keystroke goes through the verified send. Returns (ok, detail)."""
+    """Get an idle agent going again: a plain resend of text, or (fresh) the profile's clear command followed by the one
+    restart prompt the agent is then owed (workqueue.owe_prompt). Every keystroke goes through the verified send; inside
+    a queue tick the restart prompt follows once the clear command is confirmed. Returns (ok, detail)."""
     from . import workqueue
     profile = workqueue.launched(conf, agent)
     task_id = task["id"] if task else None
     if fresh and task:
         clear = profiles.interactive(conf, profile).get("clear")
         if clear:
-            ok, detail = ag.send_verified(conf, agent, clear, task_id, expect_busy=False, profile=profile)
+            ok, detail = ag.send_verified(conf, agent, clear, task_id, expect_busy=False, profile=profile, kind="clear")
             if not ok:
                 return False, f"{clear}: {detail}"
+        workqueue.owe_prompt(conf, agent["name"], task_id, reason)
+        if clear and ag.batch() is not None:
+            return True, f"fresh context ({clear}, then the restart prompt once it is confirmed)"
+        if clear:
             timeout, poll = ag.send_settings(conf)
             deadline = time.monotonic() + timeout
             while ag.pane_busy(conf, agent["pane"], profile, server=ag.where(agent)[0]) and time.monotonic() < deadline:
                 time.sleep(poll)
-        ok, detail = ag.send_verified(conf, agent, restart_prompt(conf, task, reason), task_id, profile=profile)
-        return ok, (f"fresh context ({clear or 'no clear command'} and a restart prompt): {detail}")
+        status, detail = workqueue.deliver_owed(conf, agent)
+        return status in ("sent", "typed"), f"fresh context ({clear or 'no clear command'} and a restart prompt): {detail}"
+    kind = "nudge" if text else "resend"
     ok, detail = ag.send_verified(conf, agent, text or settings(conf).get("resend") or DEFAULT_RESEND, task_id,
-                                  profile=profile)
+                                  profile=profile, kind=kind)
     return ok, detail
 
 

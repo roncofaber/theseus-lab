@@ -17,7 +17,7 @@ from pathlib import Path
 NAME = "config.toml"
 SECTIONS = ("workers", "pools", "store", "tools", "defaults", "gateway", "supervisor", "models")
 DEFAULT_KEYS = ("workers.default", "workers.retries", "limits.heavy_runs", "paths.data", "paths.scratch", "paths.worktrees",
-                "instances.idle_minutes", "instances.handoff_settle_seconds", "instances.send_verify_seconds", "queue.interval",
+                "instances.idle_minutes", "instances.handoff_settle_seconds", "instances.send_verify_seconds", "queue.interval", "queue.send_budget_seconds",
                 "re.clients", "gateway.attempts", "gateway.backoff", "gateway.slow_codes", "gateway.slow_factor",
                 "gateway.resend", "gateway.clear_tokens", "gateway.fresh_after_errors", "gateway.screen_lines",
                 "gateway.stagger_seconds", "gateway.recovery_seconds", "agents.counts", "agents.resume", "agents.cwd")

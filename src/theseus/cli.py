@@ -640,18 +640,15 @@ def cmd_supervised(args):
                 names = [n for n, r in supervisor.records(conf).items()
                          if r.get("managed") and supervisor.drifted(conf, r) and not supervisor.current_task(conf, n)]
             if not names:
-                sys.exit("usage: theseus agents restart NAME... [--fresh] | --drifted")
-            from . import workqueue
-            failed = False
-            for name in names:
-                with workqueue.locked(conf):
-                    supervisor.update(conf, name, desired="up")
-                    if (supervisor.record(conf, name) or {}).get("phase") == "failed":
-                        supervisor.update(conf, name, phase=None)
-                    ok, detail = supervisor.restart(conf, name, fresh=args.fresh)
-                failed |= not ok
-                print_actions([(name, "restarted" if ok else "failed", detail)])
-            sys.exit(1 if failed else 0)
+                sys.exit("usage: theseus agents restart NAME... [--fresh [--with-task [--file PROMPT]]] | --drifted")
+            if (args.with_task or args.file) and not args.fresh:
+                sys.exit("theseus: --with-task and --file go with --fresh (a plain restart resumes the conversation)")
+            if args.file and not args.with_task:
+                sys.exit("theseus: --file is the restart prompt of --with-task")
+            prompt = Path(args.file).read_text().strip() if args.file else None
+            if args.file and not prompt:
+                sys.exit(f"theseus: {args.file} is empty")
+            sys.exit(restart_agents(conf, names, args.fresh, args.with_task, prompt))
         if action == "migrate":
             if not names and not args.all:
                 sys.exit("usage: theseus agents migrate NAME... | --all [--with-task]")
@@ -683,6 +680,34 @@ def cmd_supervised(args):
                       f"`theseus agents logs {args.name} --transcript` names the conversation file)", file=sys.stderr)
     except supervisor.SupervisorError as error:
         sys.exit(f"theseus: {error}")
+
+
+def restart_agents(conf, names, fresh, with_task, prompt=None):
+    """agents restart: an agent that holds a task restarts fresh only with --with-task, and then gets exactly one
+    task-aware restart prompt (prompt, or one built from the task) before anything else is typed into it."""
+    from . import agents, supervisor, workqueue
+    failed = False
+    for name in names:
+        with workqueue.locked(conf):
+            task = supervisor.current_task(conf, name)
+            if fresh and task and not with_task:
+                print_actions([(name, "refused", f"holds task {task['id']}; --with-task restarts it fresh and sends one "
+                                                 f"restart prompt for the task")])
+                failed = True
+                continue
+            supervisor.update(conf, name, desired="up")
+            if (supervisor.record(conf, name) or {}).get("phase") == "failed":
+                supervisor.update(conf, name, phase=None)
+            if fresh and task:
+                workqueue.owe_prompt(conf, name, task["id"], "a fresh restart", prompt)
+            ok, detail = supervisor.restart(conf, name, fresh=fresh)
+            if ok and fresh and task:
+                status, sent = workqueue.deliver_owed(conf, agents.entry(supervisor.record(conf, name)))
+                detail += (f"; restart prompt for {task['id']} {sent}" if status == "sent" else
+                           f"; restart prompt for {task['id']} not confirmed ({sent}); the queue retries it")
+        failed |= not ok
+        print_actions([(name, "restarted" if ok else "failed", detail)])
+    return 1 if failed else 0
 
 
 def all_managed():
@@ -1135,7 +1160,11 @@ def build_parser():
     p.add_argument("--window", action="store_true", help="attach: open in a new window of your own tmux")
     p.add_argument("--lines", type=int, default=200, help="logs: history lines (default 200)")
     p.add_argument("--transcript", action="store_true", help="logs: print the conversation transcript path instead")
-    p.add_argument("--with-task", action="store_true", help="migrate: also move agents that hold a task")
+    p.add_argument("--with-task", action="store_true", help="migrate: also move agents that hold a task; restart --fresh: "
+                                                            "restart an agent that holds a task and send it one restart "
+                                                            "prompt for the task")
+    p.add_argument("--file", metavar="PROMPT", help="restart --fresh --with-task: the restart prompt to send instead of the "
+                                                    "one built from the task")
     p.add_argument("--json", action="store_true", help="ls: JSON")
     p.set_defaults(func=guarded(cmd_agents))
     p = sub.add_parser("pool", help="host-wide worker pools shared across projects ([pools.NAME] in ~/.config/theseus/config.toml)",

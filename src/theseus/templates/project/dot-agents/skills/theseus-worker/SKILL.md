@@ -38,7 +38,7 @@ git status --porcelain --untracked-files=all | awk '{print $NF}' | grep -v '^\.t
 
 Use `theseus build` only if the task message names it; heavy runs share `limits.heavy_runs` slots across all workers.
 
-## Handoff (final message; write it to `$LOG_DIR/handoff.md` once, at the very end; keep progress notes in another file)
+## Handoff (final message; write it to `$LOG_DIR/handoff.md` once, at the very end; keep progress notes in `$LOG_DIR/notes.md`)
 
 ```
 Task: <id>   Worktree: <path>   Base: <sha>

@@ -21,8 +21,15 @@ runs is kept in the runtime state (`launched`).
 Tasks with "hold": true are never assigned by the queue; `theseus queue pause` stops all assignment. Events go to the
 host store (theseus.store); `theseus queue wait` blocks until one needs the coordinator. Every message the queue types
 (task messages, nudges, gateway resends, restart prompts) goes through agents.send_verified, which confirms the agent
-started working and records `send_failed` when it did not. Each tick also writes one state sample per registered agent
-and, at most once a day across the host, runs the store's maintenance and backup.
+started working and records `send_failed` when it did not. A tick types its messages at once and verifies them together
+in a bounded pool of threads within queue.send_budget_seconds, so agents that do not respond cost one verification
+window per tick, not one each; a send still unresolved is finished by the next tick.
+An agent restarted on a fresh context while it holds a task (a fresh supervised restart, `theseus agents restart
+--fresh --with-task`, a gateway or idle-stop recovery that clears the context) is owed exactly one task-aware restart
+prompt: until it is confirmed received nothing else is typed into the agent (no nudge, gateway resend or new task),
+and after [gateway] attempts unconfirmed tries a `stalled` event wakes the coordinator instead.
+Each tick also writes one state sample per registered agent and, at most once a day across the host, runs the store's
+maintenance and backup.
 <data>/queue/events.jsonl still receives a plain-text copy of every event as an audit trail; it is deprecated and
 nothing reads it after the one-time import.
 """
@@ -220,7 +227,7 @@ def assign_and_send(conf, agent, task):
     record += rooms.message(conf, task)
     deadline = conf.section("queue").get("deadline") or ""
     text = task_message(conf, task["id"], worktree, record, deadline, launched(conf, agent))
-    ok, detail = ag.send_verified(conf, agent, text, task["id"])
+    ok, detail = ag.send_verified(conf, agent, text, task["id"], kind="task")
     if not ok:
         return False, f"task message not submitted: {detail}"
     state = runtime(conf)
@@ -270,118 +277,128 @@ def tick(conf, assign=True):
     recorded = []
     claimed = set()
     samples = []
-    with locked(conf):
-        from . import gateway
-        from . import pools
-        recorded.extend(supervise(conf))
-        registered = ag.agents(conf)
-        pool_names = {a["name"]: pools.pool_of(conf, a.get("provider")) for a in registered}
-        for pool in set(filter(None, pool_names.values())):
-            held = {}
-            for a in registered:
-                if pool_names[a["name"]] == pool:
-                    current = ag.current_task(conf, a["name"])
-                    if current:
-                        held[a["name"]] = current["id"]
-            pools.sync(conf, pool, held)
-        waiting_on_pool = set()
-        for agent in registered:
-            info = ag.state(conf, agent)
-            name, task_id = agent["name"], info["task"]
-            if info["state"] == "delivered":
-                task = t.Queue(conf).get(task_id)
-                t.deliver(t.Queue(conf), task_id, ag.handoff_path(task))
-                state = runtime(conf)
-                state.setdefault(name, {})["needs_reset"] = True
-                save_runtime(conf, state)
-                recorded.append(events(conf, 1)[-1])
+    with locked(conf), ag.batched(send_budget(conf)) as sends:
+        try:
+            from . import gateway
+            from . import pools
+            recorded.extend(supervise(conf))
+            registered = ag.agents(conf)
+            recorded.extend(resume_sends(conf, registered, sends))
+            pool_names = {a["name"]: pools.pool_of(conf, a.get("provider")) for a in registered}
+            for pool in set(filter(None, pool_names.values())):
+                held = {}
+                for a in registered:
+                    if pool_names[a["name"]] == pool:
+                        current = ag.current_task(conf, a["name"])
+                        if current:
+                            held[a["name"]] = current["id"]
+                pools.sync(conf, pool, held)
+            waiting_on_pool = set()
+            for agent in registered:
                 info = ag.state(conf, agent)
-            elif info["state"] == "gateway_error":
-                recorded.extend(gateway.handle(conf, agent, info))
-            elif info["state"] == "stalled":
-                if gateway.paused_until(gateway.pool_key(conf, launched(conf, agent))):
-                    pass
-                elif runtime(conf).get(name, {}).get("nudged") != task_id:
-                    if nudge(conf, agent, t.Queue(conf).get(task_id), info):
-                        recorded.append(event(conf, "nudged", name, task_id, f"idle {info['idleMinutes']} min without a handoff"))
-                elif not events(conf, 1, kinds=["stalled"], task=task_id):
-                    recorded.append(event(conf, "stalled", name, task_id, f"still idle after a nudge ({info['idleMinutes']} min)"))
-            elif info["state"] == "thrashing":
-                state = runtime(conf)
-                if state.get(name, {}).get("thrashing") != task_id:
-                    state.setdefault(name, {}).update({"thrashing": task_id, "nudged": task_id})
+                name, task_id = agent["name"], info["task"]
+                if info["state"] == "delivered":
+                    task = t.Queue(conf).get(task_id)
+                    t.deliver(t.Queue(conf), task_id, ag.handoff_path(task))
+                    state = runtime(conf)
+                    state.setdefault(name, {})["needs_reset"] = True
                     save_runtime(conf, state)
-                    if agent.get("managed"):
-                        from . import supervisor
+                    recorded.append(events(conf, 1)[-1])
+                    drop_owed(conf, name)
+                    info = ag.state(conf, agent)
+                if name in sends.agents() or owed(conf, name):
+                    if name not in sends.agents():
+                        recorded.extend(try_owed(conf, agent, info))
+                    samples.append((name, info["state"], info["task"]))
+                    continue
+                if info["state"] == "gateway_error":
+                    recorded.extend(gateway.handle(conf, agent, info))
+                elif info["state"] == "stalled":
+                    if gateway.paused_until(gateway.pool_key(conf, launched(conf, agent))):
+                        pass
+                    elif runtime(conf).get(name, {}).get("nudged") != task_id:
+                        if nudge(conf, agent, t.Queue(conf).get(task_id), info):
+                            recorded.append(event(conf, "nudged", name, task_id, f"idle {info['idleMinutes']} min without a handoff"))
+                    elif not events(conf, 1, kinds=["stalled"], task=task_id):
+                        recorded.append(event(conf, "stalled", name, task_id, f"still idle after a nudge ({info['idleMinutes']} min)"))
+                elif info["state"] == "thrashing":
+                    state = runtime(conf)
+                    if state.get(name, {}).get("thrashing") != task_id:
+                        state.setdefault(name, {}).update({"thrashing": task_id, "nudged": task_id})
+                        save_runtime(conf, state)
+                        if agent.get("managed"):
+                            from . import supervisor
+                            try:
+                                ok, detail = supervisor.thrashing_restart(conf, agent, task_id)
+                            except Exception as error:
+                                ok, detail = False, str(error)
+                            recorded.append(event(conf, "restarted" if ok else "error", name, task_id, detail))
+                        else:
+                            recorded.append(event(conf, "stalled", name, task_id, f"thrashing: the pane shows {info['stall']!r}; not nudged"))
+                elif info["state"] in ("blocked", "failed", "waiting") and info["task"]:
+                    kind = f"{info['state']}:{info.get('waiting') or ''}"
+                    state = runtime(conf)
+                    if state.get(name, {}).get("attention") != f"{task_id}:{kind}":
+                        state.setdefault(name, {})["attention"] = f"{task_id}:{kind}"
+                        save_runtime(conf, state)
+                        detail = (f"waiting for {info['waiting']}" if info["state"] == "waiting"
+                                  else f"the agent is {info['state']}; theseus agents ls")
+                        recorded.append(event(conf, "stalled", name, task_id, detail))
+                if info.get("busy") and info["state"] in ("working", "busy"):
+                    gateway.observe(conf, agent, info)
+                samples.append((name, info["state"], info["task"]))
+                if info["state"] != "free" or not assign or paused(conf):
+                    continue
+                if gateway.paused_until(gateway.pool_key(conf, launched(conf, agent))):
+                    continue
+                from . import profiles as pf
+                used, capacity = t.capacity_use(conf).get(agent.get("provider") or pf.default_name(conf), (0, None))
+                if capacity is not None and used >= int(capacity):
+                    continue
+                task, needed = next_task(conf, agent, info, claimed)
+                if task is None:
+                    continue
+                pool = pool_names.get(name)
+                if pool:
+                    allowed, why = pools.acquire(conf, pool, name, task["id"])
+                    if not allowed:
+                        waiting_on_pool.add(pool)
+                        state = runtime(conf)
+                        state.setdefault(name, {})["pool_wait"] = why
+                        save_runtime(conf, state)
+                        continue
+                claimed.add(task["id"])
+                ok = False
+                try:
+                    target = task.get("profile") or registered_profile(conf, agent)
+                    if target != launched(conf, agent):
                         try:
-                            ok, detail = supervisor.thrashing_restart(conf, agent, task_id)
+                            ok, detail = relaunch(conf, agent, target)
                         except Exception as error:
                             ok, detail = False, str(error)
-                        recorded.append(event(conf, "restarted" if ok else "error", name, task_id, detail))
-                    else:
-                        recorded.append(event(conf, "stalled", name, task_id, f"thrashing: the pane shows {info['stall']!r}; not nudged"))
-            elif info["state"] in ("blocked", "failed", "waiting") and info["task"]:
-                kind = f"{info['state']}:{info.get('waiting') or ''}"
-                state = runtime(conf)
-                if state.get(name, {}).get("attention") != f"{task_id}:{kind}":
-                    state.setdefault(name, {})["attention"] = f"{task_id}:{kind}"
-                    save_runtime(conf, state)
-                    detail = (f"waiting for {info['waiting']}" if info["state"] == "waiting"
-                              else f"the agent is {info['state']}; theseus agents ls")
-                    recorded.append(event(conf, "stalled", name, task_id, detail))
-            if info.get("busy") and info["state"] in ("working", "busy"):
-                gateway.observe(conf, agent, info)
-            samples.append((name, info["state"], info["task"]))
-            if info["state"] != "free" or not assign or paused(conf):
-                continue
-            if gateway.paused_until(gateway.pool_key(conf, launched(conf, agent))):
-                continue
-            from . import profiles as pf
-            used, capacity = t.capacity_use(conf).get(agent.get("provider") or pf.default_name(conf), (0, None))
-            if capacity is not None and used >= int(capacity):
-                continue
-            task, needed = next_task(conf, agent, info, claimed)
-            if task is None:
-                continue
-            pool = pool_names.get(name)
-            if pool:
-                allowed, why = pools.acquire(conf, pool, name, task["id"])
-                if not allowed:
-                    waiting_on_pool.add(pool)
-                    state = runtime(conf)
-                    state.setdefault(name, {})["pool_wait"] = why
-                    save_runtime(conf, state)
-                    continue
-            claimed.add(task["id"])
-            ok = False
-            try:
-                target = task.get("profile") or registered_profile(conf, agent)
-                if target != launched(conf, agent):
+                        if not ok:
+                            recorded.append(event(conf, "error", name, task["id"], f"relaunch onto {target} failed: {detail}"))
+                            continue
+                        recorded.append(event(conf, "relaunched", name, task["id"], detail))
+                    if needed:
+                        try:
+                            ok, detail = reset(conf, agent, needed)
+                        except Exception as error:
+                            ok, detail = False, str(error)
+                        if not ok:
+                            recorded.append(event(conf, "error", name, task["id"], f"{needed} failed: {detail}"))
+                            continue
+                        recorded.append(event(conf, "cleared" if needed == "clear" else "compacted", name, None, detail))
                     try:
-                        ok, detail = relaunch(conf, agent, target)
+                        ok, detail = assign_and_send(conf, agent, task)
                     except Exception as error:
                         ok, detail = False, str(error)
-                    if not ok:
-                        recorded.append(event(conf, "error", name, task["id"], f"relaunch onto {target} failed: {detail}"))
-                        continue
-                    recorded.append(event(conf, "relaunched", name, task["id"], detail))
-                if needed:
-                    try:
-                        ok, detail = reset(conf, agent, needed)
-                    except Exception as error:
-                        ok, detail = False, str(error)
-                    if not ok:
-                        recorded.append(event(conf, "error", name, task["id"], f"{needed} failed: {detail}"))
-                        continue
-                    recorded.append(event(conf, "cleared" if needed == "clear" else "compacted", name, None, detail))
-                try:
-                    ok, detail = assign_and_send(conf, agent, task)
-                except Exception as error:
-                    ok, detail = False, str(error)
-                recorded.append(events(conf, 1)[-1] if ok else event(conf, "error", name, task["id"], detail))
-            finally:
-                if pool and not ok:
-                    pools.release(conf.name, pool, name)
+                    recorded.append(events(conf, 1)[-1] if ok else event(conf, "error", name, task["id"], detail))
+                finally:
+                    if pool and not ok:
+                        pools.release(conf.name, pool, name)
+        finally:
+            recorded.extend(verify_sends(conf, sends))
         for pool in set(filter(None, pool_names.values())) - waiting_on_pool:
             pools.drop_claim(conf, pool)
         if samples:
@@ -392,8 +409,8 @@ def tick(conf, assign=True):
 
 
 def supervise(conf):
-    """For a project whose agents theseus supervises: reconcile them (never waiting for a slow start), refresh their
-    session ids and send the restart prompt an agent restarted fresh with a task is owed. Returns the events."""
+    """For a project whose agents theseus supervises: reconcile them (never waiting for a slow start) and refresh their
+    session ids. Returns the events."""
     from . import supervisor
     if not supervisor.managed(conf):
         return []
@@ -404,30 +421,234 @@ def supervise(conf):
         supervisor.refresh_sessions(conf)
     except Exception as error:
         event(conf, "error", None, None, f"supervisor: {error}")
-    state = runtime(conf)
-    for name, entry in list(state.items()):
-        task_id = entry.get("restart_prompt") if isinstance(entry, dict) else None
-        if not task_id:
-            continue
-        rec = supervisor.record(conf, name)
-        if not rec or rec.get("phase") != "ready":
-            continue
-        task = t.Queue(conf).index().get(task_id)
-        entry.pop("restart_prompt", None)
-        save_runtime(conf, state)
-        if not task or task.get("status") != "in_progress":
-            continue
-        from . import gateway
-        ok, detail = ag.send_verified(conf, ag.entry(rec), gateway.restart_prompt(conf, task, "a restart on a fresh session"),
-                                      task_id)
-        event(conf, "nudged" if ok else "error", name, task_id,
-              "restart prompt after a fresh restart" + ("" if ok else f" not submitted: {detail}"))
     return events(conf, after_id=start)
 
 
+OWED_WAKE = 5.0
+SEND_WORKERS = 16
+
+
+def send_budget(conf):
+    """Seconds one tick may spend waiting for its verified sends together (queue.send_budget_seconds)."""
+    value = os.environ.get("THESEUS_SEND_BUDGET") or conf.section("queue").get("send_budget_seconds")
+    return 25.0 if value in (None, "") else float(value)
+
+
+def last_event_id(conf):
+    latest = events(conf, 1)
+    return latest[-1]["id"] if latest else 0
+
+
+def owed(conf, name):
+    """The restart prompt the agent is owed ({"task", "reason", "text", "attempts"}), or None."""
+    entry = runtime(conf).get(name, {}).get("restart_prompt")
+    if isinstance(entry, str):
+        return {"task": entry, "reason": "a restart on a fresh session", "attempts": 0}
+    return entry or None
+
+
+def owe_prompt(conf, name, task_id, reason, text=None):
+    """Owe the agent one task-aware restart prompt (text, or one built from the task). Until it is confirmed received,
+    nothing else is typed into the agent: no nudge, gateway resend or new task; a gateway resend already scheduled is
+    called off."""
+    state = runtime(conf)
+    state.setdefault(name, {})["restart_prompt"] = {"task": task_id, "reason": reason, "text": text, "attempts": 0,
+                                                    "since": time.time()}
+    save_runtime(conf, state)
+    with store.for_project(conf) as conn:
+        row = store.gateway_retry(conn, conf.name, name)
+        if row and row["phase"] == "waiting":
+            store.put_gateway_retry(conn, conf.name, name, phase="resent", resent_epoch=time.time())
+
+
+def drop_owed(conf, name):
+    state = runtime(conf)
+    if state.get(name, {}).pop("restart_prompt", None) is not None:
+        save_runtime(conf, state)
+
+
+def deliver_owed(conf, agent):
+    """Type the agent's owed restart prompt. Returns (status, detail): sent, typed (verified later in this tick),
+    failed (retried by a later tick), dropped (the task is no longer the agent's) or none."""
+    from . import gateway
+    name = agent["name"]
+    entry = owed(conf, name)
+    if not entry:
+        return "none", ""
+    task = t.Queue(conf).index().get(entry["task"])
+    current = ag.current_task(conf, name)
+    if not task or task.get("status") != "in_progress" or not current or current["id"] != task["id"]:
+        drop_owed(conf, name)
+        return "dropped", f"task {entry['task']} is no longer assigned to {name}"
+    reason = entry.get("reason") or "a restart"
+    text = entry.get("text") or gateway.restart_prompt(conf, task, reason)
+    ok, detail = ag.send_verified(conf, agent, text, task["id"], kind="prompt", reason=reason)
+    if ok and ag.batch() is not None:
+        return "typed", detail
+    if ok:
+        prompt_confirmed(conf, name, task["id"], reason)
+        return "sent", detail
+    prompt_failed(conf, name, task["id"], detail)
+    return "failed", detail
+
+
+def prompt_confirmed(conf, name, task_id, reason):
+    drop_owed(conf, name)
+    state = runtime(conf)
+    state.setdefault(name, {})["nudged"] = None
+    save_runtime(conf, state)
+    return event(conf, "nudged", name, task_id, f"restart prompt after {reason}")
+
+
+def prompt_failed(conf, name, task_id, detail):
+    """Count a restart prompt that was not confirmed; after [gateway] attempts of them, wake the coordinator instead of
+    ever falling back to a plain continue."""
+    from . import gateway
+    state = runtime(conf)
+    entry = state.get(name, {}).get("restart_prompt")
+    if not isinstance(entry, dict):
+        return []
+    entry["attempts"] = int(entry.get("attempts") or 0) + 1
+    limit = gateway.settings(conf)["attempts"]
+    if entry["attempts"] < limit:
+        save_runtime(conf, state)
+        return []
+    state[name].pop("restart_prompt", None)
+    state[name]["nudged"] = task_id
+    save_runtime(conf, state)
+    return [event(conf, "stalled", name, task_id, f"restart prompt not confirmed after {limit} attempts: {detail}")]
+
+
+def try_owed(conf, agent, info):
+    """Send the owed restart prompt once the agent is ready, idle and not still verifying another send."""
+    if agent.get("managed") and agent.get("phase") != "ready":
+        return []
+    if info["state"] in ("offline", "starting", "blocked", "failed") or info.get("busy"):
+        return []
+    start = last_event_id(conf)
+    deliver_owed(conf, agent)
+    return events(conf, after_id=start)
+
+
+def settle_send(conf, item, result, detail):
+    """Act on a verified send of a tick once it resolved: a failure records send_failed and, for a task message, the
+    error event; a restart prompt is confirmed or counted; a failed clear command drops the prompt that was to follow."""
+    name, task, kind = item["agent"], item.get("task"), item.get("kind")
+    if result == "ok":
+        return [prompt_confirmed(conf, name, task, item.get("reason") or "a restart")] if kind == "prompt" else []
+    found = [ag.record_send_failed(conf, name, task, item["text"], detail)] if item.get("record", True) else []
+    if kind == "task":
+        found.append(event(conf, "error", name, task, f"task message not submitted: {detail}"))
+    elif kind == "prompt":
+        found += prompt_failed(conf, name, task, detail)
+    elif kind == "clear":
+        drop_owed(conf, name)
+    return found
+
+
+def resume_sends(conf, registered, sends):
+    """Pick up the sends an earlier tick typed but could not finish verifying: resolve them now, or (after one more
+    Enter for a text still in the input line) verify them in this tick."""
+    by_name = {agent["name"]: agent for agent in registered}
+    state = runtime(conf)
+    carried = {name: entry.pop("verify") for name, entry in state.items() if isinstance(entry, dict) and entry.get("verify")}
+    if not carried:
+        return []
+    save_runtime(conf, state)
+    found = []
+    for name, pending in carried.items():
+        agent = by_name.get(name)
+        if agent is None:
+            continue
+        try:
+            ctx = ag.send_context(conf, agent, pending.get("profile"))
+            result, detail = ag.advance(ctx, pending)
+        except Exception as error:
+            result, detail = "failed", f"verification failed: {error}"
+        if result == "wait":
+            sends.items.append({**pending, "ctx": ctx, "entry": agent})
+        else:
+            found += settle_send(conf, pending, result, detail)
+    return found
+
+
+def poll_send(item, sends):
+    ctx = item["ctx"]
+    while True:
+        try:
+            result, detail = ag.advance(ctx, item)
+        except Exception as error:
+            return "failed", f"verification failed: {error}"
+        if result != "wait":
+            return result, detail
+        left = sends.remaining()
+        if left <= 0:
+            return "wait", None
+        time.sleep(min(ctx["poll"], left))
+
+
+def press_enter(sends, items):
+    """Press Enter in every pane typed into this round, after one shared pause, and start their verification windows."""
+    due = [item for item in items if item.get("enter_at")]
+    if not due:
+        return
+    time.sleep(max(0.0, max(item["enter_at"] for item in due) - time.monotonic()))
+    for item in due:
+        ctx = item.pop("enter_at") and item["ctx"]
+        try:
+            ag.on(ctx["server"], "send-keys", "-t", ctx["pane"], "Enter")
+        except Exception:
+            pass
+        item["deadline"] = time.time() + ctx["timeout"]
+
+
+def verify_sends(conf, sends):
+    """Verify every send this tick typed at once, in a bounded pool of threads that only read panes and press Enter,
+    within the tick's send budget. Results are applied here, on the queue's own thread; a restart prompt owed after a
+    confirmed clear command is typed and verified in a second round. Sends still unresolved when the budget runs out
+    are carried to the next tick. Returns the events."""
+    from concurrent.futures import ThreadPoolExecutor
+    found = []
+    while True:
+        waiting = [item for item in sends.items if "result" not in item]
+        if not waiting:
+            break
+        press_enter(sends, waiting)
+        with ThreadPoolExecutor(max_workers=min(SEND_WORKERS, len(waiting))) as pool:
+            outcomes = list(pool.map(lambda item: poll_send(item, sends), waiting))
+        follow = []
+        for item, (result, detail) in zip(waiting, outcomes):
+            if result == "wait":
+                item["result"] = None
+                continue
+            item["result"] = result
+            found += settle_send(conf, item, result, detail)
+            if result == "ok" and item.get("kind") == "clear" and owed(conf, item["agent"]):
+                follow.append(item)
+        typed = 0
+        for item in follow:
+            ctx = item["ctx"]
+            if sends.remaining() <= 0 or ag.pane_busy(conf, ctx["pane"], ctx["profile"], server=ctx["server"]):
+                continue
+            before, start = len(sends.items), last_event_id(conf)
+            deliver_owed(conf, item["entry"])
+            found += events(conf, after_id=start)
+            typed += len(sends.items) - before
+        if not typed:
+            break
+    leftovers = [item for item in sends.items if item.get("result") is None]
+    if leftovers:
+        state = runtime(conf)
+        for item in leftovers:
+            pending = {key: value for key, value in item.items() if key not in ("ctx", "entry", "result")}
+            state.setdefault(item["agent"], {})["verify"] = {**pending, "carried": True}
+        save_runtime(conf, state)
+    return found
+
+
 def wake_times(conf, now=None):
-    """Epochs strictly after now when something in this project becomes due: gateway resends and supervised agent
-    restarts after their backoff."""
+    """Epochs strictly after now when something in this project becomes due: gateway resends, supervised agent
+    restarts after their backoff, and soon for a send still being verified or a restart prompt still owed."""
     from . import supervisor
     now = time.time() if now is None else now
     found = []
@@ -439,6 +660,9 @@ def wake_times(conf, now=None):
         found += supervisor.wake_times(conf, now)
     except Exception:
         pass
+    for entry in runtime(conf).values():
+        if isinstance(entry, dict) and (entry.get("verify") or entry.get("restart_prompt")):
+            found.append(now + OWED_WAKE)
     return sorted(epoch for epoch in found if epoch > now)
 
 

@@ -5,9 +5,11 @@ machine state, not repository content. It starts from [[instances.panes]] in the
 project runs: `theseus agents add|remove|enable|disable`. A disabled agent keeps its record but receives no new work
 from the queue. A project's <data>/agents.json, the registry before the store, is imported once and left in place.
 """
+import contextvars
 import os
 import re
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -301,66 +303,142 @@ def clear_input(server, pane, key, input_pattern, attempts=12):
             return
 
 
-def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, record=True, sleep=time.sleep):
-    """Type text into an agent's pane and confirm it was submitted: within instances.send_verify_seconds the pane must
-    show the profile's busy marker (expect_busy) or, for slash commands, no longer hold the text in its input line.
-    If the text is still in the input line, Enter is pressed once more and the pane checked again. Returns (ok, detail);
-    a failure records a send_failed event unless record is False. Profiles without a busy marker are sent unverified."""
+_BATCH = contextvars.ContextVar("theseus_send_batch", default=None)
+ENTER_PAUSE = 0.3
+
+
+class Batch:
+    """The verified sends of one queue tick: each is typed at once and recorded here, and the tick verifies them all
+    together (workqueue.verify_sends) instead of waiting on each in turn."""
+
+    def __init__(self, budget):
+        self.items = []
+        self.deadline = time.monotonic() + max(0.0, float(budget))
+
+    def remaining(self):
+        return max(0.0, self.deadline - time.monotonic())
+
+    def agents(self):
+        return {item["agent"] for item in self.items}
+
+
+@contextmanager
+def batched(budget):
+    """Collect the verified sends made inside the block into a Batch instead of waiting for each."""
+    batch = Batch(budget)
+    token = _BATCH.set(batch)
+    try:
+        yield batch
+    finally:
+        _BATCH.reset(token)
+
+
+def batch():
+    return _BATCH.get()
+
+
+def send_context(conf, agent, profile=None):
+    """What a verified send to this agent needs: its pane and server and the profile's busy marker, input line, paste
+    placeholder and clear key (all from the profile, so any agent CLI with these settings is verified)."""
     from . import profiles
     from . import workqueue
     server, pane = where(agent)
     profile = profile or workqueue.launched(conf, agent)
     settings = profiles.interactive(conf, profile)
-    placeholder = settings.get("paste_placeholder")
     try:
         busy_pattern = profiles.instance_env(conf, profile)["THESEUS_BUSY_PATTERN"]
     except profiles.ProfileError:
         busy_pattern = conf.section("instances").get("busy_pattern") or ""
     timeout, poll = send_settings(conf)
-    input_pattern = settings.get("input_pattern")
+    return {"server": server, "pane": pane, "profile": profile, "busy": busy_pattern, "timeout": timeout, "poll": poll,
+            "input": settings.get("input_pattern"), "placeholder": settings.get("paste_placeholder"),
+            "clear": settings.get("clear_input")}
 
-    def submitted():
-        screen = pane_screen(pane, server)
-        if expect_busy:
-            return any(busy_pattern in line for line in screen[-3:]), screen
-        return not input_holds(screen, text, input_pattern, placeholder=placeholder), screen
 
-    def wait():
-        deadline = time.monotonic() + timeout
-        while True:
-            ok, screen = submitted()
-            if ok or time.monotonic() >= deadline:
-                return ok, screen
-            sleep(poll)
-
-    if settings.get("clear_input"):
+def type_text(ctx, text, sleep=time.sleep, enter=True):
+    """Empty the input line, type text and (enter) press Enter after a short pause. Returns '' or the tmux error."""
+    server, pane = ctx["server"], ctx["pane"]
+    if ctx["clear"]:
         if server.is_legacy:
-            tmux("send-keys", "-t", pane, settings["clear_input"])
+            tmux("send-keys", "-t", pane, ctx["clear"])
         else:
-            clear_input(server, pane, settings["clear_input"], input_pattern)
+            clear_input(server, pane, ctx["clear"], ctx["input"])
     typed = tmux("send-keys", "-t", pane, "-l", text) if server.is_legacy else server.send_literal(pane, text)
     if typed.returncode != 0:
-        detail = f"tmux send-keys failed: {(typed.stderr or '').strip()[:120]}"
-    else:
-        sleep(0.3)
+        return f"tmux send-keys failed: {(typed.stderr or '').strip()[:120]}"
+    if enter:
+        sleep(ENTER_PAUSE)
         on(server, "send-keys", "-t", pane, "Enter")
-        if expect_busy and not busy_pattern:
-            return True, "sent (unverified: the profile has no busy marker)"
-        ok, screen = wait()
-        if ok:
-            return True, "sent"
-        if input_holds(screen, text, input_pattern, placeholder=placeholder):
-            on(server, "send-keys", "-t", pane, "Enter")
-            ok, screen = wait()
-            if ok:
-                return True, "sent after a second Enter"
-            detail = "the input line still holds the text after a second Enter"
-        else:
-            detail = "not busy after Enter and the text is not in the input line"
-        detail += f" ({timeout:g}s each)"
+    return ""
+
+
+def advance(ctx, pending, now=None):
+    """One look at a typed text: ("ok", detail) once the pane shows the busy marker (expect_busy) or, for slash
+    commands, no longer holds the text; ("wait", None) before the deadline, or after pressing Enter a second time when
+    the input line still holds the text; ("failed", detail) after that. A send carried over from an earlier tick
+    (pending["carried"]) whose text has left the input line counts as submitted: the agent may have answered and gone
+    idle between ticks, so a missed busy marker proves nothing."""
+    now = time.time() if now is None else now
+    screen = pane_screen(ctx["pane"], ctx["server"])
+    text, timeout = pending["text"], ctx["timeout"]
+    holds = input_holds(screen, text, ctx["input"], placeholder=ctx["placeholder"])
+    if pending.get("expect_busy", True):
+        if any(ctx["busy"] in line for line in screen[-3:]):
+            return "ok", "sent" if pending["enters"] < 2 else "sent after a second Enter"
+    elif not holds:
+        return "ok", "sent" if pending["enters"] < 2 else "sent after a second Enter"
+    if pending.get("carried") and not holds:
+        return "ok", "sent (seen after the tick)"
+    if now < pending["deadline"]:
+        return "wait", None
+    if pending["enters"] < 2 and holds:
+        on(ctx["server"], "send-keys", "-t", ctx["pane"], "Enter")
+        pending.update(enters=2, deadline=now + timeout)
+        return "wait", None
+    if pending["enters"] >= 2:
+        return "failed", f"the input line still holds the text after a second Enter ({timeout:g}s each)"
+    return "failed", f"not busy after Enter and the text is not in the input line ({timeout:g}s each)"
+
+
+def record_send_failed(conf, name, task, text, detail):
+    from . import workqueue
+    short = " ".join(text.split())
+    return workqueue.event(conf, "send_failed", name, task, f"{detail}: {short[:60]!r}")
+
+
+def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, record=True, sleep=time.sleep,
+                  kind="plain", **extra):
+    """Type text into an agent's pane and confirm it was submitted: within instances.send_verify_seconds the pane must
+    show the profile's busy marker (expect_busy) or, for slash commands, no longer hold the text in its input line.
+    If the text is still in the input line, Enter is pressed once more and the pane checked again. Returns (ok, detail);
+    a failure records a send_failed event unless record is False. Profiles without a busy marker are sent unverified.
+    Inside a queue tick (batched) the text is typed at once and Enter and the verification are left to the tick, which
+    does them for all its sends together: the result is (True, "typed; verifying") and kind with extra says what to do
+    once it resolves (workqueue.settle_send)."""
+    ctx = send_context(conf, agent, profile)
+    current = batch()
+    verified = not expect_busy or bool(ctx["busy"])
+    error = type_text(ctx, text, sleep, enter=current is None or not verified)
+    if not error and not verified:
+        return True, "sent (unverified: the profile has no busy marker)"
+    now = time.time()
+    pending = {"agent": agent["name"], "text": text, "task": task, "expect_busy": expect_busy, "profile": ctx["profile"],
+               "kind": kind, "enters": 1, "typed": now, "deadline": now + ctx["timeout"], "record": record, **extra}
+    if not error and current is not None:
+        current.items.append({**pending, "ctx": ctx, "entry": agent, "enter_at": time.monotonic() + ENTER_PAUSE})
+        return True, "typed; verifying"
+    if error:
+        result, detail = "failed", error
+    else:
+        while True:
+            result, detail = advance(ctx, pending)
+            if result != "wait":
+                break
+            sleep(ctx["poll"])
+    if result == "ok":
+        return True, detail
     if record:
-        short = " ".join(text.split())
-        workqueue.event(conf, "send_failed", agent["name"], task, f"{detail}: {short[:60]!r}")
+        record_send_failed(conf, agent["name"], task, text, detail)
     return False, detail
 
 

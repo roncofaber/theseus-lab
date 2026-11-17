@@ -567,11 +567,9 @@ def settle(conf, rec, phase, detail, wait=False):
 
 
 def want_prompt(conf, name, task_id):
-    """Ask the queue to send the task's restart prompt once the freshly started agent is ready."""
+    """Owe the freshly started agent its task's restart prompt; the queue sends it once the agent is ready."""
     from . import workqueue
-    state = workqueue.runtime(conf)
-    state.setdefault(name, {})["restart_prompt"] = task_id
-    workqueue.save_runtime(conf, state)
+    workqueue.owe_prompt(conf, name, task_id, "a restart on a fresh session")
 
 
 # crash handling and restart policy
