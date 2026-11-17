@@ -52,6 +52,19 @@ def record_committed(conf, task_id, base):
     return pick(json.loads(shown.stdout)) == pick(json.loads(conf.tasks_file.read_text()))
 
 
+def base_mismatch(conf, task_id, base):
+    """What to do when the task record at the assignment base is not the one in the working tree."""
+    git = conf.section("git")
+    ref, remote, branch = git.get("base") or "HEAD", git.get("remote") or "origin", git.get("branch") or "main"
+    where = f"the assignment base {ref} ({base[:12]})"
+    if record_committed(conf, task_id, "HEAD"):
+        if ref.startswith(remote + "/"):
+            return (f"the {task_id} record is committed locally but not at {where}: push it (`git push {remote} "
+                    f"HEAD:{branch}`), or set [git] base = \"HEAD\" to assign from local commits")
+        return f"the {task_id} record is committed but not at {where}; move {ref} to a commit that has it"
+    return f"the {task_id} record is not committed at {where}: commit {cfg.TASKS} and make {ref} include it"
+
+
 def create_worktree(conf, name, base):
     worktree = conf.worktrees / name
     if worktree.exists():
@@ -89,7 +102,7 @@ def assign(conf, task_id, name, provider, model, owner=None, commit=True, instan
         commit_record(conf, f"chore: queue {task_id}")
     base = base_commit(conf)
     if not record_committed(conf, task_id, base):
-        raise IntegrationError(f"the {task_id} record differs at base {base[:12]}; commit it there first")
+        raise IntegrationError(base_mismatch(conf, task_id, base))
     worktree = create_worktree(conf, name, base)
     rooms.exclude_dirty(conf, task, worktree)
     try:

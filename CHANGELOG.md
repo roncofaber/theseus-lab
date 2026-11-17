@@ -78,6 +78,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- `theseus queue run` and `queue wait` read the project and host configuration again when one of its files changes, and reconcile retires an agent only when the current files no longer configure it, so an older watcher no longer stops an agent that `theseus agents scale` just added.
+- An assignment whose task record is committed locally but not at a remote `[git] base` says to push it (`git push origin HEAD:main`) or to set `base = "HEAD"`.
+- `theseus agents down --force` on a busy agent stops it within seconds (SIGTERM, then SIGKILL) instead of waiting up to three minutes for it to go idle.
+
 - Flaky supervisor tests: tmux 3.4 can miss the SIGCHLD of a pane's process (seen on one Linux host, not on CI), so `pane-died` fires only once another SIGCHLD reaches the server; the tests now signal SIGCHLD to their private server while they wait.
 - A hand-made pane that no longer exists now shows as `offline`: tmux 3.4 exits 0 with empty output for `display-message` on a missing pane, which counted as alive.
 - Busy markers are looked for in the last three non-blank screen lines, so a pane with empty rows below its output is still seen working.

@@ -271,3 +271,47 @@ class RedactionTests(Sandbox):
         self.assertEqual(5, len(text.split("\n")), "lines are kept")
         self.assertIn("\n  indented line kept\n", text)
         self.assertEqual(0o600, path.stat().st_mode & 0o777)
+
+
+class LongRunningQueueTests(Sandbox):
+    def setUp(self):
+        super().setUp()
+        self.scaffold()
+
+    def test_a_running_queue_rereads_changed_config_and_never_retires_an_agent_added_since(self):
+        from theseus import supervisor, workqueue as wq
+        conf = cfg.load(root=self.project)
+        conf, seen = wq.reloaded(conf, None)
+        self.assertIs(conf, wq.reloaded(conf, seen)[0], "unchanged files keep the configuration")
+        self.write("theseus.local.toml", "[agents]\nmanaged = true\n\n[agents.counts]\nclaude-code = 1\n")
+        old = conf
+        conf, seen = wq.reloaded(conf, seen)
+        self.assertEqual({"claude-code": 1}, supervisor.counts(conf))
+        self.assertEqual({}, supervisor.counts(old))
+        self.assertEqual({"demo-port-claude-code-1"}, supervisor.configured_now(old),
+                         "reconcile asks the current files before retiring")
+
+    def test_an_unpushed_record_says_to_push_it(self):
+        from theseus import integrate
+        base = self.git("rev-parse", "HEAD").stdout.strip()
+        self.theseus("tasks", "add", "late-task", "--role", "research", "--owned", "docs/investigations/late-task.md",
+                     "--objective", "Do it.", "--contract", "All variants.", "--accept", "Done.")
+        self.git("commit", "-q", "-am", "queue late-task")
+        self.write("theseus.local.toml", '[git]\nbase = "origin/main"\n')
+        message = integrate.base_mismatch(cfg.load(root=self.project), "late-task", base)
+        self.assertIn("committed locally but not at the assignment base origin/main", message)
+        self.assertIn("`git push origin HEAD:main`", message)
+
+    def test_down_force_on_a_busy_agent_kills_it_without_waiting_for_idle(self):
+        from unittest import mock
+        from theseus import supervisor
+        rec = {"name": "a1", "managed": True, "target": "=demo-port--a1:", "pane": "=demo-port--a1:"}
+        server = mock.Mock()
+        with mock.patch.object(supervisor, "records", return_value={"a1": rec}), \
+                mock.patch.object(supervisor, "current_task", return_value={"id": "t1"}), \
+                mock.patch.object(supervisor, "busy", return_value=True), \
+                mock.patch.object(supervisor, "server_of", return_value=server), \
+                mock.patch.object(supervisor, "update"), \
+                mock.patch.object(supervisor, "stop", return_value=(True, "killed")) as stop:
+            self.assertEqual([("a1", "stopped", "killed")], supervisor.down(cfg.load(root=self.project), ["a1"], force=True))
+        stop.assert_called_once_with(mock.ANY, rec, graceful=False, reason="down", grace=5)

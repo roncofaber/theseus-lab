@@ -60,7 +60,7 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
         raise integrate.IntegrationError("task records break the Supervisor rules; fix them before dispatching:\n" + "\n".join(problems))
     base = integrate.base_commit(conf)
     if not integrate.record_committed(conf, task_id, base):
-        raise integrate.IntegrationError(f"the {task_id} record differs at base {base[:12]}")
+        raise integrate.IntegrationError(integrate.base_mismatch(conf, task_id, base))
     name = name or task_id
     worktree = conf.worktrees / name
     record_dir = conf.workers_dir / name

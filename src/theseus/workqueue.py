@@ -690,9 +690,40 @@ def housekeeping():
         print(f"theseus store: housekeeping failed: {error}", file=sys.stderr)
 
 
+def config_signature(conf):
+    """Modification times of the files a project's configuration is read from: theseus.toml, theseus.local.toml and
+    the host files."""
+    from . import hostconfig
+    files = (conf.root / cfg.CONFIG_NAME, conf.root / cfg.LOCAL_NAME, hostconfig.path(), hostconfig.pools_path(),
+             hostconfig.store_path())
+    found = []
+    for path in files:
+        try:
+            found.append((str(path), path.stat().st_mtime_ns))
+        except OSError:
+            found.append((str(path), None))
+    return tuple(found)
+
+
+def reloaded(conf, seen):
+    """(conf, signature): the project configuration read again when one of its files changed since seen, so a
+    long-running queue never acts on counts or profiles another command has since rewritten. A file that no longer
+    parses keeps the configuration in use."""
+    current = config_signature(conf)
+    if seen is None or current == seen:
+        return conf, current
+    try:
+        return cfg.load(root=conf.root), current
+    except cfg.ConfigError as error:
+        print(f"theseus queue: keeping the configuration in use: {error}", file=sys.stderr)
+        return conf, current
+
+
 def run(conf, interval=30, once=False):
     started = time.time()
+    seen = None
     while True:
+        conf, seen = reloaded(conf, seen)
         for record in tick(conf):
             print(f"{record['time']} {record['kind']:<10} {record['agent'] or '-':<18} {record['task'] or '-'} {record['detail']}")
             sys.stdout.flush()
@@ -741,7 +772,9 @@ def wait(conf, timeout=10800, interval=30, drive=True, clock=time.time, sleep=ti
     start = latest[-1]["id"] if latest else 0
     started = clock()
     deadline = started + timeout
+    seen = None
     while clock() < deadline:
+        conf, seen = reloaded(conf, seen)
         if drive:
             tick(conf)
         new = events(conf, after_id=start)

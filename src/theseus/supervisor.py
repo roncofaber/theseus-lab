@@ -747,10 +747,23 @@ def reconcile(conf, names=None, wait=False, dry_run=False, reset=False):
         actions.append((name, *action))
     if not names:
         known = {w["name"] for w in wanted}
-        for name, rec in regs.items():
-            if rec.get("managed") and name not in known:
-                actions.append((name, *retire(conf, srv, rec, dry_run)))
+        extra = [rec for name, rec in regs.items() if rec.get("managed") and name not in known]
+        current = configured_now(conf) if extra else set()
+        for rec in extra:
+            if current is None or rec["name"] in current:
+                actions.append((rec["name"], "kept", "configured in the current files"))
+            else:
+                actions.append((rec["name"], *retire(conf, srv, rec, dry_run)))
     return actions
+
+
+def configured_now(conf):
+    """The agent names the project's files configure right now, or None when they cannot be read: a caller holding an
+    older configuration (a long-running queue) must never retire an agent that another command has since added."""
+    try:
+        return {w["name"] for w in desired(cfg.load(root=conf.root))}
+    except (cfg.ConfigError, SupervisorError):
+        return None
 
 
 def close_lost(conf, srv, regs, dry_run):
@@ -937,19 +950,20 @@ def wait_dead(srv, rec, timeout=30, poll=None):
         time.sleep(poll)
 
 
-def kill_pane(srv, rec):
-    """End the pane's process with SIGTERM, then SIGKILL; the pane stays (remain-on-exit) for the next start."""
+def kill_pane(srv, rec, grace=10):
+    """End the pane's process with SIGTERM, then SIGKILL after grace seconds; the pane stays (remain-on-exit) for the
+    next start."""
     import signal
     info = pane_info(srv, rec["target"]) or {}
     pid = info.get("pane_pid", "")
     if not pid.isdigit() or info.get("pane_dead") == "1":
         return
-    for sig, grace in ((signal.SIGTERM, 10), (signal.SIGKILL, 5)):
+    for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 5)):
         try:
             os.kill(int(pid), sig)
         except OSError:
             return
-        if wait_dead(srv, rec, timeout=grace, poll=0.2):
+        if wait_dead(srv, rec, timeout=wait, poll=0.2):
             return
 
 
@@ -972,7 +986,7 @@ def plan_stop(conf, name, reason):
             store.update_run(conn, run["id"], stop_reason=reason)
 
 
-def stop(conf, rec, graceful=True, wait=True, reason="down", idle_timeout=180):
+def stop(conf, rec, graceful=True, wait=True, reason="down", idle_timeout=180, grace=10):
     """Type the profile's exit command at an idle prompt (graceful), wait for the pane to die, then close the run.
     Returns (ok, detail); without wait it returns once the command is typed."""
     from . import workqueue
@@ -994,9 +1008,9 @@ def stop(conf, rec, graceful=True, wait=True, reason="down", idle_timeout=180):
         if not wait:
             return True, "exit command sent"
         if not wait_dead(srv, rec, timeout=float(os.environ.get("THESEUS_STOP_SECONDS") or 30)):
-            kill_pane(srv, rec)
+            kill_pane(srv, rec, grace)
     elif info.get("pane_dead") != "1":
-        kill_pane(srv, rec)
+        kill_pane(srv, rec, grace)
     info = pane_info(srv, rec["target"]) or {}
     record_exit(conf, name, info.get("@theseus_gen"), info.get("pane_dead_status"), info.get("pane_dead_signal"), srv)
     run = last_run(conf, name)
@@ -1020,7 +1034,8 @@ def down(conf, names=None, force=False, now=False):
         if task and not force:
             results.append((name, "refused", f"holds task {task['id']}; --force stops it anyway (the task stays assigned)"))
             continue
-        ok, detail = stop(conf, rec, graceful=not now, reason="down")
+        graceful = not now and not (force and busy(conf, rec))
+        ok, detail = stop(conf, rec, graceful=graceful, reason="down", grace=5 if force else 10)
         if not ok:
             results.append((name, "refused", detail))
             continue
