@@ -166,6 +166,26 @@ class TaskFlowTests(Sandbox):
         self.assertNotEqual(0, self.git("cat-file", "-e", "HEAD:src/capture/old.py", check=False).returncode)
         self.theseus("tasks", "complete", TASK, "--summary", "moved", "--check", "manual", "--log", str(worktree / ".theseus/handoff.md"))
 
+    def test_worker_patches_never_conflict_on_generated_indexes(self):
+        self.add_task()
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        worktree = self.tmp / "worktrees/worker-1-a"
+        self.deliver(worktree)
+        index = worktree / "docs/investigations/README.md"
+        index.write_text(index.read_text() + "stale worker copy\n")
+        self.git("add", "-N", "docs/investigations/README.md", cwd=worktree)
+        stale = self.git("diff", "--", "docs/investigations/README.md", cwd=worktree).stdout
+        self.git("checkout", "--", "docs/investigations/README.md", cwd=worktree)
+        self.write(".theseus/patches/02-index.patch", stale, root=worktree)
+        main_index = self.project / "docs/investigations/README.md"
+        main_index.write_text(main_index.read_text() + "main moved\n")
+        self.git("commit", "-q", "-am", "main index moved")
+        self.theseus("merge", TASK)
+        text = main_index.read_text()
+        self.assertNotIn("stale worker copy", text)
+        self.assertNotIn("<<<<<<<", text)
+        self.assertIn(TASK, text)
+
     def test_a_released_task_can_retire_its_old_worktree(self):
         self.add_task()
         self.theseus("instance", "assign", TASK, "worker-1", "a")
