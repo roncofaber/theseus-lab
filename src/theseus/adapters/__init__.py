@@ -16,9 +16,11 @@ A state is a dict with:
 - errors: the newest API errors, as {"time", "error", "text"}, where error is the CLI's own error kind (a hint for
   theseus.gateway.classify) or None;
 - last: "answer", "error" or None, for the newest assistant entry;
-- entries: the newest conversation entries, as {"kind", "text", "time"}. kind is "user", "assistant", "tool" (with
-  "name") or "result" (with "error"); thinking is never included;
-- total: how many entries were ever read, so a reader can ask only for what is new.
+- entries: the newest conversation entries, as {"kind", "text", "time", "n"}. kind is "user", "assistant", "tool"
+  (with "name") or "result" (with "error"); n numbers the entries of the record from 1, so a reader asks only for
+  what is new; thinking is never included. The list is replaced, never changed in place;
+- total: how many entries were ever read;
+- key: names the record (a new key means a new session or a rewritten file, so a reader starts over).
 
 Two names need no module: "pane-history" (no record is read; the console's Conversation tab shows the pane's tmux
 scrollback, for CLIs that print inline) and "none" (no Conversation tab; context and gateway errors come from the

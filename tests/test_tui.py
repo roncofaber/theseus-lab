@@ -944,23 +944,26 @@ class ConsoleTests(DashboardBase):
             first = mirror.visible_size()
             self.assertGreater(first[0], 100)
             self.assertGreater(first[1], 10)
-            for columns, scrolls in ((first[0], False), (first[0] + 1, True)):
-                width[0] = columns
-                await self.settle(pilot, lambda: mirror.virtual_size.width >= columns and mirror.max_scroll_y > 0)
-                self.assertEqual(scrolls, mirror.max_scroll_x > 0, f"a pane {columns} columns wide in {first}")
+            width[0] = first[0]
+            await self.settle(pilot, lambda: mirror.virtual_size.width == first[0] and mirror.max_scroll_y > 0
+                              and mirror.max_scroll_x == 0)
+            width[0] = first[0] + 1
+            await self.settle(pilot, lambda: mirror.virtual_size.width == first[0] + 1 and mirror.max_scroll_x > 0)
             width[0] = 0
-            popup.fit_seconds = 0.5
-            self.app._driver._size = Size(150, 50)
-            self.app.post_message(Resize(Size(150, 50), Size(150, 50)))
-            await self.settle(pilot, lambda: mirror.visible_size() != first and popup.fit_timer is not None)
-            between = mirror.visible_size()
-            self.app._driver._size = Size(130, 45)
-            self.app.post_message(Resize(Size(130, 45), Size(130, 45)))
-            await self.settle(pilot, lambda: mirror.visible_size() not in (first, between)
-                              and ("worker-a", *mirror.visible_size()) in self.fits)
-            final = mirror.visible_size()
-            self.assertLess(final[0], between[0])
-            self.assertNotIn(("worker-a", *between), self.fits, "a size the mirror only passed through is not applied")
+            popup.fit_seconds = 3600
+            sizes = []
+            for size in (Size(150, 50), Size(130, 45)):
+                self.app._driver._size = size
+                self.app.post_message(Resize(size, size))
+                await self.settle(pilot, lambda: mirror.visible_size() not in (first, *sizes))
+                sizes.append(mirror.visible_size())
+            self.assertIsNotNone(popup.fit_timer)
+            self.assertEqual({first}, {(columns, rows) for _, columns, rows in self.fits[1:]},
+                             "the window keeps its size while the mirror is still changing")
+            popup.fit_timer.stop()
+            popup.fit_now()
+            await self.settle(pilot, lambda: ("worker-a", *sizes[-1]) in self.fits)
+            self.assertNotIn(("worker-a", *sizes[0]), self.fits, "a size the mirror only passed through is not applied")
             await pilot.press("escape")
             await self.settle(pilot, lambda: len(self.app.screen_stack) == 1 and self.fits[-1] == ("worker-a", None, None))
             done = list(self.fits)
@@ -1198,9 +1201,10 @@ class TranscriptTests(Sandbox):
         from theseus.tui.app import conversation_reader
         self.scaffold()
         secret = "sk-ant-api03-abcdefghijklmnop"
-        state = {"total": 3, "entries": [{"kind": "user", "text": "first"},
-                                         {"kind": "assistant", "text": f"key {secret} for someone@example.org"},
-                                         {"kind": "result", "text": "ok"}]}
+        state = {"total": 3, "key": "a", "entries": [
+            {"kind": "user", "text": "first", "n": 1},
+            {"kind": "assistant", "text": f"key {secret} for someone@example.org", "n": 2},
+            {"kind": "tool", "name": "Read", "text": "ok", "n": 3}]}
         with mock.patch.object(agents, "get", return_value={"name": "w"}), \
                 mock.patch.object(agents, "session_transcript", return_value=state):
             read = conversation_reader(self.project, "w", "%1", "claude-code-jsonl")
@@ -1210,6 +1214,9 @@ class TranscriptTests(Sandbox):
             self.assertNotIn("someone@example.org", entries[1]["text"])
             self.assertEqual(["ok"], [e["text"] for e in read(2)[1]])
             self.assertEqual((3, 3, True), (read(5)[0], len(read(5)[1]), read(5)[2]))
+            state.update(key="b", entries=[{"kind": "user", "text": "new session", "n": 1}], total=1)
+            self.assertEqual((1, True), (read(3)[0], read(3)[2]), "another record starts over")
+            self.assertEqual((1, [], False), read(1))
         with mock.patch.object(agents, "get", side_effect=agents.AgentError("gone")):
             self.assertIsNone(conversation_reader(self.project, "w", "%1", "claude-code-jsonl")(0))
 

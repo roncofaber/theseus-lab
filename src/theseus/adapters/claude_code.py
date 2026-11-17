@@ -124,6 +124,8 @@ def entries_of(record):
 def consume(state, record):
     found = entries_of(record)
     if found:
+        for number, entry in enumerate(found, state["total"] + 1):
+            entry["n"] = number
         state["entries"] = (state["entries"] + found)[-KEEP_ENTRIES:]
         state["total"] += len(found)
     if record.get("type") != "assistant":
@@ -159,7 +161,7 @@ def read_locked(path):
     if state is None or state["inode"] != info.st_ino or info.st_size < state["offset"]:
         start = max(0, info.st_size - TAIL_BYTES)
         state = {"inode": info.st_ino, "offset": start, "partial": start > 0, "tokens": None, "model": None,
-                 "errors": [], "last": None, "entries": [], "total": 0}
+                 "errors": [], "last": None, "entries": [], "total": 0, "key": f"{path}:{info.st_ino}"}
     if info.st_size > state["offset"]:
         try:
             with open(path, "rb") as handle:

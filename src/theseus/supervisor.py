@@ -1292,10 +1292,10 @@ def open_window(rec, read_only=False):
     return True, f"opened {rec['name']} in a new window (detach with {settings().get('detach_key') or 'C-q'})"
 
 
-def transcript(rec):
-    """The conversation transcript file of the agent's current session, or None."""
-    session = rec.get("session_id")
-    if not session:
-        return None
-    base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")) / "projects"
-    return next(iter(sorted(base.glob(f"*/{session}.jsonl"))), None)
+def transcript(conf, rec):
+    """The record of the agent's current session from its profile's transcript adapter (theseus.adapters), when it
+    exists, or None."""
+    from . import adapters
+    _, adapter, interactive = adapters.resolve(conf, rec.get("profile"))
+    path = adapter.session_file(conf, interactive, rec.get("session_id"), str(cwd(conf))) if adapter else None
+    return path if path and path.exists() else None

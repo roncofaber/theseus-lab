@@ -1016,11 +1016,13 @@ def conversation_reader(root, name, pane=None, mode="none"):
             return None
         if not state:
             return None
-        total, entries = state["total"], state["entries"]
-        reset = total < after
-        fresh = total - (0 if reset else after)
+        entries = state["entries"]
+        reset = loaded.get("key", state.get("key")) != state.get("key")
+        loaded["key"] = state.get("key")
+        total = entries[-1]["n"] if entries else 0
+        reset = reset or total < after
         shown = []
-        for entry in entries[-fresh:] if fresh > 0 else []:
+        for entry in entries if reset else [e for e in entries if e["n"] > after]:
             entry = {**entry, "text": gateway.scrub(entry.get("text"))}
             if entry.get("name"):
                 entry["name"] = gateway.scrub(entry["name"])

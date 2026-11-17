@@ -208,8 +208,9 @@ A state is a dict with:
 - `tokens` and `model`: the context in use after the last answer and its model, or None;
 - `errors`: the newest API errors as `{"time", "error", "text"}`, where `error` is the CLI's own error kind or None;
 - `last`: `answer`, `error` or None, for the newest assistant entry;
-- `entries`: the newest conversation entries as `{"kind", "text", "time"}`, with `kind` one of `user`, `assistant`, `tool` (plus `name`) and `result` (plus `error`);
-- `total`: how many entries were ever read, so the console asks only for new ones.
+- `entries`: the newest conversation entries as `{"kind", "text", "time", "n"}`, with `kind` one of `user`, `assistant`, `tool` (plus `name`) and `result` (plus `error`), and `n` numbering the entries of the record from 1 so the console asks only for new ones; the list is replaced, never changed in place;
+- `total`: how many entries were ever read;
+- `key`: names the record; a new key (a new session, a rewritten file) makes the console start over.
 
 Adding a CLI means writing that module in its own record format, adding its name to `ADAPTERS`, and setting `transcript = "<name>"` in the preset's `interactive` table. The console redacts API keys, key hashes and email addresses in everything it shows from a transcript or the scrollback.
 

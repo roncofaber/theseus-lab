@@ -416,6 +416,7 @@ class SupervisorTests(Sandbox):
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({"type": "assistant", "message": {"model": "m", "usage": {"input_tokens": 1234}}}) + "\n")
         self.assertEqual(1234, agents.session_transcript(self.conf(), rec)["tokens"])
+        self.assertEqual(str(path), self.theseus("agents", "logs", "demo-fake-1", "--transcript").stdout.strip())
         self.assertEqual(1234, agents.state(self.conf(), rec)["context"]["tokens"])
 
     def test_scale_writes_the_local_count_and_reconciles(self):

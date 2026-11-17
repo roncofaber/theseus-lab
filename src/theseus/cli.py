@@ -669,7 +669,7 @@ def cmd_supervised(args):
             os.execvp(argv[0], argv)
         if action == "logs":
             if args.transcript:
-                path = supervisor.transcript(rec)
+                path = supervisor.transcript(conf, rec)
                 if path is None:
                     sys.exit(f"theseus: no transcript found for session {rec.get('session_id')}")
                 print(path)
