@@ -193,7 +193,7 @@ class TopApp(App):
     async def finish(self, snap, error):
         try:
             if snap is None:
-                self.sub_title = f"refresh failed: {error}"
+                self.title = f"theseus top · refresh failed: {error}"
                 return
             await self.apply(snap)
         finally:
@@ -214,7 +214,7 @@ class TopApp(App):
         if self.pending_open and pane_id(self.pending_open) in self.views:
             tabs.active = pane_id(self.pending_open)
         self.pending_open = None
-        self.sub_title = f"{len(snap['projects'])} project(s), updated {top.local_clock(snap['time'])}"
+        self.title = f"theseus top · {len(snap['projects'])} project(s) · updated {top.local_clock(snap['time'])}"
         self.redraw()
 
     def redraw(self):

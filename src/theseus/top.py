@@ -744,16 +744,3 @@ def main(conf, interval=5, once=False, as_json=False):
     frame = render(snapshot(conf, sample=True), terminal.columns, terminal.lines if sized else None)
     print(frame if sys.stdout.isatty() else ANSI.sub("", frame))
     return 0
-
-
-def repaint(previous, lines):
-    """Escape sequence that rewrites only the changed lines, inside one synchronized update (DEC mode 2026) so the
-    terminal shows the new frame at once instead of drawing it line by line."""
-    out = ["\033[?2026h"]
-    for number, line in enumerate(lines):
-        if number >= len(previous) or previous[number] != line:
-            out.append(f"\033[{number + 1};1H{line}\033[K")
-    if len(previous) > len(lines):
-        out.append(f"\033[{len(lines) + 1};1H\033[J")
-    out.append("\033[?2026l")
-    return "".join(out)

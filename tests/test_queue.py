@@ -289,13 +289,5 @@ class QueueTests(Sandbox):
 
 
 
-class RepaintTests(unittest.TestCase):
-    def test_only_changed_lines_are_rewritten_inside_a_synchronized_update(self):
-        from theseus.top import repaint
-        out = repaint(["one", "two", "three"], ["one", "TWO", "three"])
-        self.assertTrue(out.startswith("\033[?2026h") and out.endswith("\033[?2026l"))
-        self.assertIn("\033[2;1HTWO", out)
-        self.assertNotIn("one", out)
-        self.assertIn("\033[2;1H\033[J", repaint(["a", "b", "c"], ["a"]))
 if __name__ == "__main__":
     unittest.main()
