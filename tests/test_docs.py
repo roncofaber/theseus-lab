@@ -75,5 +75,22 @@ class DocsFoldTests(Sandbox):
         self.assertIn("stale link beta.md", result.stdout + result.stderr)
 
 
+
+class ExternalIndexTests(Sandbox):
+    def test_a_project_generator_replaces_the_theseus_indexes(self):
+        self.scaffold()
+        self.write("tools/gen.sh", "#!/bin/sh\necho generated > docs/own-index.md\n")
+        self.write("tools/check.sh", "#!/bin/sh\ngrep -q generated docs/own-index.md\n")
+        self.set_config('[docs]\nindex_command = ["sh tools/gen.sh"]\ncheck_command = ["sh tools/check.sh"]\n'
+                        'generated = ["docs/own-index.md"]\n')
+        failed = self.theseus("docs", "check", check=False)
+        self.assertNotEqual(0, failed.returncode)
+        self.assertIn("check_command", failed.stdout + failed.stderr)
+        self.assertIn("docs/own-index.md", self.theseus("docs", "index").stdout)
+        self.theseus("docs", "check")
+        from theseus import config as cfg, docs
+        self.assertEqual(["docs/own-index.md"], docs.generated_paths(cfg.load(root=self.project)))
+
+
 if __name__ == "__main__":
     unittest.main()

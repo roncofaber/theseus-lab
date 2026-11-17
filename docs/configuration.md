@@ -28,6 +28,7 @@ theseus config check             # validate
 | `[verification]` | `code_paths`, `doc_paths` (changes there need no verification), `max_unverified_merges`, `max_unverified_hours` |
 | `[rooms]` | Clean-room mode: `enabled`, `taint` (`until-clear` or `permanent`), `clean_instances`, `dirty_instances`, `dirty_paths`, `dirty_data`, `spec_paths` |
 | `[re]` | `targets` (binaries to decompile: `name`, `path`, `sha256`, and optionally `corpus` to point at an existing decompiled corpus), `citation_index` (default `docs/re/citation-index.md`), `clients` (agent clients for the REA server), `address_low`, `address_high` |
+| `[docs]` | A project with its own index generator: `index_command` (writes the indexes), `check_command` (exits nonzero when stale), `generated` (paths they produce). theseus then runs these instead of its own writers in merge, `theseus docs index|check` and the push guard |
 | `[tools]` | `need`: external tools this project requires |
 | `[consumers]` | Per file extension, a pattern for the names a file declares (defaults cover common languages) |
 
