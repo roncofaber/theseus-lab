@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Added
 
+- The console's pane mirror sizes a supervised agent's window on the private server to what the mirror shows while its popup is open (following a console resize after about 200 ms and fitting again after an attach), so the agent redraws without sideways scrolling; closing the popup, or quitting the console with it open, restores `[supervisor] size`. Hand-made panes on your own tmux server are never resized.
+- The test suite runs in parallel with pytest-xdist (`pip install -e ".[dev]"`, `python -m pytest -n auto`), in about 16 s on a 32-thread workstation instead of about 400 s; `python -m unittest discover -s tests` still runs it serially.
 - Context use is measured against the window of the model the session transcript names (`[models] context`, prefix keys with `*`); current Claude models default to 1M. Unknown models fall back to the profile's `context_limit`.
 - Control console: `theseus` alone on a terminal opens it (`theseus console`, `theseus top` stays an alias; `--once` and `--json` for scripts). A PROJECT panel per project tab in aligned labeled columns (milestone, branch, verification, queue state; the coordinator with state, last activity and context; the queue watcher from a heartbeat `queue wait`/`run` now write; queue, review age and attention; agents by state, pool slots with a cap cut, gateway; today's merges), and a PROJECTS table on the Host tab with the same figures per project (replacing the project cards). The coordinator opens with `C` or a double-click (mirror and send line). Supervised agents show short names, uptime, restarts, session, model and pool; their popup lists labeled fields and has Live, Diff, Task and Events tabs, attaches in place with Enter (C-q detaches), opens a tmux window with `o`, and restarts, stops or starts with `R`, `X`, `U` after a confirmation. Ctrl+P lists the project's actions (queue tick, agents up, add or remove an agent, restart, stop, start, attach, dispatch, hold, release, priority, reopen, pool hold and release, coordinator, handoffs), each running the theseus command of the same name.
 - `theseus agents scale PROFILE COUNT` writes `[agents.counts]` in `theseus.local.toml` and reconciles.
@@ -45,6 +47,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- An unknown top-level section in the host `config.toml` or a project's `theseus.toml` or `theseus.local.toml` is ignored with a warning on stderr, printed once per process, instead of stopping the command, so a long-running `theseus queue wait` or `queue run` survives a newer release adding a section; `theseus config check` still reports it as an error.
 - Console tables keep stable column widths that follow the window (fixed short columns, proportional flexible ones, optional columns dropping out when narrow); a cut cell ends in an ellipsis and never scrolls sideways. Panels and popups carry short labels only (no legends, hints or source prose); explanations live in the `?` help.
 - `theseus config check` warns when `theseus.toml` lists `[instances] panes`: pane ids belong in `theseus.local.toml`.
 - tmux is now required (supervised agents run on it). Every tmux call goes through one module (`theseus.tmux`) that always names the private socket for supervised agents; hand-made panes on your own server are driven exactly as before.
@@ -63,6 +66,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- Flaky supervisor tests: tmux 3.4 sometimes misses the SIGCHLD of a pane's process, so `pane-died` does not fire until the server reaps another child; the tests now let it reap with a `run-shell` job. In production such an exit is recorded and restarted by the next reconcile (queue tick or `theseus agents up`) instead of at once.
 - A hand-made pane that no longer exists now shows as `offline`: tmux 3.4 exits 0 with empty output for `display-message` on a missing pane, which counted as alive.
 - Busy markers are looked for in the last three non-blank screen lines, so a pane with empty rows below its output is still seen working.
 

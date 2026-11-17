@@ -204,6 +204,9 @@ class Server:
     def send_key(self, target, *keys):
         return self.run("send-keys", "-t", target, *keys)
 
+    def resize_window(self, target, width, height):
+        return self.run("resize-window", "-x", str(int(width)), "-y", str(int(height)), "-t", target)
+
     def set_option(self, target, name, value, scope="-p"):
         return self.run("set-option", scope, "-t", target, name, value)
 

@@ -419,10 +419,11 @@ class DashboardBase(HostCase, unittest.IsolatedAsyncioTestCase):
         self.event("alpha", "error", 2, "t3")
         self.base = host.snapshot()
         self.extra = {}
-        self.jumps, self.sent, self.keys, self.captures = [], [], [], []
+        self.jumps, self.sent, self.keys, self.captures, self.fits = [], [], [], [], []
         # The terminal's color system is pinned: CI runners have no TERM or COLORTERM.
         self.app = TopApp(interval=3600, snapshot_fn=lambda: grown(self.base, **self.extra), tmux_ok=True,
                           color_system="truecolor",
+                          fit_fn=lambda root, name: lambda columns=None, rows=None: self.fits.append((name, columns, rows)),
                           mirror_seconds=0.05, jump_fn=lambda pane: self.jumps.append(pane) or f"jumped {pane}",
                           capture_fn=lambda pane: self.captures.append(pane) or "\033[32mready for input\033[0m\n> ",
                           send_fn=lambda conf, agent, text, expect_busy=True: self.sent.append(
@@ -459,7 +460,7 @@ class DashboardBase(HostCase, unittest.IsolatedAsyncioTestCase):
         old = self.app
         self.app = TopApp(interval=3600, snapshot_fn=old.snapshot_fn, tmux_ok=True, mirror_seconds=0.05,
                           jump_fn=old.jump_fn, capture_fn=old.capture_fn, send_fn=old.send_fn, keys_fn=old.keys_fn,
-                          color_system="truecolor", cli_fn=old.cli_fn)
+                          color_system="truecolor", cli_fn=old.cli_fn, fit_fn=old.fit_fn)
 
 
 class TopPolishTests(DashboardBase):
@@ -921,6 +922,50 @@ class ConsoleTests(DashboardBase):
             await self.settle(pilot, lambda: isinstance(self.app.screen, Confirm))
             await pilot.press("y")
             await self.settle(pilot, lambda: self.ran == [["agents", "restart", "worker-a"]])
+
+    async def test_a_supervised_agent_window_follows_the_mirror_and_is_restored_on_close(self):
+        from textual.events import Resize
+        from textual.geometry import Size
+        from theseus.tui.popups import AgentScreen
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            await pilot.press("a", "enter")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen))
+            popup = self.app.screen
+            mirror = popup.query_one("#mirror")
+            await self.settle(pilot, lambda: ("worker-a", *mirror.visible_size()) in self.fits)
+            first = mirror.visible_size()
+            self.assertGreater(first[0], 100)
+            self.assertGreater(first[1], 10)
+            popup.fit_seconds = 0.5
+            self.fits.clear()
+            for size in (Size(150, 50), Size(130, 45)):
+                self.app._driver._size = size
+                self.app.post_message(Resize(size, size))
+            await self.settle(pilot, lambda: mirror.visible_size() != first
+                              and ("worker-a", *mirror.visible_size()) in self.fits)
+            final = mirror.visible_size()
+            self.assertLess(final[0], first[0])
+            self.assertLessEqual({(columns, rows) for _, columns, rows in self.fits}, {first, final},
+                                 "only the size the mirror settled on is applied")
+            await pilot.press("escape")
+            await self.settle(pilot, lambda: len(self.app.screen_stack) == 1 and self.fits[-1] == ("worker-a", None, None))
+            done = list(self.fits)
+            await pilot.press("a", "down", "enter")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen))
+            self.assertIn("worker-b", self.app.screen.heading)
+            count = len(self.captures)
+            await self.settle(pilot, lambda: len(self.captures) >= count + 3)
+            await pilot.press("escape")
+            await self.settle(pilot, lambda: len(self.app.screen_stack) == 1)
+            await pilot.press("C")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen) and "%9" in self.captures)
+            await pilot.press("escape")
+            await self.settle(pilot, lambda: len(self.app.screen_stack) == 1)
+            self.assertEqual(done, self.fits, "a hand-made pane or the coordinator is never resized")
+            await pilot.press("a", "up", "enter")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen) and self.fits[-1][1])
+        self.assertEqual(("worker-a", None, None), self.fits[-1], "quitting with the popup open restores the size")
 
     async def test_the_coordinator_opens_with_c_and_mirrors_its_pane(self):
         from theseus.tui.popups import AgentScreen

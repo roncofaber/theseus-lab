@@ -1,4 +1,6 @@
 """Configuration loading, task record rules and cleanup, exercised directly through the package."""
+import contextlib
+import io
 import json
 import os
 import time
@@ -41,7 +43,8 @@ class ConfigTests(Sandbox):
     def test_unknown_sections_are_ignored_but_fail_config_check_and_roots_inside_the_project_are_rejected(self):
         self.scaffold()
         self.set_config("[surprise]\nx = 1\n")
-        self.assertNotIn("surprise", cfg.load(root=self.project).raw)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertNotIn("surprise", cfg.load(root=self.project).raw)
         self.assertIn("unknown configuration sections: surprise", self.theseus("config", "check", check=False).stderr)
         self.replace_config("[surprise]\nx = 1\n", "")
         os.environ["THESEUS_DATA"] = str(self.project / "data")

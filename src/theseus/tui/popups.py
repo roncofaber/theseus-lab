@@ -19,6 +19,7 @@ from . import theme
 MIRROR_LINES = 200
 DIFF_SECONDS = 5.0
 ESCAPE_SECONDS = 0.5
+FIT_SECONDS = 0.2
 TMUX_KEYS = {"enter": "Enter", "backspace": "BSpace", "delete": "DC", "up": "Up", "down": "Down", "left": "Left",
              "right": "Right", "tab": "Tab", "shift+tab": "BTab", "home": "Home", "end": "End", "pageup": "PPage",
              "pagedown": "NPage", "insert": "IC"}
@@ -136,14 +137,27 @@ class Mirror(ScrollableContainer, can_focus=True):
             event.prevent_default()
             screen.typed(event)
 
+    def on_resize(self, event):
+        if isinstance(self.screen, AgentScreen):
+            self.screen.mirror_resized()
+
+    def visible_size(self):
+        """Columns and rows of text the mirror shows: inside its border, less the vertical scrollbar but not the
+        horizontal one, which goes away once the pane fits."""
+        region = self.content_region
+        return region.width - self.styles.scrollbar_size_vertical, region.height
+
 
 class AgentScreen(Dialog):
     """An agent's details over tabs: Live (a mirror of its tmux pane, polled while shown, faster while typing through,
     with a line to send whole lines, type-through mode for single keys and buttons for common keys), Diff (its task
     worktree against the task's base, refreshed while shown), Task and Events. `actions` supplies capture(pane),
     send(text), keys(*keys), type(*keys), jump() (None hides Open tmux pane) and optionally diff(), task(), events(),
-    attach() (a callable run while the app is suspended, None for panes it cannot attach) and restart(), stop(),
-    start() (None hides them; each asks first). Everything but attach runs in a worker thread."""
+    attach() (a callable run while the app is suspended, None for panes it cannot attach), restart(), stop(),
+    start() (None hides them; each asks first) and fit(columns, rows) (None for panes it must not resize), which sizes
+    the agent's window to the mirror while it is shown, follows the mirror's size fit_seconds after it changes and on
+    every poll, and fit(None, None) restores the pinned size on close. Everything but attach and that restore runs in
+    a worker thread."""
 
     BINDINGS = [Binding("escape", "close", "Close the popup"),
                 Binding("i", "type_through", "Type into the pane (Esc Esc or Ctrl-] leaves)"),
@@ -169,7 +183,7 @@ class AgentScreen(Dialog):
     AgentScreen.-typing #mirror { border: heavy $warning; border-title-color: $warning; border-title-style: bold; }
     """
 
-    def __init__(self, title, body, pane, actions, poll=1.0, fast=0.25):
+    def __init__(self, title, body, pane, actions, poll=1.0, fast=0.25, fit_seconds=FIT_SECONDS):
         super().__init__(title, body)
         self.pane = pane
         self.actions = actions
@@ -184,6 +198,10 @@ class AgentScreen(Dialog):
         self.pumping = False
         self.lock = threading.Lock()
         self.diff_timer = None
+        self.fit_seconds = fit_seconds
+        self.fit_timer = None
+        self.fit_size = None
+        self.fitted = False
 
     def live_title(self):
         return f"{self.heading.split(' ', 1)[-1]} · live"
@@ -266,9 +284,13 @@ class AgentScreen(Dialog):
         if attach is None:
             self.app.notify("not supervised: o opens the pane", severity="warning")
             return
+        if self.fit_timer is not None:
+            self.fit_timer.stop()
+            self.fit_timer = None
         with self.app.suspend():
             message = attach()
         self.app.refresh(layout=True)
+        self.mirror_resized()
         if message:
             self.app.notify(message)
 
@@ -324,6 +346,7 @@ class AgentScreen(Dialog):
         self.run_worker(self.grab, thread=True, group="mirror")
 
     def grab(self):
+        self.refit()
         try:
             text = self.actions.capture(self.pane)
         except Exception as problem:
@@ -346,6 +369,46 @@ class AgentScreen(Dialog):
                       else Text("-", style="dim"))
         if at_bottom:
             scroller.call_after_refresh(scroller.scroll_end, animate=False, x_axis=False)
+
+    def mirror_resized(self):
+        """Follow the mirror's size once it has stopped changing for fit_seconds."""
+        if self.action_of("fit") is None:
+            return
+        if self.fit_timer is not None:
+            self.fit_timer.stop()
+        self.fit_timer = self.set_timer(self.fit_seconds, self.fit_now)
+
+    def fit_now(self):
+        self.fit_timer = None
+        try:
+            columns, rows = self.query_one("#mirror", Mirror).visible_size()
+        except NoMatches:
+            return
+        if columns < 1 or rows < 1:
+            return
+        self.fit_size = (columns, rows)
+        self.run_worker(self.refit, thread=True, group="fit", exclusive=True)
+
+    def refit(self):
+        """Size the pane to the mirror (a no-op when it already fits or a client is attached to it)."""
+        fit, size = self.action_of("fit"), self.fit_size
+        if fit is None or size is None:
+            return
+        try:
+            fit(*size)
+            self.fitted = True
+        except Exception:
+            pass
+
+    def on_unmount(self):
+        if self.fit_timer is not None:
+            self.fit_timer.stop()
+        fit = self.action_of("fit")
+        if fit is not None and self.fitted:
+            try:
+                fit(None, None)
+            except Exception:
+                pass
 
     def pump(self):
         """Send queued keys in order; consecutive literal text goes out as one send-keys -l."""

@@ -509,7 +509,7 @@ class TopApp(App):
 
     def __init__(self, interval=5.0, current=None, roots=(), snapshot_fn=None, jump_fn=None, loader=None, sampler=None,
                  capture_fn=None, send_fn=None, keys_fn=None, tmux_ok=None, mirror_seconds=1.0, cli_fn=None,
-                 attach_fn=None, diff_fn=None, color_system=None):
+                 attach_fn=None, diff_fn=None, color_system=None, fit_fn=None):
         super().__init__()
         self.interval = interval
         self.current = str(Path(current).resolve()) if current else None
@@ -522,6 +522,7 @@ class TopApp(App):
         self.keys_fn = keys_fn or top.send_keys
         self.cli_fn = cli_fn or run_theseus
         self.attach_fn = attach_fn or attach_supervised
+        self.fit_fn = fit_fn or supervised_fitter
         self.diff_fn = diff_fn or task_diff
         self.color_system = color_system
         self.tmux_ok = (bool(os.environ.get("TMUX")) and shutil.which("tmux") is not None) if tmux_ok is None else tmux_ok
@@ -879,6 +880,7 @@ class TopApp(App):
             task=(lambda: task_sheet(task, view.project)) if task else None,
             events=lambda: R.agent_events(state["events"], name),
             attach=(lambda: self.attach_fn(root, name)) if supervised else None,
+            fit=self.fit_fn(root, name) if supervised else None,
             restart=(lambda: cli("agents", "restart", name)) if supervised else None,
             stop=(lambda: cli("agents", "down", name)) if supervised else None,
             start=(lambda: cli("agents", "up", name)) if supervised else None)
@@ -966,6 +968,18 @@ def attach_supervised(root, name):
         return f"{name} is not a supervised agent"
     result = subprocess.run(supervisor.attach_argv(rec))
     return "" if result.returncode == 0 else f"attach to {name} failed"
+
+
+def supervised_fitter(root, name):
+    """fit(columns, rows) for a supervised agent's window on the private server; fit(None, None) restores it."""
+    from .. import supervisor
+    found = {}
+
+    def fit(columns=None, rows=None):
+        if "rec" not in found:
+            found["rec"] = supervisor.record(cfg.load(root=root), name)
+        return supervisor.fit(found["rec"], columns, rows)
+    return fit
 
 
 def task_diff(task):

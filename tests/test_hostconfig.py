@@ -1,6 +1,8 @@
 """Host configuration layer: precedence of package, host, project, project-local and environment values, host profiles
 merged with project overrides, extra_args, the deprecated pools.toml and store.toml, config show --sources, config
 check and setup host."""
+import contextlib
+import io
 import os
 import re
 import tomllib
@@ -75,7 +77,9 @@ class PrecedenceTests(HostCase):
         self.host_file("[defaults]\ngit.remote = \"upstream\"\n")
         self.assertEqual("origin", self.conf().raw["git"]["remote"])
         self.write("theseus.toml", '[project]\nname = "demo"\n[pools.gw]\nmax = 1\n')
-        self.assertNotIn("pools", self.conf().raw)
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertNotIn("pools", self.conf().raw)
+        self.assertIn("ignoring unknown configuration sections: pools", stderr.getvalue())
         result = self.theseus("config", "check", check=False)
         self.assertEqual(1, result.returncode)
         self.assertIn("theseus.toml: unknown configuration sections: pools", result.stderr)
@@ -87,8 +91,6 @@ class PrecedenceTests(HostCase):
             self.conf()
 
     def test_an_unknown_section_from_a_newer_release_is_a_warning_once_except_in_config_check(self):
-        import contextlib
-        import io
         self.addCleanup(hostconfig._warned.clear)
         hostconfig._warned.clear()
         self.host_file('[newer]\nx = 1\n[supervisor]\nsize = "100x40"\n')

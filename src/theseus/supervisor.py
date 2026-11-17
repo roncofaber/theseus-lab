@@ -1247,6 +1247,35 @@ def send(conf, name, text, expect_busy=True):
     return agents.send_verified(conf, agents.entry(rec), text, expect_busy=expect_busy)
 
 
+MIN_FIT = (20, 5)
+
+
+def fit(rec, columns=None, rows=None):
+    """Size a supervised agent's window on the private server to columns x rows (what the console's pane mirror
+    shows), or back to the pinned [supervisor] size when columns is None. Agents on the user's own server are never
+    resized, nor is a window while a client is attached to it: the attach hooks size it to the client and restore the
+    pinned size on detach, and the mirror fits it again on its next poll. Returns True when it resized the window."""
+    if not rec or not rec.get("managed") or not rec.get("target"):
+        return False
+    srv = server_of(rec)
+    if srv.is_legacy:
+        return False
+    if columns is None:
+        want = size()
+    elif columns < MIN_FIT[0] or rows < MIN_FIT[1]:
+        return False
+    else:
+        want = (int(columns), int(rows))
+    target = tm.address(rec["target"])
+    state = srv.display(target, "#{session_attached} #{window_width} #{window_height}")
+    if not state:
+        return False
+    attached, width, height = state.split()
+    if attached != "0" or (int(width), int(height)) == want:
+        return False
+    return srv.resize_window(target, *want).returncode == 0
+
+
 def attach_argv(rec, read_only=False):
     srv = server_of(rec)
     argv = ["env", "-u", "TMUX", *srv.argv("attach-session", "-t", f"={rec['target']}")]

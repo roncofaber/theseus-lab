@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -193,11 +194,19 @@ class SupervisorTests(Sandbox):
             value = check()
             if value:
                 return value
-            # tmux 3.4 sometimes misses the SIGCHLD of a pane's process, leaving it a zombie and pane-died unfired until
-            # the server reaps another child; a run-shell job is such a child.
-            self.tmux("run-shell", "true")
+            self.reap()
             time.sleep(0.05)
         self.fail(f"timed out waiting for {message}")
+
+    def reap(self):
+        """Signal SIGCHLD to the private server. tmux 3.4 sometimes misses the SIGCHLD of a pane's process (and of its
+        own run-shell jobs), leaving it a zombie and pane-died unfired until the next one arrives."""
+        pid = self.tmux("display", "-p", "#{pid}").stdout.strip()
+        if pid.isdigit():
+            try:
+                os.kill(int(pid), signal.SIGCHLD)
+            except ProcessLookupError:
+                pass
 
     def runs(self, name):
         from theseus import store
@@ -469,12 +478,18 @@ class SupervisorTests(Sandbox):
                 await until(lambda: isinstance(app.screen, AgentScreen))
                 popup = app.screen
                 await until(lambda: "fake agent demo-fake-1 ready" in popup.query_one("#mirror-text").render().plain)
+                window = lambda: self.tmux("display", "-p", "-t", "=demo--demo-fake-1:",
+                                           "#{window_width}x#{window_height}").stdout.strip()
+                await until(lambda: window() == "%dx%d" % popup.query_one("#mirror").visible_size())
                 await pilot.click("#send")
                 popup.query_one("#send").value = "hi there"
                 await pilot.press("enter")
                 await until(lambda: "input demo-fake-1: hi there" in self.log())
                 await pilot.press("escape")
                 await until(lambda: len(app.screen_stack) == 1)
+                await until(lambda: window() == "220x50")
+                self.assertEqual("220x50", self.tmux("display", "-p", "-t", "=demo--demo-fake-2:",
+                                                     "#{window_width}x#{window_height}").stdout.strip())
                 await pilot.press("a", "enter")
                 await until(lambda: isinstance(app.screen, AgentScreen))
                 await pilot.press("R")
@@ -594,6 +609,46 @@ class TmuxSequenceTests(unittest.TestCase):
         self.assertTrue(drain(fd)[1])
         self.assertEqual(pid, os.waitpid(pid, 0)[0])
         self.assertEqual("220x50 0", server.display("=a--x:", "#{window_width}x#{window_height} #{session_attached}"))
+
+    def test_the_mirror_size_fits_the_window_except_while_attached_and_the_pinned_size_comes_back(self):
+        import fcntl
+        import pty
+        import struct
+        import termios
+        from unittest import mock
+        from theseus import supervisor, tmux as tm
+        server = tm.Server("-S", str(self.socket), conf_file=supervisor.tmux_conf(), env=supervisor.server_env())
+        server.new_session("a--x", ["sleep", "60"], "/", 220, 50)
+        server.run("resize-window", "-x", "220", "-y", "50", "-t", "=a--x:")
+        rec = {"name": "x", "managed": True, "server": f"path:{self.socket}", "target": "a--x"}
+        state = lambda: server.display("=a--x:", "#{window_width}x#{window_height} #{session_attached}")
+        self.assertTrue(supervisor.fit(rec, 120, 33))
+        self.assertEqual("120x33 0", state())
+        self.assertEqual("120x33", server.display("=a--x:", "#{pane_width}x#{pane_height}"))
+        self.assertFalse(supervisor.fit(rec, 120, 33), "an unchanged size is not sent again")
+        self.assertFalse(supervisor.fit(rec, 8, 2))
+        self.assertEqual("120x33 0", state())
+        argv = supervisor.attach_argv(rec)
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.environ["TERM"] = "xterm-256color"
+            os.execvp(argv[0], argv)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+        drain(fd, lambda: state() == "100x29 1")
+        self.assertEqual("100x29 1", state())
+        self.assertFalse(supervisor.fit(rec, 120, 33), "an attached client keeps its size")
+        self.assertEqual("100x29 1", state())
+        os.write(fd, b"\x11")
+        self.assertTrue(drain(fd)[1])
+        self.assertEqual(pid, os.waitpid(pid, 0)[0])
+        self.assertEqual("220x50 0", state())
+        self.assertTrue(supervisor.fit(rec, 120, 33), "the mirror fits the window again after a detach")
+        self.assertEqual("120x33 0", state())
+        self.assertTrue(supervisor.fit(rec, None, None))
+        self.assertEqual("220x50 0", state())
+        with mock.patch.object(tm.Server, "run", side_effect=AssertionError("tmux was called")):
+            self.assertFalse(supervisor.fit({**rec, "managed": False, "server": None}, 120, 33))
+            self.assertFalse(supervisor.fit(None, 120, 33))
 
     def test_spawn_respawn_and_kill_keep_the_server_alive(self):
         from theseus import supervisor, tmux as tm
