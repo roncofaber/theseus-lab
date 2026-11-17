@@ -67,7 +67,11 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
     log_dir = worktree / cfg.WORKER_LOG
     if worktree.exists():
         raise integrate.IntegrationError(f"worktree already exists: {worktree} (retire the old task or pass --name)")
+    from . import rooms
     prompt = WORKER_NOTES.format(worktree=worktree, root=conf.root) + t.render_prompt(queue, task_id, base[:12], worktree, log_dir)
+    room_rules = rooms.message(conf, task) if rooms.enabled(conf) else ""
+    if room_rules:
+        prompt += "\n\n" + room_rules
     names, consumers = t.outside_consumers(queue, task)
     lines = []
     if consumers:
@@ -89,6 +93,7 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
     record_dir.mkdir(parents=True, exist_ok=True)
     (record_dir / "prompt.md").write_text(prompt + "\n")
     integrate.create_worktree(conf, name, base)
+    rooms.exclude_dirty(conf, task, worktree)
     try:
         t.assign(queue, task_id, f"{provider}:{model}:{name}", provider, model, worktree, base[:12], log_dir, force=resume_paused)
     except Exception:

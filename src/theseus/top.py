@@ -253,6 +253,25 @@ def merge_resets(history):
     return out
 
 
+def other_workers(conf, states):
+    """In-progress tasks no registered agent holds: one-shot headless workers and coordinator-launched subagents."""
+    from . import profiles
+    held = {a.get("task") for a in states}
+    workers = []
+    for task in t.Queue(conf).load().get("tasks", []):
+        if task.get("status") != "in_progress" or task["id"] in held:
+            continue
+        execution = task.get("execution") or {}
+        provider = execution.get("provider") or ""
+        try:
+            kind = "subagent" if profiles.resolve(conf, provider).get("headless") is None else "headless"
+        except profiles.ProfileError:
+            kind = "worker"
+        workers.append({"name": t.agent_of(task) or task["id"], "task": task["id"], "room": task.get("room"),
+                        "kind": kind, "model": execution.get("model") or provider})
+    return workers
+
+
 def snapshot(conf, sample=False):
     states = ag.states(conf)
     if sample:
@@ -262,7 +281,7 @@ def snapshot(conf, sample=False):
     summary = wq.summary(conf)
     return {
         "project": conf.name, "milestone": t.Queue(conf).milestone(), "time": datetime.now(timezone.utc).isoformat(),
-        "host": host_state(), "agents": states,
+        "host": host_state(), "agents": states, "workers": other_workers(conf, states),
         "queue": {k: [x["id"] for x in v] for k, v in summary.items()},
         "rooms": {x["id"]: x.get("room") for v in summary.values() for x in v},
         "blocked": {x["id"]: x["reasons"] for x in summary["blocked"]},
@@ -493,6 +512,11 @@ def render(state, width=120, height=None, ui=None):
         if wide:
             line += f"{str(agent.get('procs') or '-'):<5} "
         rows.append(line + note)
+    for worker in state.get("workers", []):
+        on_task = age(times.get(worker["task"], (None, None))[1])
+        rows.append(f"{CYAN}◆{R}   {B}{cut(worker['name'], 16):<16}{R} {'-':<6} {CYAN}{worker['kind']:<10}{R} "
+                    f"{cut(worker['task'], task_w):<{task_w}} {worker.get('room') or '-':<6} "
+                    f"{column(aged(on_task, SLOW, VERY_SLOW), 8)} {DIM}{cut(worker.get('model') or '', 20)}{R}")
     frame.fixed(rows, max(len(rows), 1), "no registered agents: theseus agents add NAME PANE")
 
     queue = state["queue"]

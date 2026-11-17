@@ -53,6 +53,23 @@ class RoomTests(Sandbox):
         self.theseus("merge", "driver-skeleton")
         self.assertTrue((self.project / "tools/inventory/secret.py").exists(), "merging a sparse worktree must not delete dirty files")
 
+    def test_dispatched_clean_work_gets_the_sparse_checkout_and_room_rules(self):
+        self.write("tools/inventory/secret.py", "x = 1\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "dirty material")
+        self.add("subagent-clean", "clean", ["src/", "docs/investigations/subagent-clean.md"])
+        self.git("commit", "-q", "-am", "queue")
+        self.set_config('[workers.claude-subagent]\ncapacity = 1\nmodel = "sonnet"\n')
+        self.git("commit", "-q", "-am", "subagents")
+        out = self.theseus("dispatch", "subagent-clean", "--provider", "claude-subagent").stdout
+        self.assertIn("Launch a subagent (model sonnet)", out)
+        worktree = self.tmp / "worktrees/subagent-clean"
+        self.assertFalse((worktree / "tools/inventory/secret.py").exists())
+        self.assertTrue((worktree / "AGENTS.md").exists())
+        self.assertIn("CLEAN ROOM", (self.tmp / "data/workers/subagent-clean/prompt.md").read_text())
+        flat = " ".join(self.theseus("top", "--once").stdout.split())
+        self.assertIn("subagent-clean - subagent subagent-clean clean", flat)
+
     def test_clearing_context_lifts_the_taint_and_permanent_mode_keeps_it(self):
         self.replace_config('clean_instances = ["clean-1"]', 'clean_instances = []')
         self.replace_config('dirty_instances = ["dirty-1", "clean-1-later"]', 'dirty_instances = []')
