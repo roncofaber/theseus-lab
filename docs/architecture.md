@@ -4,7 +4,7 @@ Decisions behind the package layout, for contributors. User documentation starts
 
 ## Shape
 
-- Python package (`src/theseus`, Python 3.11+ for `tomllib`), one CLI entry point, unittest suite. Standard library only apart from Textual, the single runtime dependency, which drives the interactive dashboard and is imported only by `theseus top` on a terminal.
+- Python package (`src/theseus`, Python 3.11+ for `tomllib`), one CLI entry point, unittest suite. Standard library only apart from Textual, the single runtime dependency, which drives the interactive dashboard and is imported only by the console (`theseus` alone on a terminal, or `theseus console`).
 - Logic that benefits from tests (task records, merge, guard, docs, catalog, cleanup, rules) is Python. Process supervision and tmux pane polling stay Bash (`src/theseus/scripts/`), because signal handling, `exec` chains that keep a recorded PID and systemd scopes are simplest there. The CLI runs them as `bash <packaged path>` with the `THESEUS_*` environment from `Config.environment()`; a variable already set in the process environment wins, which lets tests and one-off shells override a value.
 - Templates live under `src/theseus/templates/project/`; a leading `dot-` in a path segment becomes `.` at scaffold time, so package data never relies on dotfiles surviving a wheel build.
 
@@ -38,6 +38,11 @@ Decisions behind the package layout, for contributors. User documentation starts
 
 `theseus.supervisor` starts and supervises long-running agents on a private tmux server; `theseus.tmux` is the only module that runs tmux, and every command for the private server names its socket (a guard test checks this). There is still no daemon: `theseus agents up` and the queue tick reconcile, and a tmux `pane-died` hook records crashes and kicks a one-agent reconcile. Runs live in the host store (`agent_runs`). A supervised agent's address in the registry is its session target `=project--agent:`, which names no pane on the user's own server, so a caller that forgets the socket fails instead of typing into an unrelated pane. The design, the research behind it and the verification spikes are in [design/agent-supervisor.md](design/agent-supervisor.md).
 
+## Verified sends and restart prompts
+
+- `agents.send_verified` is the one way theseus types into an agent: it empties the input line, types, presses Enter and watches for the profile's busy marker, pressing Enter once more for text still in the input line. Outside the queue it waits for the result. Inside a queue tick (`agents.batched`) it only types: the tick presses Enter in every pane after one shared pause and verifies all its sends together in a bounded thread pool (`workqueue.verify_sends`) that only reads panes and presses keys, within `queue.send_budget_seconds`. The results, their events and every store or runtime write are applied on the tick's own thread. A send still unresolved when the budget runs out is kept in the runtime state and finished by the next tick.
+- A fresh context with a task owes the agent one restart prompt (`workqueue.owe_prompt`), kept in the runtime state. While it is owed, or while a send to the agent is still being verified, the tick types nothing else into that agent, so a plain continue can never reach a fresh session first.
+
 ## Host store
 
 - One SQLite database per machine, `~/.local/share/theseus/theseus.db` (`XDG_DATA_HOME` is respected, `THESEUS_DB` overrides the path), managed by `src/theseus/store.py` with the standard library `sqlite3` module only. It is the runtime source of truth for host-level and runtime state that spans projects or changes every few seconds: the projects this host runs (name, main-checkout root, data directory, coordinator, last seen), coordinator sessions, registered agents, queue events, pool leases and claims, deliveries and periodic agent-state samples for activity and utilization graphs.
@@ -58,7 +63,7 @@ Decisions behind the package layout, for contributors. User documentation starts
 
 ### Retention and maintenance
 
-- Samples older than 14 days are trimmed; events are kept and indexed (by project and id for the latest events, by project, kind and time for activity bins). Both retentions are set in `[store.retention]` of `~/.config/theseus/config.toml` (see [Configuration](configuration.md#host-store)).
+- Every growing table has a retention, set in `[store.retention]` of `~/.config/theseus/config.toml` (see [Configuration](configuration.md#host-store)): samples 14 days; events, deliveries and ended coordinator sessions 365 days; ended agent runs 90 days, always keeping each agent's latest run, whose generation numbers the next one; gateway errors and gateway retry episodes that are no longer waiting 7 days. Events are indexed by project and id for the latest events and by project, kind and time for activity bins. `theseus db prune --yes` removes a gone project with all its rows, including its gateway and pool rows, which have no foreign key.
 - `theseus db maintain` trims by retention, runs `ANALYZE` and `PRAGMA optimize`, returns free pages with an incremental vacuum (a database created before incremental vacuum is converted once with a full `VACUUM`) and truncates the write-ahead log. The queue tick runs it at most once a day; the day is claimed in a transaction, so concurrent ticks of several projects run it once.
 - A benchmark test loads 200,000 events and 100,000 samples and checks that the dashboard's 12-hour activity bins, the latest 200 events and a pool acquire each stay under 50 ms and that their query plans use the indexes.
 

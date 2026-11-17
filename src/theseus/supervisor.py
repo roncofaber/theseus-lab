@@ -954,10 +954,12 @@ def kill_pane(srv, rec):
 
 
 def at_prompt(conf, rec, info):
-    """Whether typing the exit command reaches the agent's prompt: it is ready and its CLI does not say it waits for
-    an answer. A startup dialog or a permission prompt would take the keystrokes as an answer, so those are killed."""
+    """Whether typing the exit command reaches the agent's prompt: the profile has one, the agent is ready and its CLI
+    does not say it waits for an answer. A startup dialog or a permission prompt would take the keystrokes as an answer, so those are killed."""
     from . import workqueue
     if (record(conf, rec["name"]) or rec).get("phase") != "ready":
+        return False
+    if not profiles.interactive(conf, workqueue.launched(conf, rec)).get("exit"):
         return False
     entry = status_of(conf, workqueue.launched(conf, rec), info.get("pane_pid"))
     return not (entry and entry.get("status") == "waiting")
@@ -985,7 +987,7 @@ def stop(conf, rec, graceful=True, wait=True, reason="down", idle_timeout=180):
     if info.get("pane_dead") != "1" and graceful:
         if wait and not wait_idle(conf, rec, idle_timeout, poll=float(os.environ.get("THESEUS_STOP_POLL") or 5)):
             return False, f"still busy after {idle_timeout}s"
-        exit_text = profiles.interactive(conf, workqueue.launched(conf, rec)).get("exit") or "/exit"
+        exit_text = profiles.interactive(conf, workqueue.launched(conf, rec))["exit"]
         srv.send_literal(rec["pane"], exit_text)
         time.sleep(0.3)
         srv.send_key(rec["pane"], "Enter")
@@ -1135,7 +1137,10 @@ def migrate(conf, names=None, with_task=False, timeout=60):
             if session is None or agent_pid is None:
                 results.append((name, "skipped", f"no agent session found in pane {pane}"))
                 continue
-            exit_text = profiles.interactive(conf, workqueue.launched(conf, rec)).get("exit") or "/exit"
+            exit_text = profiles.interactive(conf, workqueue.launched(conf, rec)).get("exit")
+            if not exit_text:
+                results.append((name, "skipped", "its profile has no interactive.exit command to end the agent in your pane"))
+                continue
             legacy.run("send-keys", "-t", pane, "-l", exit_text)
             time.sleep(0.3)
             legacy.run("send-keys", "-t", pane, "Enter")

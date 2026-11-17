@@ -82,6 +82,8 @@ capacity = 2       # everything else comes from the host profile
 | `[workers]` | `default` (agent profile), `retries`; `[workers.<profile>]` adjusts or defines a profile (see [Agent profiles](agent-profiles.md)) |
 | `[instances]` | Long-running agents: `panes` (hand-made panes `[{ name, pane }]`; pane ids belong to one machine, so put them in `theseus.local.toml`, and `theseus config check` warns when `theseus.toml` lists any), `coordinator` (session name to report to, for agents that support messaging), `brief`, `idle_minutes`, `handoff_settle_seconds`, `send_verify_seconds` (how long a verified send waits for the busy marker, default 10); `busy_pattern`, `launch`, `sessions_dir` override the profile |
 | `[agents]` | Supervised agents (see [Supervised agents](workflow.md#supervised-agents)): `managed` (false; true makes theseus start and supervise them), `name` (`"{project}-{profile}-{n}"`; `{project}`, `{profile}` and `{n}`, which is required), `cwd` (`root`, the main checkout; `data`; or a path), `resume` (`task`: resume the conversation after a crash or reboot only for an agent that holds a task; `always`; `never`), `[agents.counts]` (standing sessions per profile, usually in `theseus.local.toml`), `[[agents.extra]]` (`name`, `profile`, `rooms`: named agents outside the counted slots) |
+| `[queue]` | `interval` (30 seconds between ticks of `queue run` and `queue wait`), `nudge` (the idle reminder text), `deadline` (added to task messages), `send_budget_seconds` (25: how long one tick waits for its verified sends together; a send still unresolved is finished by the next tick) |
+| `[models]` | `context`: model ids (or `prefix*`) to context windows in tokens, for the console's context use (see [Model context windows](#model-context-windows)) |
 | `[gateway]` | Gateway error recovery in persistent panes: `attempts` (3), `backoff` (`[120, 240, 480]` seconds), `slow_codes` (`[530]`) and `slow_factor` (2), `stagger_seconds` (30, spacing of 429 resends across a pool), `resend` (the continue text), `clear_tokens` (120000), `fresh_after_errors` (2), `screen_lines` (15, bottom lines searched for an error), `recovery_seconds` (900: a resent agent counts as recovered, and its attempts start over, once its worktree changed after the resend or after this long) |
 | `[git]` | `base` (`HEAD`, or `origin/main` to fetch first), `remote`, `branch` |
 | `[verification]` | `code_paths`, `doc_paths` (changes there need no verification), `max_unverified_merges`, `max_unverified_hours` |
@@ -103,11 +105,12 @@ The scaffolded `theseus.toml` documents every key with comments. It sets `[worke
 | `[pools.<name>]` | `max`, `priority` (see [Sharing agents between projects](#sharing-agents-between-projects)) |
 | `[store]` | `[store.retention]` and `[store.backups]` (see [Host store](#host-store)) |
 | `[tools.paths]` | Tool locations on this machine, by tool name (see [External tools](#external-tools)) |
+| `[models]` | `context`, as in a project; the host table is the usual place for gateway models |
 | `[gateway]` | The host-wide gateway circuit breaker: `breaker_errors` (3 different agents), `breaker_window_minutes` (10), `strong_codes` (`[530]`, one such error pauses the pool); and the cap cut after a `429 parallel cap` (the shared key's `max_parallel_requests`): the pool's working cap drops by `parallel_cap_step` (1) for `parallel_cap_minutes` (10), host-wide, and such errors do not count toward the breaker |
 | `[supervisor]` | The private tmux server of supervised agents: `socket` (`theseus`, the `tmux -L` name; `THESEUS_TMUX_SOCKET` names another, `THESEUS_TMUX_PATH` a full socket path), `size` (`220x50`, the fixed agent screen; an attached client resizes it until it detaches, and the console's pane mirror sizes it to what the mirror shows while the mirror is open), `history_limit` (50000), `detach_key` (`C-q`), `max_agents` (12 sessions on the host), `env_passthrough` (names or glob patterns of variables the server passes to agents besides `HOME USER LOGNAME SHELL PATH LANG LC_* TMPDIR XDG_* THESEUS_*`), `launch_shell` (`exec`, or `login` to run the profile command through `$SHELL -lc`), `ready_seconds` (90), `[supervisor.restart]` `backoff_seconds` (`[5, 30, 120, 600]`), `max_crashes` (5), `window_minutes` (30) |
-| `[defaults]` | Values for project keys a project leaves unset: `workers.default`, `workers.retries`, `limits.heavy_runs`, `paths.data`, `paths.scratch`, `paths.worktrees`, `instances.idle_minutes`, `instances.handoff_settle_seconds`, `instances.send_verify_seconds`, `queue.interval`, `re.clients`, `agents.counts`, `agents.resume`, `agents.cwd`, and the `gateway.*` keys of the project table |
+| `[defaults]` | Values for project keys a project leaves unset: `workers.default`, `workers.retries`, `limits.heavy_runs`, `paths.data`, `paths.scratch`, `paths.worktrees`, `instances.idle_minutes`, `instances.handoff_settle_seconds`, `instances.send_verify_seconds`, `queue.interval`, `queue.send_budget_seconds`, `re.clients`, `agents.counts`, `agents.resume`, `agents.cwd`, and the `gateway.*` keys of the project table |
 
-`theseus config check` reports an unknown section, an unknown profile key, pool key or store key as an error naming the file and the key, and an unknown `[defaults]` key as a warning (it is ignored). A host file that does not parse makes every command that reads it (anything that loads a project, `theseus pool`, the host store settings) stop with that message; `theseus top` leaves the pools out. An unknown top-level section, in the host file or in a project's `theseus.toml` or `theseus.local.toml`, is ignored by every other command with a warning on stderr, printed once per process, so a long-running `theseus queue wait` or `queue run` keeps going when a newer release adds a section.
+`theseus config check` reports an unknown section, an unknown profile key, pool key or store key as an error naming the file and the key, and an unknown `[defaults]` key as a warning (it is ignored). A host file that does not parse makes every command that reads it (anything that loads a project, `theseus pool`, the host store settings) stop with that message; the console leaves the pools out. An unknown top-level section, in the host file or in a project's `theseus.toml` or `theseus.local.toml`, is ignored by every other command with a warning on stderr, printed once per process, so a long-running `theseus queue wait` or `queue run` keeps going when a newer release adds a section.
 
 ```sh
 theseus setup host                          # write a commented starter (refuses to replace an existing file)
@@ -133,7 +136,7 @@ max = 4                                   # agents working a task at once, acros
 priority = ["laser-port", "game-port"]    # earlier projects win when the pool is full
 ```
 
-A profile joins it with `pool = "gateway"` in `[workers.<profile>]`, usually in the host file too. Only agents working a task hold a slot; idle sessions cost nothing. When a project has ready work but the pool is full, it records a claim; lower-priority projects then start no new tasks, so their running tasks finish and the slots come back. `theseus pool` shows who holds each slot, and `theseus top` shows the pool on the PROJECT line. The slots themselves are kept in the host store.
+A profile joins it with `pool = "gateway"` in `[workers.<profile>]`, usually in the host file too. Only agents working a task hold a slot; idle sessions cost nothing. When a project has ready work but the pool is full, it records a claim; lower-priority projects then start no new tasks, so their running tasks finish and the slots come back. `theseus pool` shows who holds each slot, and the console shows the pool on the PROJECT line. The slots themselves are kept in the host store.
 
 ## Host store
 
@@ -142,9 +145,12 @@ Runtime state shared by every project on the machine (projects, registered agent
 Retention and backups are set in `[store]` of the host configuration; these are the defaults:
 
 ```toml
-[store.retention]
-samples_days = 14   # agent-state samples older than this are trimmed
-events_days = 0     # 0 keeps every event; a number trims older events
+[store.retention]          # rows older than this many days are trimmed; 0 keeps them
+samples_days = 14          # agent-state samples
+events_days = 365          # queue events and ended coordinator sessions
+deliveries_days = 365      # deliveries
+runs_days = 90             # ended supervised-agent runs (each agent's latest run is always kept)
+gateway_days = 7           # gateway errors and gateway retry episodes no longer waiting
 
 [store.backups]
 directory = ""      # default: the backups directory next to the database
@@ -157,10 +163,10 @@ theseus db                     # check: integrity, schema version, sizes, row co
 theseus db maintain            # trim by retention, ANALYZE, optimize, incremental vacuum, truncate the WAL
 theseus db backup              # online backup to the backups directory, integrity check, rotation
 theseus db restore FILE --yes  # back up the current database, then load FILE (refuses without --yes)
-theseus db prune [--yes]       # list (and with --yes delete) projects whose root is gone, with all their history
+theseus db prune [--yes]       # list (and with --yes delete) projects whose root is gone, with all their rows
 ```
 
-The work queue runs `maintain` and `backup` by itself at most once a day across the host, so a machine that runs a queue needs no cron job. `theseus doctor` shows the database path, schema version, size, last backup, last maintenance and any project name claimed by two different roots (give one of them a different `[project] name`).
+The work queue runs `maintain` (which trims by retention) and `backup` by itself at most once a day across the host, so a machine that runs a queue needs no cron job and the database stays bounded. `theseus doctor` shows the database path, schema version, size, last backup, last maintenance and any project name claimed by two different roots (give one of them a different `[project] name`).
 
 Environment overrides, mainly for tests: `THESEUS_DB` (database file), `THESEUS_BACKUPS` (backup directory, above `[store.backups] directory`), `THESEUS_CONFIG` (the host `config.toml`), `THESEUS_STORE_CONFIG` (the deprecated `store.toml`).
 

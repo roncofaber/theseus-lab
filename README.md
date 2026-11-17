@@ -16,7 +16,8 @@ You give the project a legacy program: binaries, installers, data files, maybe t
 - **Verification gate.** Builds and tests run on a clean checkout; pushing unverified code is refused.
 - **Reverse-engineering support.** Decompile each binary once, index it and query it; cite addresses and captures in reports; run the original in a VM or compatibility layer.
 - **Clean-room mode.** Separate the agents that read original code from the ones that write the new implementation.
-- **Control console.** `theseus` alone on a terminal opens a console of every project on the host: supervised agents with live mirrors, attach and lifecycle actions, the coordinator, the queue, pools, gateway and events, and an action palette (Ctrl+P) over the CLI (`theseus top --once` and `--json` for scripts).
+- **Supervised agents.** `theseus agents up` starts long-running agents on a private tmux server and keeps them running: crash restarts with backoff, gateway error retries with a fresh context when needed, and one task-aware restart prompt after any fresh start; `agents scale` and `agents migrate` adjust the team.
+- **Control console.** `theseus` alone on a terminal opens a console of every project on the host: supervised agents with live mirrors, attach and lifecycle actions, the coordinator, the queue, pools, gateway and events, and an action palette (Ctrl+P) over the CLI (`theseus console --once` and `--json` for scripts).
 
 ## How it works
 
@@ -100,7 +101,7 @@ Select one in `theseus.toml`:
 default = "codex"
 ```
 
-Any other CLI can be added as a custom profile; see [Agent profiles](docs/agent-profiles.md).
+Any other CLI can be added as a custom profile; see [Agent profiles](docs/agent-profiles.md). Busy detection, the verified send, gateway recovery and session tracking come from profile settings that only the Claude Code preset fills in today; the other presets work without them, with fewer automatic recoveries ([what depends on the preset](docs/agent-profiles.md#what-depends-on-the-preset)).
 
 ## Documentation
 

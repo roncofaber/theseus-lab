@@ -21,23 +21,23 @@ Workers run under an agent profile (`theseus agents profiles`; `workers.default`
 
 | Mode | Launch | Follow up / stop |
 | --- | --- | --- |
-| Headless (profiles with a headless command) | `theseus dispatch ID [--provider PROFILE]`; keep `theseus wait` running in the background | `theseus followup NAME MSG` (profiles with resume) / `theseus stop NAME` |
+| Headless (profiles with a headless command) | `theseus dispatch ID [--provider PROFILE]`; keep `theseus wait` running | `theseus followup NAME MSG` (profiles with resume) / `theseus stop NAME` |
 | Subagent (`claude-subagent`, opt in with a capacity) | `theseus dispatch ID --provider claude-subagent`, then launch a subagent whose prompt says to read and follow the printed `prompt.md` | your agent's own messaging and stop tools |
-| Persistent instances in tmux | supervised: `[agents]` in `theseus.local.toml`, `theseus agents up`; hand-made: `theseus agents add NAME PANE --profile PROFILE`; then the queue | `theseus instance send|compact|restart`, `theseus agents ls|restart|attach|down` |
+| Persistent instances in tmux | supervised: `[agents]` in `theseus.local.toml`, `theseus agents up`, `scale PROFILE N`; hand-made: `theseus agents add NAME PANE --profile PROFILE` (`agents migrate NAME` moves it under supervision); then the queue | `theseus instance send|compact|restart`, `theseus agents ls|restart|attach|logs|down` |
 
-`theseus tasks stats` compares profiles (results, minutes to handoff, follow-ups). Size capacity to your plan's rate limits.
+`theseus tasks stats` compares profiles. Size capacity to your plan's rate limits.
 
 ## Queue
 
-With agents registered (`theseus agents`), the queue does dispatch for you: write ready task records, keep `theseus queue wait` running in the background, and act on what it reports (`delivered`: review and `theseus merge`; `stalled` or `error`: follow up). `theseus top --once` shows agents, queue, reviews, repository and verification at a glance. The manual commands below remain for one-off control.
+With agents registered (`theseus agents`), the queue does dispatch for you: write ready task records, keep `theseus queue wait` running in the background, and act on what it reports (`delivered`: review and `theseus merge`; `stalled` or `error`: follow up). Gateway errors are retried by the queue; they wake you only once resends run out or one is fatal. `theseus console --once` shows it all at a glance. The manual commands below remain for one-off control.
 
 ## Persistent instance rounds
 
-Instances are long-lived worker sessions in tmux panes: supervised ones that theseus starts on its private tmux server (`[agents] managed = true`; `theseus agents ls` shows them, `theseus agents attach NAME` opens one, crashes restart on their own and `blocked` or `failed` agents raise an `error` event), or hand-made panes listed in `[[instances.panes]]`. PANE below also accepts an agent name. They follow `.agents/skills/theseus-worker/instance-brief.md`.
+Instances are long-lived worker sessions in tmux panes: supervised on theseus's private tmux server (`[agents] managed = true`; crashes restart on their own, `blocked` or `failed` agents raise an `error` event), or hand-made panes in `[[instances.panes]]`. PANE below also accepts an agent name. They follow `.agents/skills/theseus-worker/instance-brief.md`.
 
-1. `theseus instance compact PANE` between tasks (a session cannot compact itself). `theseus instance restart PANE` resumes the same session in a fresh process, which is how instances pick up a new MCP server, skill or setting (for example after `theseus setup rea`).
+1. `theseus instance compact PANE` between tasks (a session cannot compact itself); `theseus instance restart PANE` resumes the session in a fresh process to pick up a new MCP server, skill or setting.
 2. `theseus instance assign TASK INSTANCE SUFFIX` creates the worktree and branch and commits the assignment.
-3. `theseus instance send PANE TASK WORKTREE [DEADLINE]` types the task message once the pane is idle. To type anything else into a worker's pane use `theseus instance send AGENT TEXT` (or `--file PATH`), never raw `tmux send-keys`: it confirms the text was submitted and records `send_failed` otherwise.
+3. `theseus instance send PANE TASK WORKTREE [DEADLINE]` types the task message once the pane is idle; anything else goes through `theseus instance send AGENT TEXT` (or `--file PATH`), never raw `tmux send-keys`: it confirms submission and records `send_failed` otherwise.
 4. `theseus instance watch` under a monitor prints `HANDOFF name` and `IDLE-NO-HANDOFF name`.
 5. `theseus merge TASK` (exit 3: conflict, nothing committed), then `theseus build`, `theseus smoke`.
 
@@ -46,7 +46,7 @@ Instances are long-lived worker sessions in tmux panes: supervised ones that the
 Take the first action whose trigger holds, then loop. Occupied slots are never a reason to stop.
 
 1. **Integrate** a delivered slice (handoff present): the checklist below.
-2. **Unstick** a worker idle past its budget, `FAILED` in `theseus status`, or finished without a handoff: one follow-up naming the missing step, file or failing check. Second stall: stop it, keep the worktree, `theseus tasks release ID --reason "..."` and redispatch smaller.
+2. **Unstick** a worker idle past its budget, `FAILED` in `theseus status`, or finished without a handoff: one follow-up naming the missing step, file or failing check. Spent context: `theseus agents restart NAME --fresh --with-task` (one restart prompt for its task). Second stall: stop it, keep the worktree, `theseus tasks release ID --reason "..."` and redispatch smaller.
 3. **Dispatch** while slots are free: `theseus tasks ready`, rank, `theseus dispatch ID --dry-run`, read the prompt, dispatch.
 4. **Plan** when fewer tasks are ready than free slots: write records (rules below), following the phase and gate in the `theseus-recipe` skill. Unknown original behavior is a bounded research task, not a blocker.
 5. **Verify** when `theseus verify --debt` approaches its limit: run `theseus verify` before more code-only merges.
@@ -58,7 +58,7 @@ Take the first action whose trigger holds, then loop. Occupied slots are never a
 
 1. On a subagent handback, stop the agent. Read the handoff and `theseus tasks check-delivery ID`. Anything OUTSIDE is rejected or moved to a patch, never merged silently.
 2. Check claims against code and evidence: cited lines, evidence IDs in the bundles, tests that assert independently derived values.
-3. `theseus merge ID` applies the delivery three-way, applies the worker's patches, regenerates the indexes and commits exactly the touched paths; any conflict restores main. It refuses a worktree whose HEAD moved: workers never commit.
+3. `theseus merge ID` applies the delivery three-way with the worker's patches, regenerates the indexes and commits exactly the touched paths; any conflict restores main. It refuses a worktree whose HEAD moved.
 4. `theseus build` and `theseus smoke`; record the outcome.
 5. Runtime evidence is separate: `theseus tasks observe ID --how "..."` after you saw it work in the running application; `--user` after the user tested it.
 6. `theseus tasks complete ID --log PATH --check "cmd -> outcome" --summary "..."` (or `--from-log` with a passing `theseus verify` log), then `theseus tasks archive` and `theseus tasks retire ID`.
@@ -66,10 +66,11 @@ Take the first action whose trigger holds, then loop. Occupied slots are never a
 
 ## Writing task records
 
-`theseus tasks add ID --role R --owned PATHS... --objective "..." --contract "..." --accept ITEMS... [--depends IDS] [--milestone M] [--profile P]`.
+`theseus tasks add ID --role R --owned PATHS... --objective "..." --contract "..." --accept ITEMS... [--depends IDS] [--milestone M] [--priority N] [--profile P] [--min-capability N]`.
 
 - Size for one worker session: one subsystem boundary, one report under `docs/investigations/`.
 - `--profile P` only when the task needs what that profile adds (an MCP server's session state); the queue relaunches a compatible agent onto it and back afterwards.
+- `--min-capability N` (`theseus tasks capability ID N`) only when the task needs a profile `capability` of at least N.
 - Acceptance items are observable: a focused command that passes, a named variation covered, an explicit unsupported result. At most six per record, 6 KB per record.
 - Never scope a task as a scenario slice; the scenario is one acceptance fixture of a general contract.
 - A change to an interface owns its consumers: `theseus tasks consumers ID` lists files outside `ownedPaths` that use names declared inside.

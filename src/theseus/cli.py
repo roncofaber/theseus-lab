@@ -1048,7 +1048,8 @@ def build_parser():
     p = ins.add_parser("restart", help="restart a pane's agent and resume its session (reloads MCP servers and skills)")
     p.add_argument("pane", metavar="AGENT", help="registered agent name or tmux pane")
     p.add_argument("--dry-run", action="store_true")
-    p = ins.add_parser("compact", help="type /compact (or /clear) into an idle pane between tasks")
+    p = ins.add_parser("compact", help="type the profile's compact command (--clear: its clear command) into an idle pane "
+                                       "between tasks")
     p.add_argument("pane", metavar="AGENT", help="registered agent name or tmux pane")
     p.add_argument("--clear", action="store_true")
     p.add_argument("keep", nargs="?")
@@ -1136,7 +1137,7 @@ def build_parser():
     p.set_defaults(func=guarded(cmd_setup))
 
     p = sub.add_parser("agents", help="persistent agents: list, add NAME PANE, remove, enable, disable; supervised agents: "
-                                      "up, down, ls, restart, attach, logs, migrate",
+                                      "up, down, ls, restart, attach, logs, migrate, scale",
                        description="Registered persistent agents. With [agents] managed = true theseus starts and supervises "
                                    "them itself on a private tmux server: `up` reconciles toward [agents.counts], `down` "
                                    "stops, `restart` restarts (resuming the conversation unless --fresh), `attach` opens the "

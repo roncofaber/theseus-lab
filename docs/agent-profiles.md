@@ -227,6 +227,22 @@ A state is a dict with:
 - `key`: names the record; a new key (a new session, a rewritten file) makes the console start over.
 
 Adding a CLI means writing that module in its own record format, adding its name to `ADAPTERS`, and setting `transcript = "<name>"` in the preset's `interactive` table. The console redacts API keys, key hashes and email addresses in everything it shows from a transcript or the scrollback.
+## What depends on the preset
+
+Every theseus feature is driven by profile keys, never by a hard-coded agent. The `claude-code` preset sets them all; the other presets set only `launch`, `compact`, `clear` and `messaging = false`, and degrade as follows until you add the missing keys to their `[workers.<name>.interactive]`:
+
+| Feature | Needs | Without it |
+| --- | --- | --- |
+| Verified send (task messages, reminders, resends, restart prompts) | `busy_pattern`; `input_pattern` and `clear_input` for the second Enter | the text is typed and counted as sent, unverified |
+| Stall reminders | `busy_pattern` | a silent agent is shown as `quiet` and never nudged |
+| Thrashing detection | `stall_patterns` | none |
+| Gateway error recovery and the circuit breaker | `gateway_patterns`, optionally `gateway_ready` and `context_pattern` | gateway errors look like an idle stall |
+| Fresh-context recovery and the restart prompt | `clear` (the restart prompt itself needs nothing) | the restart prompt is sent without clearing the context |
+| Context reset between tasks | `compact`, `clear` | none |
+| Supervised agents: session ids, busy and waiting from the CLI | `session_flag`, `status_command`, `sessions_dir` | readiness and busy come from the screen (`ready_pattern`); a restart resumes only with `resume` |
+| Supervised stop and migrate | `exit` | the agent is stopped with a signal |
+| Context use in the console | `sessions_dir` and the transcript format, else `context_pattern` | no context column |
+| Capability, task profiles, pools, queue, merge and verification | nothing | |
 
 ## How delivery is detected
 
