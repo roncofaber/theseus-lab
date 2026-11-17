@@ -355,6 +355,26 @@ GATEWAY_HEALTH = [{"pool": "cborg", "codes": [429, None], "labels": ["429 parall
                    "capUntil": 4102444800.0}]
 
 
+def calibration(rounds=9):
+    """Median CPU seconds of a fixed workload of Rich text and sorting: the unit of the refresh-cost budget."""
+    from rich.text import Text as RichText
+
+    def work():
+        rows = []
+        for n in range(3000):
+            line = RichText(f"row {n} " * 3, style="bold")
+            line.append(str(n * 7), style="dim")
+            rows.append((line.plain, line.cell_len))
+        rows.sort()
+        return len(rows)
+    costs = []
+    for _ in range(rounds):
+        started = time.process_time()
+        work()
+        costs.append(time.process_time() - started)
+    return sorted(costs)[rounds // 2]
+
+
 def grown(base, agents=0, events=0, tasks=0, gpus=None, gateway=False):
     """A copy of a real host snapshot with extra agents, events and ready tasks in the first project (and fake GPUs and
     gateway errors)."""
@@ -398,7 +418,9 @@ class DashboardBase(HostCase, unittest.IsolatedAsyncioTestCase):
         self.base = host.snapshot()
         self.extra = {}
         self.jumps, self.sent, self.keys, self.captures = [], [], [], []
+        # The terminal's color system is pinned: CI runners have no TERM or COLORTERM.
         self.app = TopApp(interval=3600, snapshot_fn=lambda: grown(self.base, **self.extra), tmux_ok=True,
+                          color_system="truecolor",
                           mirror_seconds=0.05, jump_fn=lambda pane: self.jumps.append(pane) or f"jumped {pane}",
                           capture_fn=lambda pane: self.captures.append(pane) or "\033[32mready for input\033[0m\n> ",
                           send_fn=lambda conf, agent, text, expect_busy=True: self.sent.append(
@@ -434,7 +456,8 @@ class DashboardBase(HostCase, unittest.IsolatedAsyncioTestCase):
         from theseus.tui.app import TopApp
         old = self.app
         self.app = TopApp(interval=3600, snapshot_fn=old.snapshot_fn, tmux_ok=True, mirror_seconds=0.05,
-                          jump_fn=old.jump_fn, capture_fn=old.capture_fn, send_fn=old.send_fn, keys_fn=old.keys_fn)
+                          jump_fn=old.jump_fn, capture_fn=old.capture_fn, send_fn=old.send_fn, keys_fn=old.keys_fn,
+                          color_system="truecolor", cli_fn=old.cli_fn)
 
 
 class TopPolishTests(DashboardBase):
@@ -655,14 +678,16 @@ class TopPolishTests(DashboardBase):
                 await pilot.pause()
                 costs.append(time.process_time() - started)
             average = sorted(costs[1:])[len(costs[1:]) // 2]
+            unit = calibration()
             load = os.getloadavg()[0] / (os.cpu_count() or 1)
             print(f"\nrefresh cost (CPU time of apply and the repaint) with 50 agents, 500 events, 200 tasks: "
-                  f"median {average * 1000:.1f} ms (first {costs[0] * 1000:.1f} ms, load {load:.2f} per CPU)")
+                  f"median {average * 1000:.1f} ms, {average / unit:.1f} calibration units (first {costs[0] * 1000:.1f} ms,"
+                  f" unit {unit * 1000:.2f} ms, load {load:.2f} per CPU)")
             if load > 1.0:
                 self.skipTest(f"host load {load:.2f} per CPU makes CPU timings meaningless")
-            # Contention inflates CPU time on a loaded host (shared caches, frequency scaling), so the budget grows with it.
-            budget = 0.05 * float(os.environ.get("THESEUS_PERF_SLACK", "1")) * (1 + 2 * load)
-            self.assertLess(average, budget)
+            # Measured against a fixed Python workload on the same machine, so a slower runner moves both; about 9 units
+            # on a workstation, so the budget of 20 catches a threefold regression without flaking on CI.
+            self.assertLess(average / unit, 20 * float(os.environ.get("THESEUS_PERF_SLACK", "1")))
 
     async def test_tables_are_readable_and_activity_colors_differ_from_errors_under_every_builtin_theme(self):
         from rich.color import Color as RichColor
@@ -904,6 +929,57 @@ class ConsoleTests(DashboardBase):
             await pilot.press("C")
             await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen) and "%9" in self.captures)
             self.assertEqual("lead · live", str(self.app.screen.query_one("#mirror").border_title))
+
+    async def test_the_palette_runs_actions_and_asks_before_destructive_ones(self):
+        from textual.command import CommandPalette
+        from theseus.tui.popups import Confirm
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            for words in ("Queue tick", "Restart fake-1"):
+                await pilot.press("ctrl+p")
+                await self.settle(pilot, lambda: isinstance(self.app.screen, CommandPalette))
+                await pilot.press(*words)
+                await pilot.pause(0.5)
+                await pilot.press("enter")
+                await pilot.pause(0.2)
+            await self.settle(pilot, lambda: isinstance(self.app.screen, Confirm))
+            self.assertEqual([["queue", "tick"]], self.ran)
+            await pilot.press("y")
+            await self.settle(pilot, lambda: self.ran == [["queue", "tick"], ["agents", "restart", "worker-a"]])
+
+    async def test_tables_never_scroll_sideways(self):
+        for size in ((80, 40), (120, 40), (170, 50)):
+            self.setUpApp()
+            async with self.app.run_test(size=size) as pilot:
+                await self.start(pilot)
+                for name in ("agents", "waiting", "events"):
+                    table = self.table(name)
+                    self.assertEqual(0, table.max_scroll_x, (size, name))
+
+    def test_hand_made_agents_get_distinct_short_names(self):
+        from theseus import agents
+        infos = [{"name": f"team-gw-{n}", "display": f"team-gw-{n}"} for n in (1, 2)] + [
+            {"name": "x-cborg-1", "display": "cborg-1", "managed": True}]
+        agents.shorten(infos)
+        self.assertEqual(["gw-1", "gw-2", "cborg-1"], [info["display"] for info in infos])
+
+    def test_the_diff_shows_changed_and_new_files(self):
+        import subprocess
+        from theseus.tui.app import task_diff
+        worktree = self.tmp / "wt"
+        worktree.mkdir()
+        run = lambda *args: subprocess.run(["git", "-C", str(worktree), *args], check=True, capture_output=True, env=self.env)
+        run("init", "-q")
+        (worktree / "a.txt").write_text("one\n")
+        run("add", "a.txt")
+        run("commit", "-q", "-m", "base")
+        base = subprocess.run(["git", "-C", str(worktree), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        (worktree / "a.txt").write_text("two\n")
+        (worktree / "new.txt").write_text("new\n")
+        text = task_diff({"worktree": str(worktree), "baseCommit": base}).plain
+        self.assertIn("a.txt", text)
+        self.assertIn("+two", text)
+        self.assertIn("new.txt (new)", text)
 
     def test_palette_actions_are_cli_commands_and_destructive_ones_ask(self):
         from theseus.tui import commands

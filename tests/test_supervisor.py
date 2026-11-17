@@ -392,6 +392,84 @@ class SupervisorTests(Sandbox):
         self.assertIn("fake = 2", (self.project / "theseus.local.toml").read_text())
         self.assertEqual(1, (self.project / "theseus.local.toml").read_text().count("fake ="))
 
+    def test_scale_refuses_counts_written_inline(self):
+        self.up()
+        (self.project / "theseus.local.toml").write_text("[agents]\ncounts = { fake = 2 }\n")
+        result = self.theseus("agents", "scale", "fake", "3", check=False)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("by hand", result.stderr)
+        self.assertEqual("[agents]\ncounts = { fake = 2 }\n", (self.project / "theseus.local.toml").read_text())
+
+    def test_attach_from_the_console_returns_on_the_detach_key(self):
+        import pty
+        import select
+        self.up("demo-fake-1")
+        code = ("import sys; from theseus.tui.app import attach_supervised; "
+                "print('result', repr(attach_supervised(sys.argv[1], sys.argv[2])))")
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.environ.clear()
+            os.environ.update({**self.env, "TERM": "xterm-256color"})
+            os.execvp(sys.executable, [sys.executable, "-c", code, str(self.project), "demo-fake-1"])
+        output = b""
+
+        def drain(seconds):
+            nonlocal output
+            end = time.monotonic() + seconds
+            while time.monotonic() < end:
+                ready, _, _ = select.select([fd], [], [], 0.1)
+                if ready:
+                    try:
+                        output += os.read(fd, 65536)
+                    except OSError:
+                        return
+        drain(2.0)
+        self.assertEqual("1", self.tmux("display", "-p", "-t", "=demo--demo-fake-1:", "#{session_attached}").stdout.strip())
+        os.write(fd, b"\x11")
+        drain(2.0)
+        self.assertEqual(pid, os.waitpid(pid, 0)[0])
+        self.assertIn(b"result ''", output)
+        self.assertEqual("", self.legacy_calls())
+
+    def test_the_console_mirrors_and_restarts_a_supervised_agent(self):
+        import asyncio
+        self.up()
+        from theseus.tui.app import TopApp
+        from theseus.tui.popups import AgentScreen, Confirm
+        os.environ["PYTHONPATH"] = self.env["PYTHONPATH"]
+
+        async def drive():
+            app = TopApp(interval=3600, roots=[str(self.project)], current=str(self.project), color_system="truecolor",
+                         mirror_seconds=0.1)
+            async with app.run_test(size=(170, 60)) as pilot:
+                async def until(check, seconds=20):
+                    for _ in range(int(seconds / 0.1)):
+                        await pilot.pause(0.1)
+                        if check():
+                            return
+                    self.fail("console did not settle")
+                await until(lambda: app.active_item() is not None and "fake-1" in self.screen(app))
+                await pilot.press("a", "enter")
+                await until(lambda: isinstance(app.screen, AgentScreen))
+                popup = app.screen
+                await until(lambda: "fake agent demo-fake-1 ready" in popup.query_one("#mirror-text").render().plain)
+                await pilot.click("#send")
+                await pilot.press(*"hi there", "enter")
+                await until(lambda: "input demo-fake-1: hi there" in self.log())
+                await pilot.press("escape")
+                await until(lambda: len(app.screen_stack) == 1)
+                await pilot.press("a", "enter")
+                await until(lambda: isinstance(app.screen, AgentScreen))
+                await pilot.press("R")
+                await until(lambda: isinstance(app.screen, Confirm))
+                await pilot.press("y")
+                await until(lambda: len(self.runs("demo-fake-1")) == 2, 60)
+        asyncio.run(drive())
+        self.assertEqual("", self.legacy_calls())
+
+    def screen(self, app):
+        return "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+
     def add_task(self, task_id):
         self.theseus("tasks", "milestone", "M1")
         self.theseus("tasks", "add", task_id, "--role", "research", "--owned", f"docs/investigations/{task_id}.md",

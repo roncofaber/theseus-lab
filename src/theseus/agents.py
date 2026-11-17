@@ -531,7 +531,24 @@ def managed_status(conf, agent, server):
 
 
 def states(conf):
-    return [state(conf, agent) for agent in agents(conf)]
+    found = [state(conf, agent) for agent in agents(conf)]
+    shorten(found)
+    return found
+
+
+def shorten(infos):
+    """Drop leading name segments every hand-made agent shares (`team-gw-1`, `team-gw-2` show as `gw-1`, `gw-2`),
+    keeping at least two segments, so short names stay distinct."""
+    plain = [info for info in infos if not info.get("managed") and info.get("display") == info["name"]]
+    if len(plain) < 2:
+        return
+    parts = [info["name"].split("-") for info in plain]
+    shared = 0
+    while all(len(p) > shared + 2 for p in parts) and len({p[shared] for p in parts}) == 1:
+        shared += 1
+    if shared:
+        for info, segments in zip(plain, parts):
+            info["display"] = "-".join(segments[shared:])
 
 
 def instance_entries(conf):

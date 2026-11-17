@@ -219,6 +219,14 @@ def set_count(conf, profile, count):
         text = text[:start] + section + text[end:]
     else:
         text = text.rstrip("\n") + ("\n\n" if text.strip() else "") + "[agents.counts]\n" + line + "\n"
+    import tomllib
+    try:
+        written = (tomllib.loads(text).get("agents") or {}).get("counts") or {}
+    except tomllib.TOMLDecodeError:
+        written = {}
+    if written.get(profile) != count:
+        raise SupervisorError(f"cannot set the count in {path} automatically (its [agents] counts are written in another "
+                              f"form); set {profile} = {count} under [agents.counts] by hand")
     path.write_text(text)
     return f"[agents.counts] {profile} = {count} in {cfg.LOCAL_NAME}"
 

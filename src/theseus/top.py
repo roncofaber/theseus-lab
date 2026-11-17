@@ -454,7 +454,8 @@ def watcher_state(conf):
     pid = beat.get("pid")
     try:
         os.kill(int(pid), 0)
-        beat["alive"] = True
+        # A pid reused after the loop died would pass the check, so a wake time long past counts as dead too.
+        beat["alive"] = time.time() - float(beat.get("next") or 0) < 300
     except (OSError, TypeError, ValueError):
         beat["alive"] = False
     return beat
@@ -822,7 +823,8 @@ def render(state, width=120, height=None, ui=None):
         quiet_seconds = None if agent.get("idleMinutes") is None else agent["idleMinutes"] * 60
         on_task = age(times.get(agent.get("task"), (None, None))[1]) if agent.get("task") else None
         key = str(number) if number <= 9 else " "
-        line = (f"{color}●{R} {DIM}{key}{R} {B}{cut(agent['name'], 16):<16}{R} {agent['pane']:<6} {color}{agent['state']:<10}{R} "
+        line = (f"{color}●{R} {DIM}{key}{R} {B}{cut(agent.get('display') or agent['name'], 16):<16}{R} "
+                f"{'private' if agent.get('managed') else agent['pane']:<6} {color}{agent['state']:<10}{R} "
                 f"{B}{cut(agent.get('task') or '-', task_w):<{task_w}}{R} {ROOM_COLOR.get(agent.get('room'), '')}{agent.get('room') or '-':<6}{R} "
                 f"{column(aged(on_task, SLOW, VERY_SLOW), 8)} {column(aged(quiet_seconds, QUIET_WARN, 2 * QUIET_WARN), 6)} ")
         if wide:

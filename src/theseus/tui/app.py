@@ -509,7 +509,7 @@ class TopApp(App):
 
     def __init__(self, interval=5.0, current=None, roots=(), snapshot_fn=None, jump_fn=None, loader=None, sampler=None,
                  capture_fn=None, send_fn=None, keys_fn=None, tmux_ok=None, mirror_seconds=1.0, cli_fn=None,
-                 attach_fn=None, diff_fn=None):
+                 attach_fn=None, diff_fn=None, color_system=None):
         super().__init__()
         self.interval = interval
         self.current = str(Path(current).resolve()) if current else None
@@ -523,6 +523,7 @@ class TopApp(App):
         self.cli_fn = cli_fn or run_theseus
         self.attach_fn = attach_fn or attach_supervised
         self.diff_fn = diff_fn or task_diff
+        self.color_system = color_system
         self.tmux_ok = (bool(os.environ.get("TMUX")) and shutil.which("tmux") is not None) if tmux_ok is None else tmux_ok
         self.mirror_seconds = mirror_seconds
         self.history = resources.Ring(HISTORY_SAMPLES)
@@ -558,7 +559,7 @@ class TopApp(App):
         """Recompute the dashboard styles for the current theme and terminal, then repaint accents and rows."""
         current = self.current_theme
         variables = {**current.to_color_system().generate(), **current.variables}
-        theme.apply(variables, current.dark, current.ansi, self.console.color_system)
+        theme.apply(variables, current.dark, current.ansi, self.color_system or self.console.color_system)
         for identifier, view in self.views.items():
             view.repaint()
             try:
@@ -871,7 +872,7 @@ class TopApp(App):
         actions = SimpleNamespace(
             capture=self.capture_fn,
             send=lambda text: self.send_fn(self.loader(root), agent, text, expect_busy=not text.startswith("/")),
-            keys=lambda *keys: self.keys_fn(pane, *keys) or f"sent {' '.join(keys)} to {pane}",
+            keys=lambda *keys: self.keys_fn(pane, *keys) or f"{' '.join(keys)} → {agent.get('display') or name}",
             type=lambda *keys: self.keys_fn(pane, *keys),
             jump=(lambda: self.jump_fn(pane)) if (self.tmux_ok or supervised) and pane else None,
             diff=(lambda: self.diff_fn(task)) if task else None,
@@ -902,7 +903,7 @@ class TopApp(App):
         actions = SimpleNamespace(
             capture=self.capture_fn,
             send=lambda text: self.send_fn(self.loader(root), target, text, expect_busy=not text.startswith("/")),
-            keys=lambda *keys: self.keys_fn(pane, *keys) or f"sent {' '.join(keys)} to {pane}",
+            keys=lambda *keys: self.keys_fn(pane, *keys) or f"{' '.join(keys)} → {coordinator['name']}",
             type=lambda *keys: self.keys_fn(pane, *keys),
             jump=(lambda: self.jump_fn(pane)) if self.tmux_ok else None,
             events=lambda: R.agent_events(item["snapshot"]["events"], None))
@@ -914,10 +915,13 @@ class TopApp(App):
         result and refresh."""
         def go():
             def work():
-                ok, message = self.cli_fn(root, argv)
+                try:
+                    ok, message = self.cli_fn(root, argv)
+                except Exception as problem:
+                    ok, message = False, f"theseus {' '.join(argv)}: {problem}"
                 self.call_from_thread(self.notify, message, severity="information" if ok else "error")
                 self.call_from_thread(self.refresh_now)
-            self.run_worker(work, thread=True, group="cli")
+            self.run_worker(work, thread=True, group="cli", exit_on_error=False)
         if question:
             self.push_screen(popups.Confirm(question), lambda yes: go() if yes else None)
         else:
@@ -933,9 +937,12 @@ class TopApp(App):
         task = (item["snapshot"].get("tasks") or {}).get(task_id)
 
         def work():
-            text = handoff_text(task)
+            try:
+                text = handoff_text(task)
+            except Exception as problem:
+                text = Text(f"failed: {problem}")
             self.call_from_thread(self.push_screen, popups.Dialog(f"handoff {task_id}", text))
-        self.run_worker(work, thread=True, group="handoff")
+        self.run_worker(work, thread=True, group="handoff", exit_on_error=False)
 
 
 def run_theseus(root, argv):
@@ -970,7 +977,11 @@ def task_diff(task):
     args = ["git", "-C", worktree, "diff", *([base] if base else [])]
     stat = subprocess.run([*args, "--stat"], capture_output=True, text=True, timeout=30).stdout
     patch = subprocess.run(args, capture_output=True, text=True, timeout=30).stdout.splitlines()[:3000]
-    text = Text(stat or "no changes\n", style="bold")
+    untracked = subprocess.run(["git", "-C", worktree, "ls-files", "--others", "--exclude-standard"], capture_output=True,
+                               text=True, timeout=30).stdout.split()
+    text = Text(stat if stat or untracked else "no changes\n", style="bold")
+    for path in untracked:
+        text.append(f" {path} (new)\n", style=f"bold {theme.GREEN}")
     for line in patch:
         style = (theme.GREEN if line.startswith("+") and not line.startswith("+++") else
                  theme.RED if line.startswith("-") and not line.startswith("---") else
@@ -980,7 +991,10 @@ def task_diff(task):
 
 
 def handoff_text(task):
-    path = Path((task or {}).get("execution", {}).get("logDir") or "") / "handoff.md"
+    log_dir = ((task or {}).get("execution") or {}).get("logDir")
+    if not log_dir:
+        return Text("-", style="dim")
+    path = Path(log_dir) / "handoff.md"
     try:
         return Text(path.read_text())
     except OSError:
