@@ -8,7 +8,7 @@ from rich.text import Text
 from .. import host, top
 from . import charts, theme
 
-AGENT_COLUMNS = ("agent", "pane", "state", "task", "CPU (core %)", "MEM (RAM)", "context", "room", "on task", "quiet",
+AGENT_COLUMNS = ("agent", "state", "task", "CPU (core %)", "MEM (RAM)", "context", "room", "on task", "quiet",
                  "up", "restarts", "session", "model", "pool", "note")
 PROJECT_COLUMNS = ("project", "milestone", "coordinator", "watcher", "ready", "working on", "review", "attention", "agents",
                    "pool", "gateway", "today")
@@ -18,7 +18,7 @@ OPTIONAL = {"agents": ("model", "pool", "session", "note", "restarts", "up", "ro
             "gateway": ("pool", "attempt", "outcome"), "waiting": ("posted", "room")}
 # Stable column widths: an int is fixed, a float shares the remaining width in proportion.
 WIDTHS = {
-    "agents": {"agent": 14, "pane": 7, "state": 10, "task": 1.0, "CPU (core %)": 12, "MEM (RAM)": 11, "context": 14,
+    "agents": {"agent": 14, "state": 10, "task": 1.0, "CPU (core %)": 12, "MEM (RAM)": 11, "context": 14,
                "room": 6, "on task": 8, "quiet": 6, "up": 6, "restarts": 8, "session": 8, "model": 0.8, "pool": 8,
                "note": 0.5},
     "waiting": {"status": 10, "task": 1.0, "room": 6, "for": 8, "posted": 12, "reason": 1.2},
@@ -107,8 +107,7 @@ def agent_rows(state):
         glow_style = f"bold {theme.KIND.get(glow[0]['kind'], '')}" if glow else ""
         restarts = agent.get("restarts")
         rows.append(row(f"agent:{agent['name']}:{agent['pane']}", [
-            marked(agent.get("display") or agent["name"], color), "private" if agent.get("managed") else agent["pane"],
-            cell(agent["state"], color),
+            marked(agent.get("display") or agent["name"], color), cell(agent["state"], color),
             cell(agent.get("task") or "-", "bold"), cpu, mem, context(agent.get("context")),
             cell(agent.get("room") or "-", theme.ROOM.get(agent.get("room"), "")),
             cell(top.duration(on_task), theme.aged(on_task, top.SLOW, top.VERY_SLOW)),
@@ -121,7 +120,7 @@ def agent_rows(state):
     for worker in state.get("workers", []):
         on_task = top.age(times.get(worker["task"], (None, None))[1])
         rows.append(row(f"worker:{worker['name']}:{worker['task']}", [
-            marked(worker["name"], theme.CYAN, marker="◆"), "-", cell(worker["kind"], theme.CYAN), cell(worker["task"], "bold"),
+            marked(worker["name"], theme.CYAN, marker="◆"), cell(worker["kind"], theme.CYAN), cell(worker["task"], "bold"),
             "-", "-", "-", cell(worker.get("room") or "-", theme.ROOM.get(worker.get("room"), "")),
             cell(top.duration(on_task), theme.aged(on_task, top.SLOW, top.VERY_SLOW)), "-", "-", "-", "-",
             cell(worker.get("model") or "-", "dim"), "-", ""]))
@@ -703,11 +702,11 @@ def agent_text(agent, task=None, total=0):
     detail.add("launcher", agent.get("command") or "-")
     detail.add("session", (agent.get("session") or "-")[:8])
     detail.add("pool", agent.get("pool") or "-")
+    detail.add("pane", agent.get("pane"), "bold")
     if agent.get("managed"):
         detail.add("run", f"gen {agent.get('gen') or '-'} · restarts {agent.get('restarts') or 0} · up "
                           f"{top.duration(agent.get('uptime'))}")
     else:
-        detail.add("pane", agent.get("pane"), "bold")
         detail.add("run", f"up {top.duration(agent.get('uptime'))}")
     detail.add("CPU", "-" if agent.get("cpu") is None else f"{agent['cpu']:.0f}% of one core")
     rss = agent.get("rss")

@@ -801,8 +801,8 @@ def render(state, width=120, height=None, ui=None):
     total = sum(a.get("rss") or 0 for a in state["agents"])
     times = state.get("times", {})
     frame.rule("AGENTS", f"{DIM}{len(state['agents'])} registered · {size(total)} resident in total{R}")
-    task_w = max(12, min(28, width - 4 - 73 - (14 if roomy else 0) - (14 if wide else 0)))
-    head = f"  {'#':<1} {'AGENT':<16} {'PANE':<6} {'STATE':<10} {'TASK':<{task_w}} {'ROOM':<6} {'ON TASK':<8} {'QUIET':<6} "
+    task_w = max(12, min(28, width - 4 - 66 - (14 if roomy else 0) - (14 if wide else 0)))
+    head = f"  {'#':<1} {'AGENT':<16} {'STATE':<10} {'TASK':<{task_w}} {'ROOM':<6} {'ON TASK':<8} {'QUIET':<6} "
     if wide:
         head += f"{'UP':<7} "
     if roomy:
@@ -824,7 +824,7 @@ def render(state, width=120, height=None, ui=None):
         on_task = age(times.get(agent.get("task"), (None, None))[1]) if agent.get("task") else None
         key = str(number) if number <= 9 else " "
         line = (f"{color}●{R} {DIM}{key}{R} {B}{cut(agent.get('display') or agent['name'], 16):<16}{R} "
-                f"{'private' if agent.get('managed') else agent['pane']:<6} {color}{agent['state']:<10}{R} "
+                f"{color}{agent['state']:<10}{R} "
                 f"{B}{cut(agent.get('task') or '-', task_w):<{task_w}}{R} {ROOM_COLOR.get(agent.get('room'), '')}{agent.get('room') or '-':<6}{R} "
                 f"{column(aged(on_task, SLOW, VERY_SLOW), 8)} {column(aged(quiet_seconds, QUIET_WARN, 2 * QUIET_WARN), 6)} ")
         if wide:
@@ -836,7 +836,7 @@ def render(state, width=120, height=None, ui=None):
         rows.append(line + note)
     for worker in state.get("workers", []):
         on_task = age(times.get(worker["task"], (None, None))[1])
-        rows.append(f"{CYAN}◆{R}   {B}{cut(worker['name'], 16):<16}{R} {'-':<6} {CYAN}{worker['kind']:<10}{R} "
+        rows.append(f"{CYAN}◆{R}   {B}{cut(worker['name'], 16):<16}{R} {CYAN}{worker['kind']:<10}{R} "
                     f"{B}{cut(worker['task'], task_w):<{task_w}}{R} {ROOM_COLOR.get(worker.get('room'), '')}{worker.get('room') or '-':<6}{R} "
                     f"{column(aged(on_task, SLOW, VERY_SLOW), 8)} {DIM}{cut(worker.get('model') or '', 20)}{R}")
     frame.fixed(rows, max(len(rows), 1), "no registered agents: theseus agents add NAME PANE")
