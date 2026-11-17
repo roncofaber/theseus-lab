@@ -277,13 +277,19 @@ def tick(conf, assign=True):
             try:
                 target = task.get("profile") or registered_profile(conf, agent)
                 if target != launched(conf, agent):
-                    ok, detail = relaunch(conf, agent, target)
+                    try:
+                        ok, detail = relaunch(conf, agent, target)
+                    except Exception as error:
+                        ok, detail = False, str(error)
                     if not ok:
                         recorded.append(event(conf, "error", name, task["id"], f"relaunch onto {target} failed: {detail}"))
                         continue
                     recorded.append(event(conf, "relaunched", name, task["id"], detail))
                 if needed:
-                    ok, detail = reset(conf, agent, needed)
+                    try:
+                        ok, detail = reset(conf, agent, needed)
+                    except Exception as error:
+                        ok, detail = False, str(error)
                     if not ok:
                         recorded.append(event(conf, "error", name, task["id"], f"{needed} failed: {detail}"))
                         continue

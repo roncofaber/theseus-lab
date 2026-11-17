@@ -60,7 +60,7 @@ class RestartHarness(Sandbox):
             (bin_dir / name).chmod(0o755)
         self.env.update({"PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_STATE": str(self.state),
                          "FAKE_SESSIONS": str(self.sessions), "THESEUS_AGENT_SESSIONS": str(self.sessions),
-                         "THESEUS_AGENT_LAUNCH": str(bin_dir / "claude")})
+                         "THESEUS_AGENT_LAUNCH": str(bin_dir / "claude"), "THESEUS_RESTART_POLL": "0.2"})
         self.shell = subprocess.Popen([str(bin_dir / "fake-shell")], env=self.env, start_new_session=True)
         self.addCleanup(self.stop_shell)
         (self.state / "shell.pid").write_text(str(self.shell.pid))
@@ -171,6 +171,15 @@ class ProfileRelaunchTests(RestartHarness):
         resume = [line for line in self.typed() if "--resume" in line]
         self.assertEqual(f"{self.bin / 'claude'} --name worker-x --permission-mode auto --resume first-session", resume[-1])
         self.wait_for_agent(exclude=(first, second))
+
+    def test_a_failed_relaunch_is_an_error_event_not_a_crash(self):
+        path = self.project / "theseus.local.toml"
+        path.write_text(path.read_text().replace('mcp_servers = ["theseus"]', 'mcp_servers = ["nonexistent"]'))
+        self.add("needs-missing", "--profile", "lean-mcp")
+        out = self.theseus("queue", "tick").stdout
+        self.assertRegex(out, r"error\s+worker-x\s+needs-missing relaunch onto lean-mcp failed: .*nonexistent")
+        self.assertEqual("pending", json.loads(self.theseus("tasks", "show", "needs-missing").stdout)["status"])
+        self.assertIsNone(self.launched())
 
 
 if __name__ == "__main__":

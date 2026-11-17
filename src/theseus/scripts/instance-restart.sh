@@ -4,6 +4,7 @@
 # record (Claude Code keeps one per process, <sessions dir>/<pid>.json), which also gives its session ID. The relaunch is typed into the
 # pane's own shell, so the same aliases and environment (for example a model gateway configuration) apply. When the
 # session no longer exists (the pane shows THESEUS_RESUME_MISSING with its ID), the agent is launched fresh instead.
+# It returns once the new agent's screen has stopped changing, so whatever is typed next reaches a ready prompt.
 # Usage: theseus instance restart PANE [--dry-run]
 set -uo pipefail
 # shellcheck source=lib.sh
@@ -51,6 +52,13 @@ for _ in $(seq 1 90); do
     sleep 1
 done
 [[ -n "$new_pid" ]] || { echo "$pane: no agent came back within 90 s" >&2; exit 1; }
+previous=""
+for _ in $(seq 1 30); do
+    sleep "${THESEUS_RESTART_POLL:-1}"
+    screen=$(tmux capture-pane -p -t "$pane" 2>/dev/null)
+    [[ -n "$screen" && "$screen" == "$previous" ]] && ! pane_busy "$pane" && break
+    previous=$screen
+done
 if [[ -n "$fresh" ]]; then
     new_session=$(jq -r '.sessionId // empty' "$sessions/$new_pid.json" 2>/dev/null)
     echo "$pane: session $session no longer exists; launched ${name:-unnamed} fresh as pid $new_pid, session ${new_session:-unknown}"

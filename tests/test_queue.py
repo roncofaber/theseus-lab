@@ -156,7 +156,8 @@ class QueueTests(Sandbox):
     def test_a_thrashing_agent_is_reported_at_once_and_never_nudged(self):
         self.add("heavy-task")
         self.theseus("queue", "tick")
-        (self.state / "screen-%1").write_text("Autocompact is thrashing: the context refilled right after compacting.\n> \n")
+        (self.state / "screen-%1").write_text("Autocompact is thrashing: the context refilled right after compacting.\n"
+                                              "Compacting conversation (esc to interrupt)\n")
         self.assertRegex(self.theseus("agents").stdout, r"worker-a\s+%1\s+thrashing")
         waited = self.theseus("queue", "wait", "--timeout", "20", "--interval", "1").stdout
         self.assertRegex(waited, r"stalled\s+worker-a\s+heavy-task thrashing: the pane shows 'Autocompact is thrashing'")
@@ -164,6 +165,9 @@ class QueueTests(Sandbox):
         self.assertNotIn("Continue the current task", self.typed())
         self.assertEqual(1, self.theseus("queue", "log").stdout.count("stalled"))
         self.assertIn("thrashing", self.theseus("top", "--once").stdout)
+        self.deliver("heavy-task")
+        (self.state / "screen-%1").write_text("Autocompact is thrashing: the context refilled right after compacting.\n> \n")
+        self.assertIn("delivered", self.theseus("queue", "tick").stdout, "a final handoff wins over a lingering notice")
 
     def test_a_task_profile_limits_which_agents_take_it(self):
         self.write("theseus.local.toml", '[workers.other-cli]\npreset = "claude-code"\ncommand = "other-cli"\n'
