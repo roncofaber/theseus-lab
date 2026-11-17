@@ -39,6 +39,7 @@ CLAUDE_INTERACTIVE = {
     "busy_pattern": "esc to interrupt",
     "stall_patterns": ["Autocompact is thrashing"],
     "gateway_patterns": [r"API Error: 5\d\d", r"\bError 52\d\b", r"API Error: 529|overloaded_error",
+                         r"API Error: Request rejected \(\d{3}\)", r"API Error: (?:Connection lost|Server error) mid-response",
                          r"API Error: 429|429 Too Many Requests|rate_limit_error|[Rr]ate limit (reached|exceeded)",
                          r"API Error: 4\d\d", r"Resend your message to try again", r"[Pp]rompt is too long"],
     "gateway_ready": "Resend your message to try again",
@@ -65,6 +66,7 @@ PRESETS = {
         "session": "preassign",
         "model_flag": "--model",
         "model": "",
+        "context_limit": 200000,
         "permission_mode": "auto",
         "env": {},
         "retry": True,
@@ -138,6 +140,7 @@ PRESETS = {
     },
 }
 ALIASES = {"claude": "claude-subagent"}
+CONTEXT_LIMIT = 200000
 DEFAULT = "claude-code"
 OVERRIDABLE = set(PRESETS["claude-code"]) | {"preset", "fallback", "pool", "mcp_servers", "mcp_flags", "extra_args"}
 INTERACTIVE_KEYS = set(CLAUDE_INTERACTIVE) | {"launch", "resume"}

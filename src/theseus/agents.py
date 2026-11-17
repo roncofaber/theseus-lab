@@ -127,6 +127,40 @@ def pane_alive(pane):
     return tmux("display", "-p", "-t", pane, "#{pane_pid}").returncode == 0
 
 
+def session_transcript(conf, agent):
+    """The Claude Code transcript state (theseus.transcripts.read) of the session in the agent's pane, or None when
+    the profile has no sessions directory or no live client names the pane."""
+    from . import profiles
+    from . import transcripts
+    try:
+        directory = (conf.section("instances").get("sessions_dir")
+                     or profiles.interactive(conf, agent.get("provider")).get("sessions_dir"))
+    except profiles.ProfileError:
+        return None
+    if not directory:
+        return None
+    address = tmux("display", "-p", "-t", agent["pane"], "#{window_id}.#{pane_id}").stdout.strip()
+    try:
+        return transcripts.pane_transcript(directory, address)
+    except OSError:
+        return None
+
+
+def context_use(conf, profile, transcript, hint):
+    """{"tokens", "limit", "model", "source"} of the agent's context: the transcript's last answer, else the pane's
+    context hint, else None. The limit is the profile's context_limit."""
+    from . import profiles
+    try:
+        limit = int(profiles.resolve(conf, profile).get("context_limit") or profiles.CONTEXT_LIMIT)
+    except (profiles.ProfileError, ValueError, TypeError):
+        limit = profiles.CONTEXT_LIMIT
+    if transcript and transcript.get("tokens"):
+        return {"tokens": transcript["tokens"], "limit": limit, "model": transcript.get("model"), "source": "transcript"}
+    if hint:
+        return {"tokens": hint, "limit": limit, "model": None, "source": "pane hint"}
+    return None
+
+
 def pane_screen(pane):
     return tmux("capture-pane", "-p", "-t", pane).stdout.splitlines()
 
@@ -321,6 +355,10 @@ def state(conf, agent):
     busy = pane_busy(conf, pane, agent.get("provider"), screen)
     info["busy"] = busy
     info["contextTokens"] = gateway.context_tokens(conf, agent.get("provider"), screen)
+    transcript = session_transcript(conf, agent)
+    info["context"] = context_use(conf, agent.get("provider"), transcript, info["contextTokens"])
+    transcript_error = (transcript["errors"][-1] if transcript and transcript.get("last") == "error" and transcript["errors"]
+                        else None)
     if task:
         handoff = handoff_path(task)
         worktree = task.get("worktree")
@@ -333,7 +371,7 @@ def state(conf, agent):
         elif stall := pane_stall(conf, pane, agent.get("provider"), screen):
             info["state"] = "thrashing"
             info["stall"] = stall
-        elif not busy and (error := gateway.detect(conf, agent.get("provider"), screen)) \
+        elif not busy and (error := gateway.detect(conf, agent.get("provider"), screen, transcript_error)) \
                 and not gateway.stale(conf, agent["name"], error):
             info["state"] = "gateway_error"
             info["gateway"] = error

@@ -136,9 +136,21 @@ def stacked_bars(series, width, height, bin_seconds=host.BIN_SECONDS):
     return lines
 
 
+HISTORY_STEPS = (10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200)
+
+
+def span_label(seconds):
+    if seconds < 60:
+        return f"-{seconds:.0f}s"
+    if seconds < 3600:
+        return f"-{seconds / 60:g}m" if seconds % 60 == 0 else f"-{seconds // 60:.0f}m{seconds % 60:02.0f}"
+    return f"-{seconds / 3600:g}h"
+
+
 def history(values, width, height, style="green", maximum=100.0, seconds=None, suffix="%"):
-    """A filled history chart of the newest samples (oldest left), one column per sample, `maximum` at the top."""
-    rows = max(1, height - 1)
+    """A filled history chart of the newest samples (oldest left), one column per sample, `maximum` at the top, over
+    a baseline with a tick and a time label (-5m, -4m ... now) every few samples when the sample period is known."""
+    rows = max(1, height - 2)
     label_width = len(f"{maximum:.0f}{suffix}") + 1
     plot_width = max(1, width - label_width - 1)
     shown = list(values)[-plot_width:]
@@ -155,12 +167,21 @@ def history(values, width, height, style="green", maximum=100.0, seconds=None, s
             cell = "█" if fraction >= 1 else EIGHTHS[round(max(fraction, 0.0) * 8)]
             line.append(cell, style=theme.level(value / maximum) if style == "level" else style)
         lines.append(line)
-    footer = Text(" " * label_width + "└", style=AXIS)
-    covered = int(seconds * len(shown)) if seconds else 0
-    span = "" if not covered else f"-{covered}s" if covered < 60 else f"-{covered // 60}m"
-    fits = span and plot_width >= len(span) + 4
-    footer.append(f"{span:<{plot_width - 3}}now" if fits else f"{'now':>{plot_width}}"[:plot_width], style=AXIS)
-    lines.append(footer)
+    base = ["─"] * plot_width
+    labels = [" "] * plot_width
+    labels[max(0, plot_width - 3):] = "now"[-plot_width:]
+    step = next((n for n in HISTORY_STEPS if seconds and n / seconds >= 8), None)
+    if step:
+        start, back = None, step
+        while (column := plot_width - 1 - round(back / seconds)) >= 0:
+            text = span_label(back)
+            if column + len(text) <= plot_width - 4 and (start is None or column + len(text) < start):
+                base[column] = "┴"
+                labels[column:column + len(text)] = text
+                start = column
+            back += step
+    lines.append(Text(" " * label_width + "└" + "".join(base), style=AXIS))
+    lines.append(Text(" " * (label_width + 1) + "".join(labels).rstrip(), style=AXIS))
     return lines
 
 

@@ -217,7 +217,7 @@ class RetryTests(FakeSend):
         self.assertEqual(("waiting", now + 120), (row["phase"], row["next_epoch"]), "the timing survives a restart")
         [(kind, detail)] = self.handle(info, now + 121)
         self.assertEqual("resent", kind)
-        self.assertIn("continue after gateway 524, attempt 1/3", detail)
+        self.assertIn("continue after gateway 524 origin timeout, attempt 1/3", detail)
         self.assertIn("The gateway error is over", self.sent[-1])
         steps = [(now + 130, 240), (now + 130 + 241 + 10, 480)]
         for number, (seen, wait) in enumerate(steps, 2):
@@ -231,7 +231,7 @@ class RetryTests(FakeSend):
         self.assertEqual([], self.handle(info, now + 6000), "exhaustion is reported once")
         kinds = [e["kind"] for e in wq.events(self.conf)]
         self.assertEqual(3, kinds.count("gateway_error"))
-        self.assertIn("gateway 524 x3", wq.events(self.conf, 1)[-1]["detail"])
+        self.assertIn("gateway 524 origin timeout x3", wq.events(self.conf, 1)[-1]["detail"])
         self.assertIn("/clear", self.sent)
         restart = self.sent[-1]
         for expected in ("slow-task", str(self.tmp / "worktrees"), "Continue the partial report or changes in place",
@@ -244,7 +244,7 @@ class RetryTests(FakeSend):
         info = self.info(screen(CF_403))
         [(kind, detail)] = self.handle(info, 1000.0)
         self.assertEqual("error", kind)
-        self.assertIn("gateway 403 fatal", detail)
+        self.assertIn("gateway 403 forbidden fatal", detail)
         self.assertEqual([], self.handle(info, 5000.0))
         self.assertEqual([], self.sent)
 
@@ -269,7 +269,7 @@ class RetryTests(FakeSend):
             now += 180
         [(kind, detail)] = self.handle(info, now)
         self.assertEqual("stalled", kind)
-        self.assertIn("gateway 524 x3", detail)
+        self.assertIn("gateway 524 origin timeout x3", detail)
 
     def test_a_pane_that_gets_going_without_the_resend_is_not_resent(self):
         from theseus import gateway
@@ -435,7 +435,7 @@ class QueueGatewayTests(GatewayCase):
     def test_a_fatal_error_wakes_the_coordinator(self):
         (self.state / "screen-%1").write_text("\n".join(screen(CF_403)) + "\n")
         waited = self.theseus("queue", "wait", "--timeout", "20", "--interval", "1")
-        self.assertRegex(waited.stdout, r"error\s+worker-a\s+slow-task gateway 403 fatal")
+        self.assertRegex(waited.stdout, r"error\s+worker-a\s+slow-task gateway 403 forbidden fatal")
 
     def test_instance_send_verifies_and_reports_a_stuck_pane(self):
         sent = self.theseus("instance", "send", "worker-a", "Please continue.")
@@ -450,3 +450,152 @@ class QueueGatewayTests(GatewayCase):
         self.assertEqual(1, stuck.returncode)
         self.assertIn("send_failed", self.theseus("queue", "log").stdout)
         self.assertEqual(2, self.theseus("instance", "send", "nobody", "x", check=False).returncode)
+
+
+PARALLEL_429 = ("API Error: Request rejected (429) · Rate limit exceeded for api_key: "
+                "3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a. Limit type: max_parallel_requests. "
+                "Current limit: 5, Remaining: 0. Limit resets at: 2026-11-17 18:00:00")
+CAPACITY_429 = ("API Error: Request rejected (429) · Model capacity reached for kimi-k31-pro. Priority: None, Rate limit "
+                "type: tokens, Model TPM: 600000, Model RPM: not configured, Remaining: 0")
+CONN_LOST = "API Error: Connection lost mid-response. The response above may be incomplete."
+BUDGET_422 = "API Error: 422 ExceededBudget: User=someone@example.org over budget. Spend=500.03, Budget=500.0"
+
+
+class TypedErrorTests(FakeSend):
+    """Typed classification from the exact error texts, redaction, the transcript as the first source, the stored
+    columns, the host-wide cap cut on a parallel cap and the recent-error rows the dashboard shows."""
+
+    def test_each_error_text_gets_its_own_typed_label(self):
+        from theseus import gateway
+        found = {name: gateway.classify(text, kind) for name, text, kind in (
+            ("parallel", PARALLEL_429, "rate_limit"), ("capacity", CAPACITY_429, "rate_limit"), ("524", CF_524, "server_error"),
+            ("530", CF_530, None), ("lost", CONN_LOST, "server_error"), ("529", OVERLOADED, None), ("budget", BUDGET_422, None),
+            ("marker", "Resend your message to try again", None))}
+        self.assertEqual({"parallel": "429 parallel cap", "capacity": "429 model TPM (kimi-k31-pro)",
+                          "524": "524 origin timeout", "530": "530 tunnel down", "lost": "conn lost",
+                          "529": "529 overloaded", "budget": "422 budget exceeded", "marker": "unknown (resend marker)"},
+                         {name: typed["label"] for name, typed in found.items()})
+        self.assertEqual(("connection_lost", None, True), (found["lost"]["kind"], found["lost"]["status"], found["lost"]["retryable"]))
+        self.assertEqual((429, "rate_limit", "parallel cap"),
+                         (found["parallel"]["status"], found["parallel"]["kind"], found["parallel"]["subtype"]))
+        self.assertFalse(found["budget"]["retryable"])
+        self.assertTrue(all(found[name]["retryable"] for name in ("parallel", "capacity", "524", "530", "lost", "529")))
+
+    def test_excerpts_never_hold_keys_hashes_or_email_addresses(self):
+        from theseus import gateway
+        parallel = gateway.classify(PARALLEL_429)["excerpt"]
+        self.assertIn("api_key: [redacted]", parallel)
+        self.assertNotIn("3f9a8b7c6d5e", parallel)
+        self.assertIn("max_parallel_requests", parallel)
+        self.assertNotIn("someone@example.org", gateway.classify(BUDGET_422)["excerpt"])
+        self.assertEqual("token [redacted] used", gateway.redact("token sk-abcdefghijklmnop used"))
+
+    def test_the_transcript_classifies_an_error_the_pane_shows_only_as_the_resend_marker(self):
+        from theseus import gateway
+        error = gateway.detect(self.conf, None, screen(), {"text": PARALLEL_429, "error": "rate_limit", "time": "t"})
+        self.assertEqual((429, "429 parallel cap", "transcript"), (error["code"], error["label"], error["source"]))
+        self.assertFalse(error["fatal"])
+        self.assertEqual("unknown (resend marker)", gateway.detect(self.conf, None, screen())["label"])
+        self.assertEqual("429 parallel cap", gateway.detect(self.conf, None, screen(PARALLEL_429))["label"])
+
+    def test_a_parallel_cap_lowers_the_pool_cap_host_wide_and_skips_the_breaker(self):
+        from theseus import gateway, pools, store
+        (self.tmp / "config.toml").write_text("[pools.claude-code]\nmax = 4\n")
+        with store.opened() as conn:
+            for project in ("other-port", "third-port"):
+                store.add_gateway_error(conn, "claude-code", project, 429, True, agent="w", subtype="parallel cap",
+                                        at=time.time() - 60)
+        now = time.time()
+        info = self.info(screen())
+        info["gateway"] = gateway.detect(self.conf, None, screen(), {"text": PARALLEL_429, "error": "rate_limit"})
+        events = self.handle(info, now)
+        self.assertEqual(["gateway_error", "gateway_capped"], [kind for kind, _ in events])
+        self.assertIn("429 parallel cap", events[0][1])
+        self.assertIn("working cap 3/4 until", events[1][1])
+        self.assertIsNone(gateway.paused_until("claude-code", now), "a parallel cap does not trip the breaker")
+        status = pools.status("claude-code")
+        self.assertEqual((3, 1), (status["max"], status["capCut"]))
+        with store.opened() as conn:
+            [row] = [e for e in store.gateway_errors(conn) if e["project"] == self.conf.name]
+            self.assertEqual(("rate_limit", "parallel cap", "429 parallel cap"), (row["kind"], row["subtype"], row["label"]))
+            self.assertIn("api_key: [redacted]", row["excerpt"])
+            self.assertEqual((0, None), store.cap_cut(conn, "claude-code", now=now + 3600), "the cut ends after its cooldown")
+        health = gateway.health(now=now + 1)
+        self.assertEqual(1, health[0]["capCut"])
+
+    def test_model_capacity_feeds_the_breaker(self):
+        from theseus import gateway, store
+        with store.opened() as conn:
+            for project in ("other-port", "third-port"):
+                store.add_gateway_error(conn, "claude-code", project, 429, True, agent="w", at=time.time() - 60)
+        info = self.info(screen(CAPACITY_429))
+        self.assertEqual("429 model TPM (kimi-k31-pro)", info["gateway"]["label"])
+        events = self.handle(info, time.time())
+        self.assertEqual(["gateway_error", "gateway_paused"], [kind for kind, _ in events])
+
+    def test_recent_errors_carry_attempt_outcome_and_pool_state(self):
+        from theseus import gateway
+        now = time.time()
+        self.handle(self.info(screen(CF_524)), now - 30)
+        [row] = gateway.recent(now=now, attempts={self.conf.name: 3})
+        self.assertEqual(("worker-a", "slow-task", "524 origin timeout", 1, 3, "retry"),
+                         (row["agent"], row["task"], row["label"], row["attempt"], row["attempts"], row["outcome"]))
+        self.assertGreater(row["next"], now)
+        self.assertIn("Error 524: A timeout occurred", row["excerpt"])
+
+
+class TranscriptStateTests(FakeSend):
+    """agents.state reads the session transcript of the pane: the typed error and the context in use."""
+
+    def test_state_classifies_from_the_transcript_and_reports_its_context(self):
+        sessions = self.tmp / "claude" / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "77.json").write_text(json.dumps({"pid": os.getpid(), "sessionId": "s1", "cwd": "/work/tree",
+                                                      "tmux": "$4:@3.%1", "updatedAt": 1}))
+        transcript = self.tmp / "claude" / "projects" / "-work-tree" / "s1.jsonl"
+        transcript.parent.mkdir(parents=True)
+        usage = {"input_tokens": 10, "cache_read_input_tokens": 90000, "cache_creation_input_tokens": 0}
+        transcript.write_text(json.dumps({"type": "assistant", "message": {"model": "m", "usage": usage}}) + "\n"
+                              + json.dumps({"type": "assistant", "isApiErrorMessage": True, "error": "rate_limit",
+                                            "timestamp": "t", "message": {"content": [{"type": "text", "text": PARALLEL_429}]}})
+                              + "\n")
+        local = self.project / "theseus.local.toml"
+        local.write_text((local.read_text() if local.exists() else "") + f'\n[instances]\nsessions_dir = "{sessions}"\n')
+        from theseus import config as cfg
+        conf = cfg.load(root=self.project)
+        pane = self.pane
+
+        def fake(*args):
+            if args[0] == "display" and "#{window_id}.#{pane_id}" in args:
+                return subprocess.CompletedProcess(args, 0, "@3.%1\n", "")
+            return pane(*args)
+        self.ag.tmux = fake
+        pane.lines = screen()
+        info = self.ag.state(conf, self.agent)
+        self.assertEqual("gateway_error", info["state"])
+        self.assertEqual(("429 parallel cap", "transcript"), (info["gateway"]["label"], info["gateway"]["source"]))
+        self.assertEqual({"tokens": 90010, "limit": 200000, "model": "m", "source": "transcript"}, info["context"])
+        self.assertNotIn("3f9a8b7c6d5e", json.dumps(info))
+
+
+class RedactionStoreTests(FakeSend):
+    def test_no_key_hash_reaches_any_store_column(self):
+        from theseus import store
+        self.handle(self.info(screen(PARALLEL_429)), time.time())
+        with store.opened() as conn:
+            rows = store.gateway_errors(conn) + store.gateway_retries(conn)
+        self.assertTrue(rows)
+        self.assertNotIn("3f9a8b7c6d5e", json.dumps(rows))
+        self.assertIn("api_key: [redacted]", json.dumps(rows))
+
+    def test_one_burst_cuts_the_cap_once_and_a_later_error_deepens_it(self):
+        from theseus import store
+        now = 1_000_000.0
+        with store.opened() as conn:
+            cuts = [store.cut_cap(conn, "p", 1, 600, 4, now=now + n) for n in range(3)]
+            later = store.cut_cap(conn, "p", 1, 600, 4, now=now + 120)
+            floor = [store.cut_cap(conn, "p", 1, 600, 4, now=now + 120 * n) for n in range(2, 6)][-1]
+            self.assertEqual((0, None), store.cap_cut(conn, "p", now=now + 120 * 5 + 601))
+        self.assertEqual([1, 1, 1], cuts)
+        self.assertEqual(2, later)
+        self.assertEqual(3, floor, "never below one slot")

@@ -161,3 +161,26 @@ def level(fraction):
 
 
 apply()
+
+
+def gateway_style(error):
+    """A distinct color per kind of gateway error: parallel cap, model capacity, origin timeout, tunnel down, overload,
+    connection lost; fatal errors bold red."""
+    subtype, status = error.get("subtype") or "", error.get("code") or error.get("status")
+    if error.get("retryable") in (0, False):
+        return f"bold {RED}"
+    if subtype == "parallel cap":
+        return YELLOW
+    if subtype.startswith("model"):
+        return MAGENTA
+    if status == 530:
+        return RED
+    if status in (524, 504, 522):
+        return BLUE
+    if status == 529:
+        return GOLD
+    if subtype == "connection lost" or "mid-response" in subtype:
+        return CYAN
+    if status:
+        return NEUTRAL
+    return "dim"

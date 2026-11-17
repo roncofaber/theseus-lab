@@ -8,17 +8,20 @@ from rich.text import Text
 from .. import host, top
 from . import charts, theme
 
-AGENT_COLUMNS = ("agent", "pane", "state", "task", "room", "on task", "quiet", "cpu", "mem", "note")
+AGENT_COLUMNS = ("agent", "pane", "state", "task", "CPU (core %)", "MEM (RAM)", "context", "room", "on task", "quiet",
+                 "note")
 WAITING_COLUMNS = ("status", "task", "room", "for", "posted", "reason")
 EVENT_COLUMNS = ("time", "kind", "agent", "task", "detail")
 HOST_EVENT_COLUMNS = ("time", "project", "kind", "agent", "task", "detail")
 POOL_COLUMNS = ("pool", "working", "holders", "claims")
-GATEWAY_COLUMNS = ("pool", "recent codes", "last error", "last success", "paused until")
+GATEWAY_COLUMNS = ("time", "project", "agent", "task", "error", "attempt", "outcome", "pool")
 MEM_WARN, MEM_ALARM = 0.10, 0.25
-CPU_HELP = "cpu: % of one core, the bar fills at one core"
-USAGE_LEGEND = f"cpu: % of a core · mem: share of RAM, bar full at {MEM_ALARM:.0%}"
-MEM_HELP = (f"mem: resident memory and its share of system RAM, the bar fills at {MEM_ALARM:.0%};"
-            f" yellow from {MEM_WARN:.0%}, red from {MEM_ALARM:.0%}")
+CTX_WARN, CTX_ALARM = 0.5, 0.8
+CPU_HELP = "CPU (core %): the agent's processes in percent of one core; 250% is two and a half cores busy"
+MEM_HELP = (f"MEM (RAM): resident memory and its share of system RAM; yellow from {MEM_WARN:.0%}, red from {MEM_ALARM:.0%}")
+CTX_HELP = (f"context: tokens in the agent's context after its last answer (Claude Code transcript, else the pane's "
+            f"/clear hint) of the profile's context_limit; yellow from {CTX_WARN:.0%}, red from {CTX_ALARM:.0%}")
+USAGE_LEGEND = f"MEM yellow from {MEM_WARN:.0%} of RAM, red from {MEM_ALARM:.0%} · context red from {CTX_ALARM:.0%}"
 
 
 def cell(text, style=""):
@@ -43,12 +46,30 @@ def gauge(fraction, label, width=5, style=None):
 
 
 def memory(rss, total):
-    """An agent's resident memory as a bar of its share of system RAM (full at MEM_ALARM), its size and percent."""
+    """An agent's resident memory and its share of system RAM, colored from MEM_WARN and MEM_ALARM."""
     if not total:
-        return gauge(0, top.size(rss), style=theme.NEUTRAL)
+        return Text(top.size(rss), justify="right")
     share = rss / total
-    style = theme.RED if share >= MEM_ALARM else theme.YELLOW if share >= MEM_WARN else theme.NEUTRAL
-    return gauge(share / MEM_ALARM, f"{top.size(rss)} {share:>3.0%}", style=style)
+    style = theme.RED if share >= MEM_ALARM else theme.YELLOW if share >= MEM_WARN else ""
+    return Text(f"{top.size(rss)} {share:>3.0%}", style=style, justify="right")
+
+
+def tokens(count):
+    return f"{count / 1000:.0f}k" if count >= 1000 else str(count)
+
+
+def context(use):
+    """Context in use of its limit (`87k/200k`) after a small meter colored by fullness, or '-'."""
+    if not use or not use.get("tokens"):
+        return cell("-", "dim")
+    limit = use.get("limit") or 0
+    fraction = use["tokens"] / limit if limit else 0
+    style = theme.RED if fraction >= CTX_ALARM else theme.YELLOW if fraction >= CTX_WARN else theme.GREEN
+    shown = charts.meter(fraction, 4, style=style)
+    shown.append(f" {tokens(use['tokens'])}/{tokens(limit) if limit else '?'}")
+    if use.get("source") == "pane hint":
+        shown.append(" ~", style="dim")
+    return shown
 
 
 def agent_rows(state):
@@ -63,21 +84,22 @@ def agent_rows(state):
             note = f"{note} {top.GLOW_LABEL[glow[0]['kind']]}".strip()
         quiet = None if agent.get("idleMinutes") is None else agent["idleMinutes"] * 60
         on_task = top.age(times.get(agent.get("task"), (None, None))[1]) if agent.get("task") else None
-        cpu = "-" if agent.get("cpu") is None else gauge(agent["cpu"] / 100, f"{agent['cpu']:>3.0f}%", style=theme.NEUTRAL)
+        cpu = "-" if agent.get("cpu") is None else Text(f"{agent['cpu']:.0f}%", justify="right")
         mem = "-" if agent.get("rss") is None else memory(agent["rss"], total)
         glow_style = f"bold {theme.KIND.get(glow[0]['kind'], '')}" if glow else ""
         rows.append(row(f"agent:{agent['name']}:{agent['pane']}", [
             marked(agent["name"], color), agent["pane"], cell(agent["state"], color),
-            cell(agent.get("task") or "-", "bold"), cell(agent.get("room") or "-", theme.ROOM.get(agent.get("room"), "")),
+            cell(agent.get("task") or "-", "bold"), cpu, mem, context(agent.get("context")),
+            cell(agent.get("room") or "-", theme.ROOM.get(agent.get("room"), "")),
             cell(top.duration(on_task), theme.aged(on_task, top.SLOW, top.VERY_SLOW)),
             cell(top.duration(quiet), theme.aged(quiet, top.QUIET_WARN, 2 * top.QUIET_WARN)),
-            cpu, mem, cell(note, theme.RED if agent.get("tainted") else glow_style)]))
+            cell(note, theme.RED if agent.get("tainted") else glow_style)]))
     for worker in state.get("workers", []):
         on_task = top.age(times.get(worker["task"], (None, None))[1])
         rows.append(row(f"worker:{worker['name']}:{worker['task']}", [
             marked(worker["name"], theme.CYAN, marker="◆"), "-", cell(worker["kind"], theme.CYAN), cell(worker["task"], "bold"),
-            cell(worker.get("room") or "-", theme.ROOM.get(worker.get("room"), "")),
-            cell(top.duration(on_task), theme.aged(on_task, top.SLOW, top.VERY_SLOW)), "-", "-", "-",
+            "-", "-", "-", cell(worker.get("room") or "-", theme.ROOM.get(worker.get("room"), "")),
+            cell(top.duration(on_task), theme.aged(on_task, top.SLOW, top.VERY_SLOW)), "-",
             cell(worker.get("model") or "", "dim")]))
     return rows
 
@@ -154,25 +176,59 @@ def pool_rows(state_pools):
             holders.append(name, style=f"bold {theme.project_color(name)}")
             holders.append(f" {count}")
         rows.append(row(f"pool:{pool['pool']}", [
-            cell(pool["pool"], "bold"), cell(f"{pool['active']}/{pool['max']}", f"bold {theme.RED}" if full else f"bold {theme.GREEN}"),
+            cell(pool["pool"], "bold"),
+            Text.assemble((f"{pool['active']}/{pool['max']}", f"bold {theme.RED}" if full else f"bold {theme.GREEN}"),
+                          (f" cap -{pool['capCut']} until {clock(pool['capUntil'])}" if pool.get("capCut") else "",
+                           theme.YELLOW)),
             holders if holders else "-", cell(", ".join(pool["claims"]) or "-", theme.YELLOW if pool["claims"] else "")]))
     return rows
 
 
-def gateway_rows(entries, now=None):
-    now = time.time() if now is None else now
+def clock(epoch):
+    return top.local_clock(datetime.fromtimestamp(epoch, timezone.utc).isoformat()) if epoch else "-"
+
+
+def pool_state(entry):
+    """(text, style) of a gateway pool: paused until, cap cut until, or ok."""
+    if entry.get("pausedUntil"):
+        return f"paused until {clock(entry['pausedUntil'])}", f"bold {theme.RED}"
+    if entry.get("capCut"):
+        return f"cap -{entry['capCut']} until {clock(entry['capUntil'])}", theme.YELLOW
+    return "ok", theme.GREEN
+
+
+OUTCOME_STYLE = {"recovered": "GREEN", "resent": "CYAN", "retry": "YELLOW", "stalled": "RED", "fatal": "RED"}
+
+
+def outcome(error):
+    name = error.get("outcome") or "-"
+    text = f"retry at {clock(error['next'])}" if name == "retry" and error.get("next") else name
+    style = getattr(theme, OUTCOME_STYLE[name]) if name in OUTCOME_STYLE else "dim"
+    return cell(text, f"bold {style}" if name in ("stalled", "fatal") else style)
+
+
+def gateway_rows(errors, now=None):
+    """One row per recent gateway error (theseus.gateway.recent), newest first; key gateway:<id>."""
     rows = []
-    for entry in entries or []:
-        codes = " ".join(str(code or "?") for code in entry.get("codes") or []) or "-"
-        last_error = f"{top.duration(now - entry['lastError'])} ago" if entry.get("lastError") else "-"
-        last_ok = f"{top.duration(now - entry['lastSuccess'])} ago" if entry.get("lastSuccess") else "never"
-        until = entry.get("pausedUntil")
-        paused = (top.local_clock(datetime.fromtimestamp(until, timezone.utc).isoformat()) + (f" {entry['reason']}" if entry.get("reason") else "")
-                  if until else "-")
-        rows.append(row(f"gateway:{entry['pool']}", [cell(entry["pool"], "bold"), cell(codes, theme.YELLOW), cell(last_error),
-                                                      cell(last_ok, theme.GREEN if entry.get("lastSuccess") else "dim"),
-                                                      cell(paused, f"bold {theme.RED}" if until else "")]))
+    for error in errors or []:
+        project = error.get("project") or "-"
+        state, style = pool_state(error)
+        rows.append(row(f"gateway:{error['id']}", [
+            cell(top.local_clock(error.get("time")), "dim"), cell(project, f"bold {theme.project_color(project)}"),
+            error.get("agent") or "-", cell(error.get("task") or "-", "bold"),
+            cell(error.get("label") or "?", theme.gateway_style(error)),
+            cell(f"{error.get('attempt') or '-'}/{error.get('attempts') or '-'}", "dim"), outcome(error),
+            Text.assemble((f"{error['pool']} ", "bold"), (state, style))], error.get("excerpt") or ""))
     return rows
+
+
+def gateway_title(health):
+    """The GATEWAY panel title: every pool with errors, a pause or a cap cut, and its state."""
+    parts = []
+    for entry in health or []:
+        state, _ = pool_state(entry)
+        parts.append(f"{entry['pool']} {state}, {entry['errors']} error(s) in 24 h")
+    return "GATEWAY " + (" · ".join(parts) if parts else "no errors in 24 h")
 
 
 def matches(rows, text):
@@ -291,89 +347,162 @@ def project_status(state):
     return line
 
 
-TASK_FIELDS = ("id", "status", "role", "room", "priority", "profile", "owner", "dependencies", "ownedPaths", "objective",
-               "generalContract", "acceptance")
-TASK_LABELS = {"ownedPaths": "owned paths", "generalContract": "contract", "acceptance": "acceptance"}
+TASK_FIELDS = ("id", "status", "role", "room", "priority", "profile", "owner", "dependencies", "ownedPaths")
+TASK_TEXTS = (("objective", "objective"), ("generalContract", "contract"), ("acceptance", "acceptance"))
+TASK_LABELS = {"ownedPaths": "owned paths", "dependencies": "depends on"}
+TASK_STATUS = {"pending": "YELLOW", "in_progress": "GREEN", "completed": "CYAN", "released": "MAGENTA", "failed": "RED",
+               "blocked": "RED"}
 
 
-def field(line, label, value):
-    """One labelled field of a detail popup: lists as bullet lines, long or multi-line text on its own lines."""
-    line.append(f"{label:<14}", style="bold")
+def task_status_style(status):
+    return f"bold {getattr(theme, TASK_STATUS[status])}" if status in TASK_STATUS else "bold"
+
+
+def value_text(value, style=""):
+    """A popup value: lists as one bullet per line, mappings as key: value lines, '-' for nothing."""
     if isinstance(value, (list, tuple)):
         if not value:
-            line.append("-", style="dim")
-        for item in value:
-            line.append(f"\n  - {item}")
-    elif isinstance(value, dict):
-        for key, item in value.items():
-            line.append(f"\n  {key}: {item}")
-    else:
-        text = "-" if value in (None, "") else str(value)
-        line.append(f"\n  {text}" if "\n" in text or len(text) > 90 else text)
-    line.append("\n")
+            return Text("-", style="dim")
+        return Text("\n").join(Text.assemble(("▸ ", theme.CYAN), (str(item), style)) for item in value)
+    if isinstance(value, dict):
+        return Text("\n").join(Text.assemble((f"{key}: ", "dim"), (str(item), style)) for key, item in value.items())
+    if value in (None, ""):
+        return Text("-", style="dim")
+    return value if isinstance(value, Text) else Text(str(value), style=style)
+
+
+class Detail:
+    """A popup body: sections, each a bold accent rule over a grid of dim keys and bright values or over a block of
+    wrapped text."""
+
+    def __init__(self):
+        self.parts = []
+        self.grid = None
+
+    def section(self, title):
+        from rich.rule import Rule
+        if self.parts:
+            self.parts.append(Text(""))
+        heading = Text.assemble(("── ", theme.CYAN), (title, f"bold {theme.CYAN}"))
+        self.parts.append(Rule(heading, align="left", style=theme.CYAN, characters="─"))
+        self.grid = None
+        return self
+
+    def add(self, key, value, style=""):
+        from rich.table import Table
+        if self.grid is None:
+            self.grid = Table.grid(padding=(0, 2), expand=True)
+            self.grid.add_column(style="dim", no_wrap=True, min_width=12)
+            self.grid.add_column(ratio=1)
+            self.parts.append(self.grid)
+        self.grid.add_row(key, value_text(value, style))
+        return self
+
+    def block(self, value, style=""):
+        from rich.padding import Padding
+        self.parts.append(Padding(value_text(value, style), (0, 0, 0, 2)))
+        self.grid = None
+        return self
+
+    def render(self):
+        from rich.console import Group
+        return Group(*self.parts)
+
+
+def task_detail(detail, task, entry=None, project=None, title=None):
+    detail.section(title or (f"task {task['id']}" if task else "task"))
+    if project:
+        detail.add("project", project, f"bold {theme.project_color(project)}")
+    if entry:
+        detail.add("waiting", entry["label"], f"bold {theme.QUEUE.get(entry['label'], theme.GREEN)}")
+        if entry.get("reason"):
+            detail.add("reason", entry["reason"], theme.REASON.get(entry.get("reason_kind"), ""))
+    if not task:
+        detail.add("record", "not in this snapshot", "dim")
+        return detail
+    for name in TASK_FIELDS:
+        if name in task:
+            detail.add(TASK_LABELS.get(name, name), task[name], task_status_style(task[name]) if name == "status" else "bold")
+    extra = [(name, value) for name, value in task.items()
+             if name not in TASK_FIELDS and name not in dict(TASK_TEXTS) and value not in (None, "", [], {})]
+    for name, value in extra:
+        detail.add(name, value if not isinstance(value, dict) else value)
+    for name, title in TASK_TEXTS:
+        if task.get(name):
+            detail.section(title).block(task[name])
+    return detail
 
 
 def task_text(task, entry=None, project=None):
-    """Every field of a task record for its popup: the main fields in a fixed order, then any others (timestamps)."""
-    line = Text()
-    if project:
-        field(line, "project", project)
-    if entry:
-        field(line, "waiting", f"{entry['label']}  {entry.get('reason') or ''}".strip())
-    if not task:
-        line.append("the task record is not in this snapshot", style="dim")
-        return line
-    for name in TASK_FIELDS:
-        if name in task:
-            field(line, TASK_LABELS.get(name, name), task[name])
-    for name, value in task.items():
-        if name not in TASK_FIELDS and value not in (None, "", [], {}):
-            field(line, name, value)
-    line.rstrip()
-    return line
-
-
-def task_summary(task):
-    line = Text()
-    for name in ("id", "status", "role", "room", "owner"):
-        if task.get(name):
-            field(line, name, task[name])
-    objective = str(task.get("objective") or "")
-    field(line, "objective", objective if len(objective) <= 400 else objective[:400] + " ...")
-    line.rstrip()
-    return line
+    """Every field of a task record for its popup: the main fields, the other fields (timestamps) and the objective,
+    contract and acceptance as wrapped sections."""
+    return task_detail(Detail(), task, entry, project).render()
 
 
 def event_text(record, task=None):
-    """An event for its popup: every field, the detail untruncated, then a summary of the linked task."""
-    line = Text()
-    field(line, "time", f"{top.local_clock(record.get('time'))}  ({record.get('time')})")
-    for name in ("project", "kind", "agent", "task", "room"):
+    """An event for its popup: its fields, the detail untruncated and a summary of the linked task."""
+    detail = Detail().section(f"event {record.get('kind')}")
+    detail.add("time", f"{top.local_clock(record.get('time'))}  ({record.get('time')})")
+    if record.get("project"):
+        detail.add("project", record["project"], f"bold {theme.project_color(record['project'])}")
+    detail.add("kind", record.get("kind"), f"bold {theme.KIND.get(record.get('kind'), '')}")
+    for name in ("agent", "task", "room"):
         if record.get(name):
-            field(line, name, record[name])
-    field(line, "detail", record.get("detail"))
+            detail.add(name, record[name], "bold")
     for name, value in record.items():
         if name not in ("time", "project", "kind", "agent", "task", "room", "detail", "epoch") and value not in (None, ""):
-            field(line, name, value)
+            detail.add(name, value)
+    detail.section("detail").block(record.get("detail"))
     if task:
-        line.append("\nlinked task\n", style="bold underline")
-        line.append_text(task_summary(task))
-    line.rstrip()
-    return line
+        detail.section(f"linked task {task.get('id')}")
+        for name in ("status", "role", "room", "owner"):
+            if task.get(name):
+                detail.add(name, task[name], task_status_style(task[name]) if name == "status" else "bold")
+        objective = str(task.get("objective") or "")
+        detail.add("objective", objective if len(objective) <= 400 else objective[:400] + " ...")
+    return detail.render()
+
+
+def gateway_text(error):
+    """A gateway error for its popup: who, what (typed label, status, kind, subtype), the retry state, the pool and the
+    redacted excerpt of the error text."""
+    state, style = pool_state(error)
+    detail = Detail().section(f"gateway error {error.get('label') or '?'}")
+    detail.add("time", f"{top.local_clock(error.get('time'))}  ({error.get('time')})")
+    detail.add("project", error.get("project"), f"bold {theme.project_color(error.get('project') or '-')}")
+    detail.add("agent", error.get("agent"), "bold").add("task", error.get("task"), "bold")
+    detail.add("error", error.get("label"), f"bold {theme.gateway_style(error)}")
+    detail.add("status", error.get("code") or "none (no status in the error text)")
+    detail.add("kind", error.get("kind")).add("subtype", error.get("subtype"))
+    detail.add("retryable", "yes" if error.get("retryable") else "no, fatal",
+               theme.GREEN if error.get("retryable") else f"bold {theme.RED}")
+    detail.add("attempt", f"{error.get('attempt') or '-'} of {error.get('attempts') or '-'}")
+    detail.add("outcome", outcome(error))
+    detail.add("pool", Text.assemble((f"{error.get('pool')} ", "bold"), (state, style)))
+    detail.section("error text (redacted)").block(error.get("excerpt") or "not recorded (an error from before typed errors)",
+                                                  "" if error.get("excerpt") else "dim")
+    return detail.render()
 
 
 def agent_text(agent, task=None, total=0):
-    """An agent for its popup: state, pane, profile, CPU and memory, taint, then its current task."""
-    line = Text()
-    field(line, "state", agent.get("state"))
-    field(line, "pane", agent.get("pane"))
-    field(line, "profile", agent.get("profile") or agent.get("provider") or "-")
-    field(line, "cpu", "-" if agent.get("cpu") is None else f"{agent['cpu']:.0f}% of one core")
+    """An agent for its popup: state, pane, profile, CPU, memory, context and taint, then its current task."""
+    detail = Detail().section(f"agent {agent.get('name')}")
+    detail.add("state", agent.get("state"), f"bold {theme.STATE.get(agent.get('state'), '')}")
+    detail.add("pane", agent.get("pane"), "bold")
+    detail.add("profile", agent.get("profile") or agent.get("provider"))
+    detail.add("CPU", "-" if agent.get("cpu") is None else f"{agent['cpu']:.0f}% of one core")
     rss = agent.get("rss")
-    field(line, "memory", "-" if rss is None else top.size(rss) + (f" ({rss / total:.1%} of RAM)" if total else ""))
-    field(line, "taint", "dirty worktree" if agent.get("tainted") else "clean")
+    detail.add("memory", "-" if rss is None else top.size(rss) + (f"  ({rss / total:.1%} of RAM)" if total else ""))
+    use = agent.get("context")
+    if use and use.get("tokens"):
+        detail.add("context", Text.assemble(context(use), (f"  from the {use.get('source')}"
+                                                            + (f", {use['model']}" if use.get("model") else ""), "dim")))
+    else:
+        detail.add("context", "-")
+    detail.add("worktree", "dirty" if agent.get("tainted") else "clean", theme.RED if agent.get("tainted") else theme.GREEN)
     if agent.get("task"):
-        line.append("\ncurrent task\n", style="bold underline")
-        line.append_text(task_text(task) if task else Text(agent["task"]))
-    line.rstrip()
-    return line
+        if task:
+            task_detail(detail, task, title=f"current task {task['id']}")
+        else:
+            detail.section("current task").add("id", agent["task"], "bold")
+    return detail.render()

@@ -334,17 +334,35 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             await pilot.press("2", "a", "down", "enter")
             await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen))
-            self.assertIn("%2", self.app.screen.query_one("#text").render().plain)
+            self.assertIn("%2", self.app.screen.text())
             await pilot.click("#open")
             await self.settle(pilot, lambda: self.jumps == ["%2"])
             await pilot.press("escape")
             await self.settle(pilot, lambda: len(self.app.screen_stack) == 1)
 
 
-def grown(base, agents=0, events=0, tasks=0, gpus=None):
-    """A copy of a real host snapshot with extra agents, events and ready tasks in the first project (and fake GPUs)."""
+GATEWAY_ERRORS = [
+    {"id": 7, "pool": "cborg", "project": "alpha", "agent": "worker-a", "task": "t1", "code": 429, "retryable": 1,
+     "time": "2026-11-17T17:57:43Z", "epoch": 1.0, "kind": "rate_limit", "subtype": "parallel cap",
+     "label": "429 parallel cap", "excerpt": "API Error: Request rejected (429) · Rate limit exceeded for api_key: "
+     "[redacted]. Limit type: max_parallel_requests.", "attempt": 1, "attempts": 3, "outcome": "retry",
+     "next": 4102444800.0, "pausedUntil": None, "capCut": 1, "capUntil": 4102444800.0},
+    {"id": 6, "pool": "cborg", "project": "alpha", "agent": "worker-b", "task": "t2", "code": None, "retryable": 1,
+     "time": "2026-11-17T17:50:00Z", "epoch": 0.5, "kind": "connection_lost", "subtype": "connection lost",
+     "label": "conn lost", "excerpt": "API Error: Connection lost mid-response.", "attempt": 2, "attempts": 3,
+     "outcome": "recovered", "next": None, "pausedUntil": None, "capCut": 1, "capUntil": 4102444800.0}]
+GATEWAY_HEALTH = [{"pool": "cborg", "codes": [429, None], "labels": ["429 parallel cap", "conn lost"], "errors": 2,
+                   "lastError": 1.0, "lastSuccess": None, "pausedUntil": None, "reason": None, "capCut": 1,
+                   "capUntil": 4102444800.0}]
+
+
+def grown(base, agents=0, events=0, tasks=0, gpus=None, gateway=False):
+    """A copy of a real host snapshot with extra agents, events and ready tasks in the first project (and fake GPUs and
+    gateway errors)."""
     import copy
     snap = copy.deepcopy(base)
+    if gateway:
+        snap["gatewayErrors"], snap["gateway"] = copy.deepcopy(GATEWAY_ERRORS), copy.deepcopy(GATEWAY_HEALTH)
     if gpus is not None:
         snap["host"]["gpus"] = [{"name": "Fake GPU", "util": 10.0 * n, "memUsed": 2.0**30 * n, "memTotal": 2.0**34,
                                  "temp": 40.0 + n} for n in range(gpus)]
@@ -370,9 +388,8 @@ def grown(base, agents=0, events=0, tasks=0, gpus=None):
     return snap
 
 
-class TopPolishTests(HostCase, unittest.IsolatedAsyncioTestCase):
-    """No default highlight, sorting, help, popups, the pane mirror, the layout at several sizes, GPUs, themes and
-    the refresh cost."""
+class DashboardBase(HostCase, unittest.IsolatedAsyncioTestCase):
+    """A dashboard app on a grown copy of a real host snapshot, with fakes for tmux jumps, sends, keys and captures."""
 
     async def asyncSetUp(self):
         from theseus.tui.app import TopApp
@@ -413,6 +430,17 @@ class TopPolishTests(HostCase, unittest.IsolatedAsyncioTestCase):
         table = self.table(name)
         return [[str(cell.plain if hasattr(cell, "plain") else cell) for cell in table.get_row(row.key)]
                 for row in table.ordered_rows]
+
+    def setUpApp(self):
+        from theseus.tui.app import TopApp
+        old = self.app
+        self.app = TopApp(interval=3600, snapshot_fn=old.snapshot_fn, tmux_ok=True, mirror_seconds=0.05,
+                          jump_fn=old.jump_fn, capture_fn=old.capture_fn, send_fn=old.send_fn, keys_fn=old.keys_fn)
+
+
+class TopPolishTests(DashboardBase):
+    """No default highlight, sorting, help, popups, the pane mirror, the layout at several sizes, GPUs, themes and
+    the refresh cost."""
 
     async def test_no_row_is_highlighted_until_asked_and_escape_or_a_click_elsewhere_clears_it(self):
         self.extra = {"tasks": 3}
@@ -478,7 +506,7 @@ class TopPolishTests(HostCase, unittest.IsolatedAsyncioTestCase):
             await self.start(pilot)
             await pilot.press("question_mark")
             await self.settle(pilot, lambda: isinstance(self.app.screen, HelpScreen))
-            body = self.app.screen.query_one("#text").render().plain
+            body = self.app.screen.text()
             for binding in TopApp.BINDINGS:
                 self.assertIn(binding.tooltip or binding.description, body)
             for words in ("double-click", "click an EVENTS header", "Open tmux pane", "of system RAM", "tmux is only needed"):
@@ -502,7 +530,7 @@ class TopPolishTests(HostCase, unittest.IsolatedAsyncioTestCase):
             await self.start(pilot)
             await pilot.press("w", "enter")
             await self.settle(pilot, lambda: isinstance(self.app.screen, Dialog))
-            body = self.app.screen.query_one("#text").render().plain
+            body = self.app.screen.text()
             for words in ("task-000", "owned paths", "docs/task-000.md", "acceptance", "Objective 0.", "createdAt"):
                 self.assertIn(words, body)
             await pilot.press("escape")
@@ -512,7 +540,7 @@ class TopPolishTests(HostCase, unittest.IsolatedAsyncioTestCase):
             events.move_cursor(row=events.get_row_index("event:alpha:10002"))
             await pilot.press("enter")
             await self.settle(pilot, lambda: isinstance(self.app.screen, Dialog))
-            body = self.app.screen.query_one("#text").render().plain
+            body = self.app.screen.text()
             self.assertIn("detail 2 xx", body)
             self.assertIn("linked task", body)
             await pilot.click("#close")
@@ -584,12 +612,6 @@ class TopPolishTests(HostCase, unittest.IsolatedAsyncioTestCase):
                         self.assertLessEqual(region.bottom, size[1] - 1, f"{size} tab {tab} {panel.id} {region}")
                         self.assertLessEqual(region.right, size[0], f"{size} tab {tab} {panel.id} {region}")
             self.setUpApp()
-
-    def setUpApp(self):
-        from theseus.tui.app import TopApp
-        old = self.app
-        self.app = TopApp(interval=3600, snapshot_fn=old.snapshot_fn, tmux_ok=True, mirror_seconds=0.05,
-                          jump_fn=old.jump_fn, capture_fn=old.capture_fn, send_fn=old.send_fn, keys_fn=old.keys_fn)
 
     async def test_gpu_block_shows_one_line_per_gpu_and_collapses_without_gpus(self):
         for count, size in ((0, (170, 50)), (1, (170, 50)), (4, (170, 50)), (4, (80, 30)), (8, (200, 60))):
@@ -669,6 +691,238 @@ class TopPolishTests(HostCase, unittest.IsolatedAsyncioTestCase):
                         gap = abs((theme.hue_of(RichColor.parse(theme.SERIES[category]).triplet)
                                    - theme.hue_of(RichColor.parse(error).triplet) + 180) % 360 - 180)
                         self.assertGreaterEqual(gap, 30, f"{name} {category} too close to the error hue")
+
+
+class RoundTwoTests(DashboardBase):
+    """The CPU history axis and mean, GATEWAY rows and popup, closing popups by a click outside, the pane mirror's
+    horizontal scroll and type-through mode, one-row buttons, formatted popups and the agent columns."""
+
+    async def test_cpu_shows_the_mean_of_every_thread_and_the_history_has_a_time_axis(self):
+        from theseus.tui.app import HistoryChart, resource_text
+        state = {"cpus": 4, "load": [1.0, 1.0, 1.0], "memTotal": 8, "memAvailable": 4, "swapTotal": 0, "swapFree": 0}
+        text = resource_text(state, {"total": 30.0, "cores": [10.0, 20.0, 0.0, 90.0]}).plain
+        self.assertIn("30.0%  avg of 4, max 90%", text)
+        async with self.app.run_test(size=(170, 50)) as pilot:
+            await self.start(pilot, tab=None)
+            for value in range(60):
+                self.app.history.push(float(value))
+            chart = self.app.base.query_one("#cpu-history", HistoryChart)
+            chart.seconds = 5
+            chart.refresh()
+            await pilot.pause()
+            lines = chart.render().plain.splitlines()
+            self.assertTrue(lines[-1].endswith("now"))
+            self.assertIn("┴", lines[-2])
+            self.assertRegex(lines[-1], r"-\d+(s|m)")
+
+    async def test_gateway_rows_show_who_what_attempt_outcome_and_pool_and_open_a_popup(self):
+        from theseus.tui.popups import Dialog
+        self.extra = {"gateway": True}
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot, tab=None)
+            table = self.app.base.query_one("#gateway")
+            rows = [[cell.plain for cell in table.get_row(row.key)] for row in table.ordered_rows]
+            self.assertEqual(["alpha", "worker-a", "t1", "429 parallel cap", "1/3"], rows[0][1:6])
+            self.assertTrue(rows[0][6].startswith("retry at "))
+            self.assertTrue(rows[0][7].startswith("cborg cap -1 until"))
+            self.assertEqual(["conn lost", "2/3", "recovered"], rows[1][4:7])
+            title = self.app.base.query_one("#gateway-panel").border_title
+            self.assertIn("cborg cap -1 until", str(title))
+            table.focus()
+            table.reveal()
+            await pilot.press("enter")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, Dialog))
+            body = self.app.screen.text()
+            for words in ("gateway error 429 parallel cap", "api_key: [redacted]", "error text (redacted)", "1 of 3",
+                          "cap -1 until"):
+                self.assertIn(words, body)
+
+    async def test_a_click_outside_a_popup_closes_it(self):
+        from theseus.tui.popups import Confirm, HelpScreen
+        async with self.app.run_test(size=(170, 50)) as pilot:
+            await self.start(pilot)
+            await pilot.press("question_mark")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, HelpScreen))
+            await pilot.click(offset=(0, 2))
+            await self.settle(pilot, lambda: len(self.app.screen_stack) == 1)
+            answers = []
+            self.app.push_screen(Confirm("sure?"), answers.append)
+            await self.settle(pilot, lambda: isinstance(self.app.screen, Confirm))
+            await pilot.click(offset=(1, 1))
+            await self.settle(pilot, lambda: answers == [False])
+
+    async def test_mirror_scrolls_sideways_and_types_through_to_the_pane(self):
+        from theseus.tui.popups import AgentScreen, Confirm
+        self.app.mirror_seconds = 1.0
+        self.app.capture_fn = lambda pane: self.captures.append(pane) or ("x" * 400 + "\n> ")
+        async with self.app.run_test(size=(170, 50)) as pilot:
+            await self.start(pilot)
+            await pilot.press("a", "enter")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen))
+            screen = self.app.screen
+            mirror = screen.query_one("#mirror")
+            await self.settle(pilot, lambda: mirror.max_scroll_x > 0)
+            self.assertEqual(1.0, screen.timer._interval)
+            buttons = list(screen.query("Button"))
+            self.assertTrue(buttons)
+            self.assertEqual({1}, {button.region.height for button in buttons})
+            await pilot.press("i")
+            await self.settle(pilot, lambda: screen.typing)
+            self.assertIn("INSERT", str(mirror.border_title))
+            self.assertEqual(0.25, screen.timer._interval)
+            await pilot.press("a", "b", "enter", "backspace", "up", "tab", "q", "o", "ctrl+u")
+            await self.settle(pilot, lambda: len(self.keys) >= 7 and not screen.pumping)
+            sent = [keys for _, keys in self.keys]
+            typed = "".join(keys[1] for keys in sent if keys[0] == "-l")
+            self.assertEqual("abqo", typed)
+            self.assertEqual([("Enter",), ("BSpace",), ("Up",), ("Tab",), ("C-u",)], [k for k in sent if k[0] != "-l"])
+            self.assertIs(self.app.screen, screen, "q and o went to the pane, not to the dashboard")
+            self.assertEqual([], self.jumps)
+            await pilot.press("ctrl+c")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, Confirm))
+            await pilot.press("n")
+            await self.settle(pilot, lambda: self.app.screen is screen)
+            self.assertNotIn(("C-c",), [keys for _, keys in self.keys])
+            await pilot.press("escape")
+            await pilot.pause(0.7)
+            await self.settle(pilot, lambda: ("Escape",) in [keys for _, keys in self.keys])
+            self.assertTrue(screen.typing, "a lone Escape goes to the pane")
+            await pilot.press("escape", "escape")
+            await self.settle(pilot, lambda: not screen.typing)
+            self.assertEqual(1.0, screen.timer._interval)
+            self.assertEqual(1, [keys for _, keys in self.keys].count(("Escape",)))
+            await pilot.press("i", "ctrl+right_square_bracket")
+            await self.settle(pilot, lambda: not screen.typing)
+            await pilot.press("escape")
+            await self.settle(pilot, lambda: len(self.app.screen_stack) == 1)
+
+    async def test_popups_have_titled_sections_bullets_and_colored_values(self):
+        from theseus.tui.popups import AgentScreen, Dialog
+        from theseus.tui import theme
+        self.extra = {"tasks": 2}
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            await pilot.press("w", "enter")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, Dialog))
+            body = self.app.screen.text()
+            for section in ("task task-000", "objective", "contract", "acceptance"):
+                self.assertRegex(body, rf"(?m)^── {section} ─+ *$")
+            self.assertIn("▸ Done.", body)
+            self.assertIn("▸ docs/task-000.md", body)
+            grid = next(part for part in self.app.screen.body.renderables if hasattr(part, "columns"))
+            self.assertEqual("dim", grid.columns[0].style)
+            await pilot.press("escape")
+            await self.settle(pilot, lambda: len(self.app.screen_stack) == 1)
+            await pilot.press("a", "enter")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen))
+            body = self.app.screen.text()
+            self.assertRegex(body, r"(?m)^── agent worker-a ─+ *$")
+            for words in ("state", "pane", "CPU", "memory", "context", "worktree"):
+                self.assertRegex(body, rf"(?m)^{words} ")
+
+    async def test_agent_columns_read_clearly_at_80_and_120_columns(self):
+        self.extra = {"agents": 2}
+        for size in ((80, 30), (120, 40)):
+            self.setUpApp()
+            async with self.app.run_test(size=size) as pilot:
+                await self.start(pilot)
+                table = self.table("agents")
+                labels = [column.label.plain for column in table.columns.values()]
+                self.assertEqual(["CPU (core %)", "MEM (RAM)", "context"], labels[4:7])
+                extra = next(row for row in table.ordered_rows if row.key.value.startswith("agent:extra-00"))
+                cells = [cell.plain if hasattr(cell, "plain") else cell for cell in table.get_row(extra.key)]
+                self.assertEqual("3%", cells[4])
+                self.assertRegex(cells[5], r"^256\.0M +\d+%$")
+                screen = "\n".join(strip.text for strip in self.app.screen._compositor.render_strips())
+                self.assertIn("CPU (core %)  MEM (RAM)", screen, size)
+                self.assertRegex(screen, r"\d[KMG] +\d+%  ")
+                self.assertNotIn("…", screen)
+
+
+class TranscriptTests(Sandbox):
+    """Session lookup from a client's sessions directory and the incremental transcript reader (temporary files only)."""
+
+    def setUp(self):
+        super().setUp()
+        from theseus import transcripts
+        transcripts.READS.clear()
+        transcripts.SESSIONS.clear()
+        self.sessions = self.tmp / "claude" / "sessions"
+        self.sessions.mkdir(parents=True)
+        self.cwd = "/work/my.project/worktree_1"
+
+    def session(self, name, pid, tmux, updated, session="abc-123"):
+        (self.sessions / f"{name}.json").write_text(json.dumps({"pid": pid, "sessionId": session, "cwd": self.cwd,
+                                                                "tmux": tmux, "updatedAt": updated}))
+
+    def entry(self, **record):
+        return json.dumps(record) + "\n"
+
+    def test_the_live_session_of_a_pane_and_its_transcript_path(self):
+        from theseus import transcripts
+        self.session("1", os.getpid(), "$5:@3.%9", 100)
+        self.session("2", 2**22 + 12345, "$5:@3.%9", 200, session="dead")
+        self.session("3", os.getpid(), "$5:@3.%10", 300, session="other")
+        self.assertEqual(("abc-123", self.cwd), transcripts.session_of(self.sessions, "@3.%9"))
+        self.assertIsNone(transcripts.session_of(self.sessions, "1"), "a fake tmux answer never matches")
+        self.assertEqual(self.tmp / "claude/projects/-work-my-project-worktree-1/abc-123.jsonl",
+                         transcripts.transcript_path(self.sessions, "abc-123", self.cwd))
+
+    def test_the_reader_follows_appends_and_reports_context_and_api_errors(self):
+        from theseus import transcripts
+        path = self.tmp / "t.jsonl"
+        usage = {"input_tokens": 2, "cache_read_input_tokens": 80000, "cache_creation_input_tokens": 7000}
+        path.write_text(self.entry(type="user", message={"content": "go"})
+                        + self.entry(type="assistant", message={"model": "m1", "usage": usage, "content": []})
+                        + self.entry(type="assistant", isApiErrorMessage=True, error="rate_limit", timestamp="t1",
+                                     message={"content": [{"type": "text", "text": "API Error: Request rejected (429)"}]})
+                        + '{"type": "assist')
+        state = transcripts.read(path)
+        self.assertEqual((87002, "m1", "error"), (state["tokens"], state["model"], state["last"]))
+        self.assertEqual([("rate_limit", "API Error: Request rejected (429)")],
+                         [(e["error"], e["text"]) for e in state["errors"]])
+        offset = state["offset"]
+        with open(path, "a") as handle:
+            handle.write('ant", "message": {"usage": {"input_tokens": 90000}}}\n')
+        state = transcripts.read(path)
+        self.assertEqual((90000, "answer"), (state["tokens"], state["last"]))
+        self.assertGreater(state["offset"], offset)
+        self.assertEqual(state, transcripts.read(path))
+
+    def test_a_session_file_rewritten_in_place_is_read_again(self):
+        from theseus import transcripts
+        self.session("1", os.getpid(), "$5:@3.%9", 100)
+        self.assertEqual("abc-123", transcripts.session_of(self.sessions, "@3.%9")[0])
+        stamp = os.stat(self.sessions).st_mtime_ns
+        self.session("1", os.getpid(), "$5:@3.%9", 200, session="after-clear-session")
+        os.utime(self.sessions, ns=(stamp, stamp))
+        self.assertEqual("after-clear-session", transcripts.session_of(self.sessions, "@3.%9")[0])
+
+    def test_a_long_transcript_is_read_from_its_tail(self):
+        from theseus import transcripts
+        path = self.tmp / "long.jsonl"
+        filler = self.entry(type="user", message={"content": "x" * 1000})
+        usage = {"input_tokens": 5, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+        path.write_text(filler * 1000 + self.entry(type="assistant", message={"usage": usage}))
+        state = transcripts.read(path)
+        self.assertEqual(5, state["tokens"])
+        self.assertEqual(path.stat().st_size, state["offset"])
+
+    def test_context_prefers_the_transcript_then_the_pane_hint(self):
+        from theseus import agents
+        from types import SimpleNamespace
+        conf = SimpleNamespace(section=lambda name: {}, root=self.tmp)
+        saved = agents.profiles if hasattr(agents, "profiles") else None
+        from theseus import profiles
+        original = profiles.resolve
+        profiles.resolve = lambda conf, name: {"context_limit": 1000000} if name == "big" else {}
+        self.addCleanup(setattr, profiles, "resolve", original)
+        self.assertEqual({"tokens": 5, "limit": 1000000, "model": "m", "source": "transcript"},
+                         agents.context_use(conf, "big", {"tokens": 5, "model": "m"}, 9))
+        self.assertEqual({"tokens": 9, "limit": 200000, "model": None, "source": "pane hint"},
+                         agents.context_use(conf, "small", {"tokens": None}, 9))
+        self.assertIsNone(agents.context_use(conf, "small", None, None))
+        del saved
 
 
 class ColorFallbackTests(unittest.TestCase):
@@ -854,22 +1108,27 @@ class ChartTests(unittest.TestCase):
         self.assertEqual("■ assigned 1   ■ delivered 2   ■ partial 0   ■ blocked 0   ■ merged/completed 3   ■ errors/stalled 4",
                          " ".join(line.plain for line in charts.legend(series)))
 
-    def test_agent_rows_show_cpu_per_core_and_memory_as_a_share_of_system_ram(self):
+    def test_agent_rows_show_plain_cpu_memory_and_a_context_meter(self):
         from theseus.tui import rows, theme
+        self.assertEqual(("CPU (core %)", "MEM (RAM)", "context"), rows.AGENT_COLUMNS[4:7])
         agent = {"name": "a", "pane": "%1", "state": "working", "task": None, "room": None, "idleMinutes": None}
-        state = {"agents": [{**agent, "cpu": 250.0, "rss": 2 * 2**30}, {**agent, "name": "b", "cpu": 40.0, "rss": 2**30},
+        state = {"agents": [{**agent, "cpu": 250.0, "rss": 2 * 2**30,
+                             "context": {"tokens": 170000, "limit": 200000, "source": "transcript"}},
+                            {**agent, "name": "b", "cpu": 40.0, "rss": 2**30,
+                             "context": {"tokens": 87400, "limit": 200000, "source": "pane hint"}},
                             {**agent, "name": "c", "cpu": None, "rss": None},
-                            {**agent, "name": "d", "cpu": 5.0, "rss": 2**28}],
+                            {**agent, "name": "d", "cpu": 5.0, "rss": 2**28,
+                             "context": {"tokens": 120000, "limit": 200000, "source": "transcript"}}],
                  "workers": [], "events": [], "host": {"memTotal": 8 * 2**30}}
-        found = {key.split(":")[1]: cells[7:9] for key, cells, _ in rows.agent_rows(state)}
-        cells = {name: [c.plain for c in pair] for name, pair in found.items()}
-        self.assertEqual(["█████ 250%", "█████ 2.0G 25%"], cells["a"])
-        self.assertEqual(["██░░░  40%", "██▌░░ 1.0G 12%"], cells["b"])
-        self.assertEqual(["-", "-"], cells["c"])
-        self.assertEqual(["▎░░░░   5%", "▋░░░░ 256.0M  3%"], cells["d"])
-        bar = lambda name, index: found[name][index].style
-        self.assertEqual([theme.NEUTRAL] * 3, [bar(name, 0) for name in ("a", "b", "d")])
-        self.assertEqual([theme.RED, theme.YELLOW, theme.NEUTRAL], [bar(name, 1) for name in ("a", "b", "d")])
+        found = {key.split(":")[1]: cells[4:7] for key, cells, _ in rows.agent_rows(state)}
+        cells = {name: [c.plain for c in triple] for name, triple in found.items()}
+        self.assertEqual(["250%", "2.0G 25%", "███▍ 170k/200k"], cells["a"])
+        self.assertEqual(["40%", "1.0G 12%", "█▋░░ 87k/200k ~"], cells["b"])
+        self.assertEqual(["-", "-", "-"], cells["c"])
+        self.assertEqual(["5%", "256.0M  3%", "██▍░ 120k/200k"], cells["d"])
+        self.assertEqual("right", found["a"][0].justify)
+        self.assertEqual([theme.RED, theme.YELLOW, ""], [found[name][1].style for name in ("a", "b", "d")])
+        self.assertEqual([theme.RED, theme.GREEN, theme.YELLOW], [found[name][2].style for name in ("a", "b", "d")])
 
     def test_history_and_meters(self):
         from theseus.tui import charts
@@ -877,7 +1136,11 @@ class ChartTests(unittest.TestCase):
         self.assertEqual(5, len(lines))
         self.assertTrue(lines[0].startswith("100%"))
         self.assertEqual("█", lines[0].rstrip()[-1])
-        self.assertIn("-3m", lines[-1])
+        self.assertEqual("now", lines[-1].split()[-1])
+        self.assertIn("-10m", lines[-1])
+        self.assertEqual(lines[-2].index("┴"), lines[-1].index("-10m"))
+        five = [line.plain for line in charts.history([10.0] * 200, 66, 6, seconds=5)]
+        self.assertEqual(["-4m", "-3m", "-2m", "-1m", "now"], five[-1].split())
         self.assertEqual("█████░░░░░", charts.meter(0.5, 10).plain)
         self.assertEqual("░░░░", charts.meter(None, 4).plain)
         self.assertEqual(4, len(charts.meter(2.0, 4).plain))

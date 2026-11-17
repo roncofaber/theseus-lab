@@ -28,6 +28,7 @@ MOUSE_HELP = (("click a row", "highlight it (click elsewhere or Escape clears th
               ("double-click a row", "open its details (agents: with a live mirror of the tmux pane)"),
               ("click an EVENTS header", "sort by that column; click again to reverse"),
               ("click a project card", "open the project's tab"),
+              ("click outside a popup", "close the popup"),
               ("wheel", "scroll the section under the pointer"))
 TABLE_HELP = (("up, down", "highlight a row (the first press shows the highlight)"),
               ("Enter", "open the highlighted row's details"))
@@ -245,7 +246,9 @@ def resource_text(state, cpu):
         line.append("\n")
 
     total = cpu["total"] if cpu else None
-    meter("CPU", (total or 0) / 100, "-" if total is None else f"{total:.1f}%", f"{state['cpus']} threads")
+    cores = (cpu or {}).get("cores") or []
+    peak = f", max {max(cores):.0f}%" if cores else ""
+    meter("CPU", (total or 0) / 100, "-" if total is None else f"{total:.1f}%", f"avg of {state['cpus']}{peak}")
     load = state["load"]
     meter("LOAD", load[0] / state["cpus"] if state["cpus"] else 0, f"{load[0]:.2f}", f"{load[1]:.2f} {load[2]:.2f} 5/15m")
     used = state["memTotal"] - state["memAvailable"]
@@ -295,6 +298,7 @@ class HostView(VerticalScroll):
         self.cores = False
         self.cpu = None
         self.records = {}
+        self.gateway_records = {}
 
     def compose(self) -> ComposeResult:
         with Panel(f"HOST {socket.gethostname()}", id="resources"):
@@ -310,7 +314,7 @@ class HostView(VerticalScroll):
             yield ItemGrid(id="cards", min_column_width=44, regular=False)
         with Panel("POOLS", id="pools-panel"):
             yield Table(R.POOL_COLUMNS, id="pools")
-        with Panel("GATEWAY health per pool, last 24 hours", id="gateway-panel"):
+        with Panel("GATEWAY", id="gateway-panel"):
             yield Table(R.GATEWAY_COLUMNS, id="gateway")
         with Panel("EVENTS across projects", id="events-panel", classes="grow"):
             yield Table(R.HOST_EVENT_COLUMNS, sort=("time", True), id="events")
@@ -347,7 +351,10 @@ class HostView(VerticalScroll):
                 card.show(items[card.root])
                 card.display = not needle or needle in card.search
         fill(self.query_one("#pools", Table), R.matches(R.pool_rows(snap["pools"]), text))
-        fill(self.query_one("#gateway", Table), R.matches(R.gateway_rows(snap.get("gateway")), text))
+        self.query_one("#gateway-panel", Panel).border_title = R.gateway_title(snap.get("gateway"))
+        errors = snap.get("gatewayErrors") or []
+        self.gateway_records = {f"gateway:{error['id']}": error for error in errors}
+        fill(self.query_one("#gateway", Table), R.matches(R.gateway_rows(errors), text))
         events = self.query_one("#events", Table)
         self.records = {R.event_key(record, index): record for index, record in enumerate(snap["events"])}
         fill(events, R.matches(R.event_rows(snap["events"], project=True, sort=events.sort_by), text))
@@ -744,10 +751,12 @@ class TopApp(App):
                     ("Mouse", list(MOUSE_HELP)),
                     ("Agent popup", popups.binding_rows(popups.AgentScreen.BINDINGS,
                                                         lambda key: display(Binding(key, "")))
-                     + [("buttons", "Enter, Escape, Interrupt (asks first), /compact, Open tmux pane")])]
+                     + [("buttons", "Type into pane, Enter, Escape, Interrupt (asks first), /compact, Open tmux pane"),
+                        ("type-through", "every key goes to the pane: text, Enter, Backspace, arrows, Tab, Ctrl-<key>;"
+                                         " Ctrl-C asks first; Esc Esc or Ctrl-] leaves")])]
         legend = Text()
         legend.append("Columns\n", style="bold underline")
-        legend.append(f"  {R.CPU_HELP}\n  {R.MEM_HELP}\n\n")
+        legend.append(f"  {R.CPU_HELP}\n  {R.MEM_HELP}\n  {R.CTX_HELP}\n\n")
         legend.append("Activity colors\n", style="bold underline")
         for name, label in theme.SERIES_LABEL.items():
             legend.append("  ■ ", style=theme.SERIES[name])
@@ -770,6 +779,9 @@ class TopApp(App):
             self.open_task(view, key)
         elif name == "events":
             self.open_event(view, key)
+        elif name == "gateway" and isinstance(view, HostView) and key in view.gateway_records:
+            error = view.gateway_records[key]
+            self.push_screen(popups.Dialog(f"gateway error {error.get('label')}", R.gateway_text(error)))
 
     def project_tasks(self, project):
         for item in self.items.values():
@@ -809,6 +821,7 @@ class TopApp(App):
             capture=self.capture_fn,
             send=lambda text: self.send_fn(self.loader(root), agent, text, expect_busy=not text.startswith("/")),
             keys=lambda *keys: self.keys_fn(pane, *keys) or f"sent {' '.join(keys)} to {pane}",
+            type=lambda *keys: self.keys_fn(pane, *keys),
             jump=(lambda: self.jump_fn(pane)) if self.tmux_ok and pane else None)
         self.push_screen(popups.AgentScreen(f"agent {agent['name']}", body, pane, actions, poll=self.mirror_seconds))
 

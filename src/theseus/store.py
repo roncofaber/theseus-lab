@@ -169,6 +169,14 @@ MIGRATIONS = [
             reason TEXT,
             last_success REAL)""",
     ],
+    [
+        "ALTER TABLE gateway_errors ADD COLUMN kind TEXT",
+        "ALTER TABLE gateway_errors ADD COLUMN subtype TEXT",
+        "ALTER TABLE gateway_errors ADD COLUMN label TEXT",
+        "ALTER TABLE gateway_errors ADD COLUMN excerpt TEXT",
+        "ALTER TABLE gateway_pools ADD COLUMN cap_cut INTEGER",
+        "ALTER TABLE gateway_pools ADD COLUMN cap_until REAL",
+    ],
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -544,12 +552,21 @@ def drop_gateway_retry(conn, project, agent):
         conn.execute("DELETE FROM gateway_retries WHERE project = ? AND agent = ?", (project, agent))
 
 
-def add_gateway_error(conn, pool, project, code, retryable, agent=None, task=None, retry_after=None, at=None):
+def add_gateway_error(conn, pool, project, code, retryable, agent=None, task=None, retry_after=None, at=None, kind=None,
+                      subtype=None, label=None, excerpt=None):
+    """One gateway error; kind, subtype, label and the redacted excerpt come from theseus.gateway.classify."""
     text, epoch = stamp(at)
     with transaction(conn):
-        conn.execute("""INSERT INTO gateway_errors (pool, project, agent, task, code, retryable, retry_after, time, epoch)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                     (pool, project, agent, task, code, int(bool(retryable)), retry_after, text, epoch))
+        conn.execute("""INSERT INTO gateway_errors (pool, project, agent, task, code, retryable, retry_after, time, epoch,
+                                                    kind, subtype, label, excerpt)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     (pool, project, agent, task, code, int(bool(retryable)), retry_after, text, epoch, kind, subtype,
+                      label, excerpt))
+
+
+def gateway_retries(conn):
+    """Every gateway retry episode on the host."""
+    return [dict(row) for row in conn.execute("SELECT * FROM gateway_retries ORDER BY project, agent")]
 
 
 def gateway_errors(conn, pool=None, since=None, retryable=None):
@@ -570,7 +587,8 @@ def gateway_errors(conn, pool=None, since=None, retryable=None):
 
 def gateway_pool(conn, pool):
     row = conn.execute("SELECT * FROM gateway_pools WHERE pool = ?", (pool,)).fetchone()
-    return dict(row) if row else {"pool": pool, "paused_until": None, "reason": None, "last_success": None}
+    return dict(row) if row else {"pool": pool, "paused_until": None, "reason": None, "last_success": None, "cap_cut": None,
+                                  "cap_until": None}
 
 
 def gateway_pools(conn):
@@ -592,6 +610,37 @@ def pause_gateway(conn, pool, until, reason, now=None):
     return started
 
 
+CAP_INCIDENT_SECONDS = 60
+
+
+def cut_cap(conn, pool, step, seconds, limit, now=None):
+    """Lower a pool's working cap by step for seconds, never below one slot of `limit`; returns the cut in force. A
+    cut that started less than CAP_INCIDENT_SECONDS ago is the same incident (several agents hit by one burst): it is
+    only extended. A later error while the cut is in force deepens it by step."""
+    now = time.time() if now is None else now
+    with transaction(conn):
+        current = gateway_pool(conn, pool)
+        until = current.get("cap_until") or 0
+        running = (current.get("cap_cut") or 0) if until > now else 0
+        if running and now - (until - seconds) < CAP_INCIDENT_SECONDS:
+            cut = running
+        else:
+            cut = max(0, min(running + step, limit - 1)) if limit else 0
+        conn.execute("""INSERT INTO gateway_pools (pool, cap_cut, cap_until) VALUES (?, ?, ?)
+                        ON CONFLICT(pool) DO UPDATE SET cap_cut = excluded.cap_cut, cap_until = excluded.cap_until""",
+                     (pool, cut, now + seconds))
+    return cut
+
+
+def cap_cut(conn, pool, now=None):
+    """(slots cut, until) of a pool's cap cut in force, or (0, None)."""
+    now = time.time() if now is None else now
+    row = conn.execute("SELECT cap_cut, cap_until FROM gateway_pools WHERE pool = ?", (pool,)).fetchone()
+    if row and row[0] and (row[1] or 0) > now:
+        return int(row[0]), row[1]
+    return 0, None
+
+
 def gateway_success(conn, pool, at=None):
     epoch = time.time() if at is None else epoch_of(at)
     with transaction(conn):
@@ -600,11 +649,15 @@ def gateway_success(conn, pool, at=None):
                      (pool, epoch))
 
 
-def pool_spec(pool, spec):
+def pool_spec(pool, spec, conn=None):
+    """(working cap, priority) of a pool; with conn the cap is lowered by a cap cut in force (cut_cap)."""
     if spec is None:
         from . import pools
         spec = pools.definitions().get(pool, {})
-    return int(spec.get("max") or 0), list(spec.get("priority") or [])
+    limit = int(spec.get("max") or 0)
+    if conn is not None and limit:
+        limit = max(1, limit - cap_cut(conn, pool)[0])
+    return limit, list(spec.get("priority") or [])
 
 
 def expire(conn, pool, now):
@@ -665,14 +718,14 @@ def sync(conn, pool, project, held):
 def may_start(conn, pool, project, spec=None):
     """(True, "") when this project may start one more task in the pool, else (False, reason); a full pool records
     this project's claim. It takes no slot: acquire() checks and takes in one step."""
-    limit, priority = pool_spec(pool, spec)
+    limit, priority = pool_spec(pool, spec, conn)
     with pool_locked(conn, pool) as now:
         return admit(conn, pool, project, limit, priority, now)
 
 
 def acquire(conn, pool, project, agent, task, spec=None):
     """may_start and take in one transaction, so concurrent processes never push the pool past its max."""
-    limit, priority = pool_spec(pool, spec)
+    limit, priority = pool_spec(pool, spec, conn)
     with pool_locked(conn, pool) as now:
         if conn.execute("SELECT 1 FROM pool_leases WHERE pool = ? AND project = ? AND agent = ?",
                         (pool, project, agent)).fetchone() is None:
@@ -691,7 +744,7 @@ def take(conn, pool, project, agent, task):
 def hold(conn, pool, project, agent, task, hours=4.0, spec=None):
     """Hold a slot by hand for a worker no theseus queue tracks (it expires after hours unless released). Refused when
     the pool is full or a higher-priority project claims it; returns (ok, reason)."""
-    limit, priority = pool_spec(pool, spec)
+    limit, priority = pool_spec(pool, spec, conn)
     with pool_locked(conn, pool) as now:
         waiting = yielding_to(conn, pool, project, priority)
         if waiting:
@@ -718,7 +771,7 @@ def drop_claim(conn, pool, project):
 
 def status(conn, pool, spec=None):
     """The same shape as pools.status: leases keyed project/agent with seen (and until for holds) as epochs."""
-    limit, priority = pool_spec(pool, spec)
+    limit, priority = pool_spec(pool, spec, conn)
     with pool_locked(conn, pool):
         rows = conn.execute("SELECT * FROM pool_leases WHERE pool = ? ORDER BY seen_epoch", (pool,)).fetchall()
         claims = [row[0] for row in conn.execute("SELECT project FROM pool_claims WHERE pool = ?", (pool,))]
@@ -730,8 +783,9 @@ def status(conn, pool, spec=None):
             lease["until"] = row["until_epoch"]
         leases[f"{row['project']}/{row['agent']}"] = lease
         by_project[row["project"]] = by_project.get(row["project"], 0) + 1
+    cut, until = cap_cut(conn, pool)
     return {"pool": pool, "max": limit, "priority": priority, "active": len(leases), "projects": by_project,
-            "claims": sorted(claims), "leases": leases}
+            "claims": sorted(claims), "leases": leases, "capCut": cut, "capUntil": until}
 
 
 def add_delivery(conn, project, task, agent=None, handoff=None, result=None, at=None, origin=None):

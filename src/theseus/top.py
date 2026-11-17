@@ -324,16 +324,26 @@ def gateway_health():
         return []
 
 
+def gateway_recent(attempts=None):
+    from . import gateway
+    try:
+        return gateway.recent(attempts=attempts)
+    except Exception:
+        return []
+
+
 def gateway_text(entry, now=None):
     """One line of gateway health: recent status codes, last error and success, and the pause in force."""
     now = time.time() if now is None else now
-    codes = " ".join(str(code or "?") for code in entry["codes"]) or "-"
+    codes = ", ".join(entry.get("labels") or [str(code or "?") for code in entry["codes"]]) or "-"
     last_ok = f"{duration(now - entry['lastSuccess'])} ago" if entry.get("lastSuccess") else "never"
     text = f"{entry['errors']} error(s) in 24 h: {codes} · last success {last_ok}"
     if entry.get("pausedUntil"):
         text += f" · PAUSED until {local_clock(datetime.fromtimestamp(entry['pausedUntil'], timezone.utc).isoformat())}"
         if entry.get("reason"):
             text += f" ({entry['reason']})"
+    if entry.get("capCut"):
+        text += f" · cap -{entry['capCut']} until {local_clock(datetime.fromtimestamp(entry['capUntil'], timezone.utc).isoformat())}"
     return text
 
 

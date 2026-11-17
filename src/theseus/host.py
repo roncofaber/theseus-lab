@@ -45,8 +45,9 @@ def project_snapshot(root, sample_host=None):
     except Exception as error:
         base["error"] = f"{type(error).__name__}: {error}"
         return base
+    from . import gateway
     return {**base, "name": conf.name, "available": True, "snapshot": state, "activity": activity(history),
-            "lastEvent": history[-1]["time"] if history else None}
+            "lastEvent": history[-1]["time"] if history else None, "gatewayAttempts": gateway.settings(conf)["attempts"]}
 
 
 def pool_snapshots():
@@ -76,7 +77,9 @@ def snapshot(roots=None):
             events.extend({**record, "project": item["name"]} for record in item["snapshot"]["events"])
     events.sort(key=lambda record: record.get("time") or "")
     return {"time": datetime.now(timezone.utc).isoformat(), "host": host, "projects": projects,
-            "pools": pool_snapshots(), "gateway": top.gateway_health(), "events": events[-300:]}
+            "pools": pool_snapshots(), "gateway": top.gateway_health(),
+            "gatewayErrors": top.gateway_recent({item["name"]: item.get("gatewayAttempts") for item in projects}),
+            "events": events[-300:]}
 
 
 def summary_counts(item):
