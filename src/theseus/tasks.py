@@ -577,6 +577,8 @@ def retire(queue, task_id, force=False):
         released = True
     if not worktree or not Path(worktree).is_dir():
         raise TaskError(f"{task_id} has no live worktree")
+    if task["status"] != "completed" and not released and not force:
+        raise TaskError(f"refusing to retire {task_id}: it is {task['status']}, not completed (complete it first, or pass --force)")
     missing = unintegrated_files(worktree, queue.root, (task.get("merge") or {}).get("commit") or "HEAD")
     if missing and not force:
         raise TaskError(f"refusing to remove {worktree}: main never committed {', '.join(missing)}; integrate them or pass --force")

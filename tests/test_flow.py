@@ -239,6 +239,14 @@ class TaskFlowTests(Sandbox):
         self.assertNotIn("<<<<<<<", text)
         self.assertIn(TASK, text)
 
+    def test_retire_refuses_a_task_that_is_not_completed(self):
+        self.add_task()
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        refused = self.theseus("tasks", "retire", TASK, check=False)
+        self.assertNotEqual(0, refused.returncode)
+        self.assertIn("not completed", refused.stderr)
+        self.assertTrue((self.tmp / "worktrees/worker-1-a").is_dir())
+
     def test_a_released_task_can_retire_its_old_worktree(self):
         self.add_task()
         self.theseus("instance", "assign", TASK, "worker-1", "a")
