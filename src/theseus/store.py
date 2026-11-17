@@ -906,7 +906,8 @@ def maintain(conn, now=None):
         conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
         conn.execute("VACUUM")
     freed = conn.execute("PRAGMA freelist_count").fetchone()[0]
-    conn.execute("PRAGMA incremental_vacuum").fetchall()
+    # Python 3.11's sqlite3 steps a column-less statement only once (one page per call); executescript runs to the end.
+    conn.executescript("PRAGMA incremental_vacuum;")
     set_meta(conn, "maintain.last", iso(now))
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
     return {"removed": removed, "freed_pages": freed, "vacuumed": converted, "before": before,
