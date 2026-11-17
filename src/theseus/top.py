@@ -291,18 +291,6 @@ def eligibility(conf, states):
     return result
 
 
-def short_names(names):
-    """Drop the prefix every agent name shares (lab-worker-1 -> worker-1 when all start with lab-)."""
-    names = list(names)
-    if len(names) < 2:
-        return {n: n for n in names}
-    prefix = os.path.commonprefix(names)
-    prefix = prefix[: prefix.rfind("-") + 1] if "-" in prefix else ""
-    if prefix and all(n[len(prefix):].isdigit() for n in names):
-        prefix = prefix[: prefix[:-1].rfind("-") + 1]
-    return {n: n[len(prefix):] or n for n in names}
-
-
 def snapshot(conf, sample=False):
     states = ag.states(conf)
     if sample:
@@ -553,23 +541,32 @@ def render(state, width=120, height=None, ui=None):
     counts = (f"{GREEN}working {B}{len(queue['in_progress'])}{R} {DIM}·{R} {MAGENTA}review {B}{len(queue['review'])}{R} {DIM}·{R} "
               f"{CYAN}merged {B}{len(queue['merged'])}{R} {DIM}·{R} {YELLOW}ready {B}{len(queue['ready'])}{R} {DIM}·{R} "
               f"{DIM}blocked {len(queue['blocked'])} · held {len(queue['held'])}{R}")
-    shorts = short_names(a["name"] for a in state["agents"])
+    free = {a["name"] for a in state["agents"] if a["state"] == "free"}
 
-    def who(task_id):
-        allowed = state.get("eligible", {}).get(task_id)
-        if allowed is None:
-            return ""
+    def reason(key, task_id):
+        if key == "review":
+            return f"{MAGENTA}delivered, awaiting merge{R}"
+        if key == "merged":
+            return f"{CYAN}merged, awaiting verification{R}"
+        if key == "held":
+            return f"{DIM}on hold{R}"
+        if key == "blocked":
+            words = {"waits": "waiting for", "missing": "unknown dependency", "milestone": "outside the milestone, in"}
+            parts = []
+            for item in state["blocked"].get(task_id, []):
+                kind, _, value = item.partition(":")
+                parts.append(f"{words.get(kind, kind)} {value}".strip())
+            return f"{DIM}{'; '.join(parts) or 'blocked'}{R}"
+        if state["paused"]:
+            return f"{YELLOW}queue paused{R}"
+        allowed = state.get("eligible", {}).get(task_id, [])
         if not allowed:
-            return f"{RED}no agent may take it{R}"
-        parts = [f"{GREEN}{shorts.get(n, n)}{R}" if reset != "clear" else f"{YELLOW}{shorts.get(n, n)}*{R}"
-                 for n, reset in allowed]
-        text = " ".join(parts)
-        if visible(text) <= who_width:
-            return text
-        clears = sum(1 for _, reset in allowed if reset == "clear")
-        everyone = len(allowed) == len([a for a in state["agents"] if a.get("enabled", True)])
-        summary = f"{GREEN}{'any agent' if everyone else f'{len(allowed)} agents'}{R}"
-        return summary + (f" {YELLOW}({clears} after clear){R}" if clears else "")
+            room = state["rooms"].get(task_id)
+            return f"{RED}no eligible agent{f' for the {room} room' if room else ''}{R}"
+        idle = [n for n, _ in allowed if n in free]
+        if idle:
+            return f"{GREEN}assigning on the next tick{R}"
+        return f"{YELLOW}eligible agents busy ({len(allowed)}){R}"
 
     # Fixed heights per terminal size, never per content, so rows do not jump between refreshes.
     footer = 3
@@ -580,25 +577,18 @@ def render(state, width=120, height=None, ui=None):
         waiting_rows = max(ROWS["waiting"], min(12, spare // 3))
         events_rows = max(ROWS["events"], spare - waiting_rows)
     frame.rule("WAITING", counts)
-    who_width = 34 if wide else 26
-    who_head = f"{'WHO MAY TAKE IT':<{who_width}} " if medium else ""
-    frame.header(f"{'STATUS':<8} {'TASK':<30} {'ROOM':<6} {'FOR':<7} " + (f"{'POSTED':<7} " if wide else "") + who_head
-                 + "NEXT STEP")
+    frame.header(f"{'STATUS':<8} {'TASK':<34} {'ROOM':<6} {'FOR':<7} " + (f"{'POSTED':<7} " if medium else "") + "REASON")
     rows = []
     for key, label in (("review", "review"), ("merged", "merged"), ("ready", "ready"), ("blocked", "blocked"), ("held", "held")):
         color = QUEUE_COLOR[label]
         for task_id in queue[key]:
-            detail = ", ".join(state["blocked"].get(task_id, [])) if key == "blocked" else {
-                "review": "theseus merge", "merged": "verify, then theseus tasks complete", "held": "hold set",
-                "ready": "next free agent"}[key]
             posted, since = times.get(task_id, (None, None))
             waiting = age(since)
             shown = aged(waiting, SLOW, VERY_SLOW) if key in ("review", "merged") else duration(waiting)
             room = state["rooms"].get(task_id) or "-"
             bold = B if key in ("review", "merged", "ready") else ""
-            rows.append(f"{color}{bold}{label:<8}{R} {bold}{cut(task_id, 30):<30}{R} {ROOM_COLOR.get(room, '')}{room:<6}{R} "
-                        f"{column(shown, 7)} " + (f"{DIM}{posted_label(posted):<7}{R} " if wide else "")
-                        + (column(who(task_id), who_width) + " " if medium else "") + f"{DIM}{detail}{R}")
+            rows.append(f"{color}{bold}{label:<8}{R} {bold}{cut(task_id, 34):<34}{R} {ROOM_COLOR.get(room, '')}{room:<6}{R} "
+                        f"{column(shown, 7)} " + (f"{DIM}{posted_label(posted):<7}{R} " if medium else "") + reason(key, task_id))
     if not rows:
         rows = [f"{DIM}nothing waiting; {len(queue['in_progress'])} task(s) in progress (see AGENTS){R}" if queue["in_progress"]
                 else f"{DIM}queue empty: write task records (theseus tasks add){R}"]
@@ -630,7 +620,7 @@ def render(state, width=120, height=None, ui=None):
                     f"{weight}{cut(record['task'] or '-', 30):<30}{R} {DIM}{cut(detail, width - 75)}{R}")
     frame.fixed(rows[:events_rows], events_rows, "no events yet")
     frame.row()
-    keys = "q quit · p pause/resume queue · space freeze · * = agent needs a context clear first"
+    keys = "q quit · p pause/resume queue · space freeze"
     if state["agents"]:
         keys += f" · 1-{min(len(state['agents']), 9)} jump to agent pane"
     message = ui.get("message")
