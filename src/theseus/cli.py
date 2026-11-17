@@ -148,6 +148,7 @@ def cmd_config(args):
 def config_check():
     """Validate the host config.toml and, inside a project, the project configuration; exit 1 on any error."""
     from . import hostconfig, profiles, setup
+    hostconfig.WARN_UNKNOWN = False
     errors, warnings = setup.host_check()
     try:
         root = cfg.find_root()
@@ -156,6 +157,8 @@ def config_check():
         if os.environ.get("THESEUS_ROOT"):
             errors.append(str(error))
     if root:
+        errors += [f"{file}: unknown configuration sections: {', '.join(sections)}"
+                   for file, sections in cfg.unknown_sections(root)]
         try:
             conf = cfg.load(root=root)
             conf.instances()

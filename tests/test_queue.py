@@ -28,7 +28,8 @@ class QueueTests(Sandbox):
         (bin_dir / "tmux").write_text(FAKE_TMUX)
         (bin_dir / "tmux").chmod(0o755)
         self.env.update({"PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_STATE": str(self.state),
-                         "FAKE_PANES": "%1 %2", "THESEUS_COMPACT_POLL": "0.01", "THESEUS_TYPE_POLL": "0.01"})
+                         "FAKE_PANES": "%1 %2", "THESEUS_COMPACT_POLL": "0.01", "THESEUS_TYPE_POLL": "0.01",
+                         "THESEUS_SEND_POLL": "0.01"})
         self.theseus("tasks", "milestone", "M1")
         self.git("commit", "-q", "-am", "milestone")
         self.theseus("agents", "add", "worker-a", "%1")
@@ -445,7 +446,7 @@ printf '%s\\n' "$*" > "{self.record}"
         process = subprocess.Popen([sys.executable, "-m", "theseus", "queue", "run", "--interval", "1"], cwd=self.project,
                                    env=self.installed(1), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            process.communicate(timeout=3.5)
+            process.communicate(timeout=2.5)
             self.fail("queue run exited instead of waiting for an upgrade")
         except subprocess.TimeoutExpired:
             process.kill()

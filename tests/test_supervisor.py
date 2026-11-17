@@ -101,10 +101,15 @@ env_passthrough = ["FAKE_*"]
 ready_seconds = 15
 
 [supervisor.restart]
-backoff_seconds = [1, 1]
+backoff_seconds = [0.3, 0.3]
 max_crashes = 3
 window_minutes = 10
 """
+
+# Test-only poll intervals and settle times; the production defaults are unchanged.
+FAST = {"THESEUS_READY_SETTLE": "0.2", "THESEUS_READY_POLL": "0.05", "THESEUS_DEAD_POLL": "0.05",
+        "THESEUS_STOP_POLL": "0.1", "THESEUS_STOP_SECONDS": "5", "THESEUS_SEND_VERIFY": "5", "THESEUS_SEND_POLL": "0.05",
+        "THESEUS_COMPACT_POLL": "0.1", "FAKE_BUSY": "0.5"}
 
 PROFILE = """
 [workers.fake]
@@ -122,6 +127,27 @@ managed = true
 [agents.counts]
 fake = 2
 """
+
+
+def drain(fd, until=None, timeout=10):
+    """Read a pty until until() holds or the other side closes it (until=None waits for the close); returns the
+    output and whether the condition was met."""
+    import select
+    output = b""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if until is not None and until():
+            return output, True
+        ready, _, _ = select.select([fd], [], [], 0.05)
+        if ready:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                return output, until is None
+            output += chunk
+    return output, False
 
 
 @unittest.skipUnless(REAL_TMUX, "tmux is not installed")
@@ -144,15 +170,11 @@ class SupervisorTests(Sandbox):
         self.legacy = legacy
         (self.tmp / "config.toml").write_text(HOST)
         self.env.update({"PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_STATE": str(self.state),
-                         "LEGACY_SOCKET": str(legacy), "THESEUS_READY_SETTLE": "0.5", "THESEUS_STOP_POLL": "0.2",
-                         "THESEUS_STOP_SECONDS": "5", "THESEUS_SEND_VERIFY": "5", "THESEUS_SEND_POLL": "0.2",
-                         "THESEUS_COMPACT_POLL": "0.2", "TMUX": "/nonexistent/bogus,1,0"})
+                         "LEGACY_SOCKET": str(legacy), "TMUX": "/nonexistent/bogus,1,0", **FAST})
         self.set_config(PROFILE)
         self.git("commit", "-q", "-am", "agents")
         self.socket = self.env["THESEUS_TMUX_PATH"]
-        os.environ.update({k: self.env[k] for k in ("PATH", "FAKE_STATE", "LEGACY_SOCKET", "THESEUS_TMUX_PATH",
-                                                      "THESEUS_READY_SETTLE", "THESEUS_STOP_POLL", "THESEUS_STOP_SECONDS",
-                                                      "THESEUS_SEND_VERIFY", "THESEUS_SEND_POLL")})
+        os.environ.update({k: self.env[k] for k in ("PATH", "FAKE_STATE", "LEGACY_SOCKET", "THESEUS_TMUX_PATH", *FAST)})
 
     def tmux(self, *args):
         return subprocess.run([REAL_TMUX, "-S", self.socket, *args], capture_output=True, text=True)
@@ -171,7 +193,10 @@ class SupervisorTests(Sandbox):
             value = check()
             if value:
                 return value
-            time.sleep(0.2)
+            # tmux 3.4 sometimes misses the SIGCHLD of a pane's process, leaving it a zombie and pane-died unfired until
+            # the server reaps another child; a run-shell job is such a child.
+            self.tmux("run-shell", "true")
+            time.sleep(0.05)
         self.fail(f"timed out waiting for {message}")
 
     def runs(self, name):
@@ -235,9 +260,10 @@ class SupervisorTests(Sandbox):
     def test_a_crash_loop_gives_up_after_max_crashes_with_one_error(self):
         (self.state / "mode-demo-fake-1").write_text("crash")
         self.up("demo-fake-1", check=False)
-        self.wait_for(lambda: (self.record("demo-fake-1") or {}).get("phase") == "failed", timeout=30,
+        crashed = lambda: [e for e in self.events("error") if "crashed 3 times" in e["detail"]]
+        self.wait_for(lambda: (self.record("demo-fake-1") or {}).get("phase") == "failed" and crashed(), timeout=30,
                       message="the agent to be marked failed")
-        errors = [e for e in self.events("error") if "crashed 3 times" in e["detail"]]
+        errors = crashed()
         self.assertEqual(1, len(errors))
         self.assertRegex(self.up("demo-fake-1").stdout, r"demo-fake-1\s+failed")
         (self.state / "mode-demo-fake-1").write_text("normal")
@@ -322,10 +348,10 @@ class SupervisorTests(Sandbox):
 
     def test_an_agent_missing_from_the_status_list_times_out_as_blocked(self):
         self.use_status()
-        (self.tmp / "config.toml").write_text(HOST.replace("ready_seconds = 15", "ready_seconds = 2"))
+        (self.tmp / "config.toml").write_text(HOST.replace("ready_seconds = 15", "ready_seconds = 1"))
         (self.state / "hidden-demo-fake-1").write_text("1")
         self.assertRegex(self.up("demo-fake-1").stdout, r"demo-fake-1\s+started\s+fresh session; blocked")
-        self.assertTrue(any("not ready after 2s" in e["detail"] for e in self.events("error")))
+        self.assertTrue(any("not ready after 1s" in e["detail"] for e in self.events("error")))
 
     def test_waiting_for_input_with_a_task_raises_one_stalled_event(self):
         self.use_status()
@@ -357,11 +383,11 @@ class SupervisorTests(Sandbox):
 
     def test_a_thrashing_agent_restarts_fresh_and_gets_its_restart_prompt(self):
         self.up()
-        self.assign("t-thrash")
+        self.assign("t-refill")
         from theseus import supervisor
         supervisor.send(self.conf(), "demo-fake-1", "please thrash", expect_busy=False)
         out = self.theseus("queue", "tick", "--no-assign", timeout=60).stdout
-        self.assertRegex(out, r"restarted\s+demo-fake-1\s+t-thrash thrashing: restarted on a fresh session")
+        self.assertRegex(out, r"restarted\s+demo-fake-1\s+t-refill thrashing: restarted on a fresh session")
         self.wait_for(lambda: self.theseus("queue", "tick", "--no-assign", timeout=60) and
                       "Your context was cleared" in self.log(), timeout=30, message="the restart prompt")
         starts = [line for line in self.log().splitlines() if line.startswith("start name=demo-fake-1")]
@@ -402,7 +428,6 @@ class SupervisorTests(Sandbox):
 
     def test_attach_from_the_console_returns_on_the_detach_key(self):
         import pty
-        import select
         self.up("demo-fake-1")
         code = ("import sys; from theseus.tui.app import attach_supervised; "
                 "print('result', repr(attach_supervised(sys.argv[1], sys.argv[2])))")
@@ -411,22 +436,12 @@ class SupervisorTests(Sandbox):
             os.environ.clear()
             os.environ.update({**self.env, "TERM": "xterm-256color"})
             os.execvp(sys.executable, [sys.executable, "-c", code, str(self.project), "demo-fake-1"])
-        output = b""
-
-        def drain(seconds):
-            nonlocal output
-            end = time.monotonic() + seconds
-            while time.monotonic() < end:
-                ready, _, _ = select.select([fd], [], [], 0.1)
-                if ready:
-                    try:
-                        output += os.read(fd, 65536)
-                    except OSError:
-                        return
-        drain(2.0)
-        self.assertEqual("1", self.tmux("display", "-p", "-t", "=demo--demo-fake-1:", "#{session_attached}").stdout.strip())
+        attached = lambda: self.tmux("display", "-p", "-t", "=demo--demo-fake-1:", "#{session_attached}").stdout.strip()
+        drain(fd, lambda: attached() == "1")
+        self.assertEqual("1", attached())
         os.write(fd, b"\x11")
-        drain(2.0)
+        output, closed = drain(fd)
+        self.assertTrue(closed)
         self.assertEqual(pid, os.waitpid(pid, 0)[0])
         self.assertIn(b"result ''", output)
         self.assertEqual("", self.legacy_calls())
@@ -443,10 +458,11 @@ class SupervisorTests(Sandbox):
                          mirror_seconds=0.1)
             async with app.run_test(size=(170, 60)) as pilot:
                 async def until(check, seconds=20):
-                    for _ in range(int(seconds / 0.1)):
-                        await pilot.pause(0.1)
+                    end = time.monotonic() + seconds
+                    while time.monotonic() < end:
                         if check():
                             return
+                        await pilot.pause(0.05)
                     self.fail("console did not settle")
                 await until(lambda: app.active_item() is not None and "fake-1" in self.screen(app))
                 await pilot.press("a", "enter")
@@ -454,7 +470,8 @@ class SupervisorTests(Sandbox):
                 popup = app.screen
                 await until(lambda: "fake agent demo-fake-1 ready" in popup.query_one("#mirror-text").render().plain)
                 await pilot.click("#send")
-                await pilot.press(*"hi there", "enter")
+                popup.query_one("#send").value = "hi there"
+                await pilot.press("enter")
                 await until(lambda: "input demo-fake-1: hi there" in self.log())
                 await pilot.press("escape")
                 await until(lambda: len(app.screen_stack) == 1)
@@ -511,7 +528,8 @@ class SupervisorTests(Sandbox):
         out = self.theseus("queue", "tick", timeout=60).stdout
         self.assertIn("assigned", out)
         self.wait_for(lambda: "New task t-cycle" in self.log(), message="the task message")
-        time.sleep(1.5)
+        self.wait_for(lambda: re.search(r"^done\n> *$", self.tmux("capture-pane", "-p", "-t", "=demo--demo-fake-1:").stdout.rstrip(),
+                                        re.M), message="the agent to finish")
         out = self.theseus("queue", "tick", timeout=60).stdout
         self.assertIn("delivered", out)
         self.assertEqual("", self.legacy_calls())
@@ -556,7 +574,6 @@ class TmuxSequenceTests(unittest.TestCase):
 
     def test_attach_resizes_to_the_client_and_the_detach_key_restores_the_agent_size(self):
         import pty
-        import select
         import struct
         import fcntl
         import termios
@@ -570,20 +587,11 @@ class TmuxSequenceTests(unittest.TestCase):
             os.environ["TERM"] = "xterm-256color"
             os.execvp(argv[0], argv)
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
-
-        def drain(seconds):
-            end = time.monotonic() + seconds
-            while time.monotonic() < end:
-                ready, _, _ = select.select([fd], [], [], 0.1)
-                if ready:
-                    try:
-                        os.read(fd, 65536)
-                    except OSError:
-                        return
-        drain(1.5)
-        self.assertEqual("100x29 1", server.display("=a--x:", "#{window_width}x#{window_height} #{session_attached}"))
+        state = lambda: server.display("=a--x:", "#{window_width}x#{window_height} #{session_attached}")
+        drain(fd, lambda: state() == "100x29 1")
+        self.assertEqual("100x29 1", state())
         os.write(fd, b"\x11")
-        drain(1.0)
+        self.assertTrue(drain(fd)[1])
         self.assertEqual(pid, os.waitpid(pid, 0)[0])
         self.assertEqual("220x50 0", server.display("=a--x:", "#{window_width}x#{window_height} #{session_attached}"))
 

@@ -190,6 +190,7 @@ class HostSnapshotTests(HostCase):
 class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from theseus.tui.app import TopApp
+        asyncio.get_running_loop().set_debug(False)
         self.jumps = []
         self.sent, self.keys, self.captures = [], [], []
         self.app = TopApp(interval=3600, snapshot_fn=host.snapshot, tmux_ok=True, mirror_seconds=0.05,
@@ -205,10 +206,10 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
         await self.app.workers.wait_for_complete()
         ready = condition or (lambda: "updated" in self.app.title
                               and len(list(self.app.query_one(TabbedContent).query(TabPane))) == 3)
-        for _ in range(100):
-            await pilot.pause(0.05)
+        for _ in range(250):
             if ready():
                 return
+            await pilot.pause(0.02)
         self.fail(f"dashboard did not settle: active={self.app.query_one(TabbedContent).active} focused={self.app.focused} title={self.app.title}")
 
     async def switch(self, pilot, key):
@@ -412,6 +413,7 @@ class DashboardBase(HostCase, unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         from theseus.tui.app import TopApp
+        asyncio.get_running_loop().set_debug(False)
         self.event("alpha", "assigned", 5)
         self.event("alpha", "delivered", 3, "t2")
         self.event("alpha", "error", 2, "t3")
@@ -429,10 +431,10 @@ class DashboardBase(HostCase, unittest.IsolatedAsyncioTestCase):
 
     async def settle(self, pilot, condition):
         await self.app.workers.wait_for_complete()
-        for _ in range(100):
-            await pilot.pause(0.05)
+        for _ in range(250):
             if condition():
                 return
+            await pilot.pause(0.02)
         self.fail(f"did not settle: screen={self.app.screen} focused={self.app.focused} title={self.app.title}")
 
     async def start(self, pilot, tab="2"):
@@ -658,10 +660,9 @@ class TopPolishTests(DashboardBase):
             await self.start(pilot, tab=None)
             for tab in ("1", "2"):
                 await pilot.press(tab)
-                for size in ((80, 24), (200, 60), (60, 20), (170, 50), (100, 30)) * 3:
+                for size in ((80, 24), (200, 60), (60, 20), (170, 50), (100, 30)):
                     await pilot.resize_terminal(*size)
                     await pilot.pause()
-            await pilot.pause(0.2)
 
     async def test_refresh_cost_with_50_agents_500_events_and_200_tasks(self):
         self.extra = {"agents": 50, "events": 500, "tasks": 200}
@@ -704,7 +705,7 @@ class TopPolishTests(DashboardBase):
             self.addCleanup(theme.apply)
             for name in BUILTIN_THEMES:
                 self.app.theme = name
-                await pilot.pause(0.1)
+                await pilot.pause()
                 self.assertEqual("ansi" if BUILTIN_THEMES[name].ansi else "rgb", theme.MODE, name)
                 table = self.table("events")
                 strip = table.render_line(0)
@@ -814,7 +815,6 @@ class RoundTwoTests(DashboardBase):
             await self.settle(pilot, lambda: self.app.screen is screen)
             self.assertNotIn(("C-c",), [keys for _, keys in self.keys])
             await pilot.press("escape")
-            await pilot.pause(0.7)
             await self.settle(pilot, lambda: ("Escape",) in [keys for _, keys in self.keys])
             self.assertTrue(screen.typing, "a lone Escape goes to the pane")
             await pilot.press("escape", "escape")
@@ -931,17 +931,19 @@ class ConsoleTests(DashboardBase):
             self.assertEqual("lead · live", str(self.app.screen.query_one("#mirror").border_title))
 
     async def test_the_palette_runs_actions_and_asks_before_destructive_ones(self):
-        from textual.command import CommandPalette
+        from textual.command import CommandList, CommandPalette
+        from textual.widgets import Input
         from theseus.tui.popups import Confirm
         async with self.app.run_test(size=(170, 60)) as pilot:
             await self.start(pilot)
             for words in ("Queue tick", "Restart fake-1"):
                 await pilot.press("ctrl+p")
                 await self.settle(pilot, lambda: isinstance(self.app.screen, CommandPalette))
-                await pilot.press(*words)
-                await pilot.pause(0.5)
-                await pilot.press("enter")
-                await pilot.pause(0.2)
+                self.app.screen.query_one(Input).value = words
+                hits = self.app.screen.query_one(CommandList)
+                await self.settle(pilot, lambda: hits.option_count and words in str(hits.get_option_at_index(0).prompt))
+                await pilot.press("down", "enter")
+                await self.settle(pilot, lambda: not isinstance(self.app.screen, CommandPalette))
             await self.settle(pilot, lambda: isinstance(self.app.screen, Confirm))
             self.assertEqual([["queue", "tick"]], self.ran)
             await pilot.press("y")

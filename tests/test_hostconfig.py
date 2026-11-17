@@ -75,16 +75,43 @@ class PrecedenceTests(HostCase):
         self.host_file("[defaults]\ngit.remote = \"upstream\"\n")
         self.assertEqual("origin", self.conf().raw["git"]["remote"])
         self.write("theseus.toml", '[project]\nname = "demo"\n[pools.gw]\nmax = 1\n')
-        with self.assertRaisesRegex(cfg.ConfigError, "theseus.toml: unknown configuration sections: pools"):
-            self.conf()
+        self.assertNotIn("pools", self.conf().raw)
+        result = self.theseus("config", "check", check=False)
+        self.assertEqual(1, result.returncode)
+        self.assertIn("theseus.toml: unknown configuration sections: pools", result.stderr)
+        self.assertNotIn("warning", result.stderr)
 
     def test_a_malformed_host_file_names_itself(self):
         self.host_file("[workers\n")
         with self.assertRaisesRegex(cfg.ConfigError, str(self.host)):
             self.conf()
-        self.host_file("[surprise]\nx = 1\n")
-        with self.assertRaisesRegex(cfg.ConfigError, "unknown section.*surprise"):
+
+    def test_an_unknown_section_from_a_newer_release_is_a_warning_once_except_in_config_check(self):
+        import contextlib
+        import io
+        self.addCleanup(hostconfig._warned.clear)
+        hostconfig._warned.clear()
+        self.host_file('[newer]\nx = 1\n[supervisor]\nsize = "100x40"\n')
+        self.write("theseus.local.toml", "[later]\ny = 2\n")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual({"supervisor": {"size": "100x40"}}, hostconfig.read())
             self.conf()
+            self.conf()
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(2, len(lines), lines)
+        self.assertIn("ignoring unknown section(s) newer", lines[0])
+        self.assertIn("theseus.local.toml: ignoring unknown configuration sections: later", lines[1])
+        waited = self.theseus("queue", "wait", "--timeout", "2", "--interval", "1", check=False)
+        self.assertEqual(1, waited.returncode, waited.stderr)
+        self.assertIn("queue wait: nothing needed the coordinator", waited.stdout + waited.stderr)
+        self.assertEqual(1, waited.stderr.count("unknown section(s) newer"), waited.stderr)
+        self.assertNotIn("unknown section", waited.stdout)
+        result = self.theseus("config", "check", check=False)
+        self.assertEqual(1, result.returncode)
+        self.assertIn("unknown section [newer]", result.stderr)
+        self.assertIn("theseus.local.toml: unknown configuration sections: later", result.stderr)
+        self.assertNotIn("warning", result.stderr)
 
 
 class HostProfileTests(HostCase):

@@ -61,7 +61,7 @@ if "THESEUS_DB_GUARD" not in os.environ:
 
 def base_env(root):
     env = {key: value for key, value in os.environ.items()
-           if not key.startswith(("THESEUS_", "GIT_")) and key not in ("JAVA_HOME", "GHIDRA_INSTALL_DIR")}
+           if not key.startswith(("THESEUS_", "GIT_")) and key not in ("JAVA_HOME", "GHIDRA_INSTALL_DIR", "COLUMNS", "LINES")}
     env.update({
         "THESEUS_DB_GUARD": os.environ["THESEUS_DB_GUARD"],
         "THESEUS_TMUX_GUARD": "1",
@@ -83,6 +83,7 @@ def base_env(root):
         "GIT_CONFIG_GLOBAL": str(root / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
         "PYTHONPATH": str(SRC) + os.pathsep + env.get("PYTHONPATH", ""),
         "PYTHONDONTWRITEBYTECODE": "1",
+        "THESEUS_SAMPLE_SECONDS": "0.05",
     })
     return env
 

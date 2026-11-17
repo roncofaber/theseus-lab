@@ -63,7 +63,7 @@ class RestartHarness(Sandbox):
             (bin_dir / name).chmod(0o755)
         self.env.update({"PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_STATE": str(self.state),
                          "FAKE_SESSIONS": str(self.sessions), "THESEUS_AGENT_SESSIONS": str(self.sessions),
-                         "THESEUS_AGENT_LAUNCH": str(bin_dir / "claude"), "THESEUS_RESTART_POLL": "0.2"})
+                         "THESEUS_AGENT_LAUNCH": str(bin_dir / "claude"), "THESEUS_RESTART_POLL": "0.1"})
         self.shell = subprocess.Popen([str(bin_dir / "fake-shell")], env=self.env, start_new_session=True)
         self.addCleanup(self.stop_shell)
         (self.state / "shell.pid").write_text(str(self.shell.pid))

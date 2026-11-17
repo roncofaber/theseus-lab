@@ -514,9 +514,10 @@ def mark_ready(conf, rec, detail):
         event(conf, "ready", rec["name"], None, f"gen {run.get('gen')}")
 
 
-def wait_ready(conf, name, timeout=None, poll=0.5):
+def wait_ready(conf, name, timeout=None, poll=None):
     """Poll a starting agent until it is ready, blocked, dead or out of time. Returns (phase, detail)."""
     timeout = float(timeout if timeout is not None else settings().get("ready_seconds") or 90)
+    poll = float(poll if poll is not None else os.environ.get("THESEUS_READY_POLL") or 0.5)
     deadline = time.monotonic() + timeout
     while True:
         rec = record(conf, name)
@@ -919,7 +920,8 @@ def wait_idle(conf, rec, timeout=180, poll=5):
     return True
 
 
-def wait_dead(srv, rec, timeout=30, poll=0.5):
+def wait_dead(srv, rec, timeout=30, poll=None):
+    poll = float(poll if poll is not None else os.environ.get("THESEUS_DEAD_POLL") or 0.5)
     deadline = time.monotonic() + timeout
     while True:
         info = pane_info(srv, rec["target"])

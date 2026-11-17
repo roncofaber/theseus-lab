@@ -10,6 +10,7 @@ The older pools.toml and store.toml are still read, below this file, and reporte
 """
 import copy
 import os
+import sys
 import tomllib
 from pathlib import Path
 
@@ -32,6 +33,18 @@ STORE_KEYS = {"retention": ("samples_days", "events_days"), "backups": ("directo
 
 class ConfigError(Exception):
     pass
+
+
+_warned = set()
+WARN_UNKNOWN = True
+
+
+def warn_once(message):
+    """Print a configuration warning on stderr once per process (a long-running `queue wait` reads the files every
+    tick); `theseus config check` turns WARN_UNKNOWN off and reports the same problems as errors."""
+    if WARN_UNKNOWN and message not in _warned:
+        _warned.add(message)
+        print(f"theseus: warning: {message}", file=sys.stderr)
 
 
 def config_base():
@@ -61,12 +74,13 @@ def parse(file):
 
 
 def read():
-    """The host file's tables; a parse error or an unknown top-level section raises ConfigError naming the file."""
+    """The host file's tables; a parse error raises ConfigError naming the file. An unknown top-level section, such as
+    one a newer theseus added, is left out with a warning, so a running command survives an upgrade of the file."""
     data = parse(path())
     unknown = sorted(set(data) - set(SECTIONS))
     if unknown:
-        raise ConfigError(f"{path()}: unknown section(s) {', '.join(unknown)}; known: {', '.join(SECTIONS)}")
-    return data
+        warn_once(f"{path()}: ignoring unknown section(s) {', '.join(unknown)}; known: {', '.join(SECTIONS)}")
+    return {key: value for key, value in data.items() if key not in unknown}
 
 
 def legacy_files():

@@ -467,7 +467,7 @@ def snapshot(conf, sample=False, host=None):
     profile_facts(conf, states)
     if sample:
         agent_processes(states)
-        time.sleep(0.5)
+        time.sleep(float(os.environ.get("THESEUS_SAMPLE_SECONDS") or 0.5))
     agent_processes(states)
     summary = wq.summary(conf)
     records = t.Queue(conf).load().get("tasks", [])

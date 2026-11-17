@@ -7,11 +7,13 @@ Thanks for your interest in theseus-lab. Bug reports, fixes, documentation impro
 ```sh
 git clone https://github.com/roncofaber/theseus-lab
 cd theseus-lab
-uv venv .venv && uv pip install -e . --python .venv/bin/python
-.venv/bin/python -m unittest discover -s tests -v
+uv venv .venv && uv pip install -e ".[dev]" --python .venv/bin/python
+.venv/bin/python -m pytest -n auto
 ```
 
-The test suite needs `git`, `bash`, `jq` and `shellcheck`. It runs every command against temporary folders with a throwaway Git identity, a fake agent CLI and a fake `tmux`, so it never touches your projects, your agents or your tmux sessions.
+`pytest -n auto` runs the suite in parallel with pytest-xdist, one worker per CPU; the `dev` extra installs both. The tests are plain `unittest` test cases, so the standard library runner works too, serially and much slower: `.venv/bin/python -m unittest discover -s tests`.
+
+The test suite needs `git`, `bash`, `jq`, `shellcheck` and `tmux`. It runs every command against temporary folders with a throwaway Git identity, a private host store, a fake agent CLI and either a fake `tmux` or a throwaway tmux server on its own socket, so it never touches your projects, your agents or your tmux sessions. Each test process (each xdist worker) gets its own temporary store and tmux socket. A few timing tests compare against the load of the machine; CI runs them serially before the parallel run.
 
 To try your changes on a real project, install your checkout as the CLI:
 

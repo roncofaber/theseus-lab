@@ -406,7 +406,7 @@ class QueueGatewayTests(GatewayCase):
         self.assertIn("gateway_error", out)
         self.assertIn("code 524 attempt 1/3", out)
         self.assertNotIn("nudged", self.theseus("queue", "tick").stdout, "the idle nudge leaves a gateway error alone")
-        waited = self.theseus("queue", "wait", "--timeout", "2", "--interval", "1", check=False)
+        waited = self.theseus("queue", "wait", "--timeout", "1", "--interval", "1", check=False)
         self.assertEqual(1, waited.returncode, waited.stdout)
         top = self.theseus("top", "--once").stdout
         self.assertIn("gateway claude-code", top)

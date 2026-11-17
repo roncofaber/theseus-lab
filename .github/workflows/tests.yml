@@ -20,6 +20,10 @@ jobs:
       - name: Install system tools
         run: sudo apt-get update && sudo apt-get install -y jq shellcheck tmux
       - name: Install package
-        run: python -m pip install "setuptools>=77" wheel && python -m pip install -e .
-      - name: Run tests
-        run: python -m unittest discover -s tests -v
+        run: python -m pip install "setuptools>=77" wheel && python -m pip install -e ".[dev]"
+      - name: Run timing tests serially
+        run: python -m pytest -rs tests/test_store_benchmark.py "tests/test_tui.py::TopPolishTests::test_refresh_cost_with_50_agents_500_events_and_200_tasks"
+      - name: Run tests in parallel
+        run: >-
+          python -m pytest -n auto -rs --durations 15 --ignore=tests/test_store_benchmark.py
+          --deselect "tests/test_tui.py::TopPolishTests::test_refresh_cost_with_50_agents_500_events_and_200_tasks"

@@ -67,6 +67,7 @@ class WorkerSandbox(Sandbox):
 class DispatchTests(WorkerSandbox):
     def test_cborg_dispatch_launches_the_worker_and_wait_reports_its_handoff(self):
         self.fake("claude", FAKE_WORKER)
+        self.env["FAKE_SLEEP"] = "0.5"
         self.write("theseus.local.toml", '[paths]\noriginal = ["/srv/original-app"]\n')
         out = self.theseus("dispatch", TASK).stdout
         self.assertIn("launched", out)

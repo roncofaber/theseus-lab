@@ -274,9 +274,10 @@ def load(start=None, root=None):
                 data = tomllib.loads(path.read_text())
             except tomllib.TOMLDecodeError as error:
                 raise ConfigError(f"{path}: {error}") from error
-        unknown = set(data) - set(DEFAULTS)
+        unknown = sorted(set(data) - set(DEFAULTS))
         if unknown:
-            raise ConfigError(f"{path}: unknown configuration sections: {', '.join(sorted(unknown))}")
+            hostconfig.warn_once(f"{path}: ignoring unknown configuration sections: {', '.join(unknown)}")
+            data = {key: value for key, value in data.items() if key not in unknown}
         layers.append((label, path, data))
     env = {}
     for variable, (section, key) in ENV_OVERRIDES.items():
@@ -287,6 +288,21 @@ def load(start=None, root=None):
     for _, _, data in layers:
         raw = merge(raw, data)
     return Config(root, raw, layers)
+
+
+def unknown_sections(root):
+    """(file, sections) for each project file of root with top-level sections theseus does not know."""
+    found = []
+    for name in (CONFIG_NAME, LOCAL_NAME):
+        path = Path(root) / name
+        if path.is_file():
+            try:
+                unknown = sorted(set(tomllib.loads(path.read_text())) - set(DEFAULTS))
+            except tomllib.TOMLDecodeError:
+                continue
+            if unknown:
+                found.append((path, unknown))
+    return found
 
 
 def lookup(table, dotted):

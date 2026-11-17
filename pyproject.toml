@@ -26,6 +26,9 @@ classifiers = [
     "Topic :: Software Development :: Disassemblers",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-xdist>=3.5"]
+
 [project.urls]
 Homepage = "https://github.com/roncofaber/theseus-lab"
 Documentation = "https://github.com/roncofaber/theseus-lab/tree/main/docs"
@@ -40,3 +43,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 theseus = ["templates/**/*", "templates/**/.*", "scripts/*", "skills/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
