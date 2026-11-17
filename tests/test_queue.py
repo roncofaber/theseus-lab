@@ -222,9 +222,13 @@ class QueueTests(Sandbox):
         self.add("second-task")
         self.theseus("queue", "tick")
         flat = " ".join(self.theseus("top", "--once").stdout.split())
-        self.assertIn("POSTED", flat)
+        self.assertIn("WHO MAY TAKE IT", flat)
         self.assertRegex(flat, r"1 worker-a %1 working visible-task - 0m")
-        self.assertRegex(flat, r"ready second-task - 0m \d\d:\d\d next free agent")
+        self.assertRegex(flat, r"ready second-task - 0m worker-a next free agent")
+        wide = " ".join(self.theseus("top", "--once", env={**self.env, "COLUMNS": "140"}).stdout.split())
+        self.assertRegex(wide, r"ready second-task - 0m \d\d:\d\d worker-a next free agent")
+        sized = self.theseus("top", "--once", env={**self.env, "COLUMNS": "120", "LINES": "70"}).stdout
+        self.assertEqual(70, len(sized.splitlines()))
         self.assertIn("after compact", flat)
         self.assertRegex(flat, r"M1 \S+ 0/2 done")
         narrow = self.theseus("top", "--once", env={**self.env, "COLUMNS": "84"}).stdout

@@ -29,7 +29,8 @@ KIND_COLOR = {"delivered": MAGENTA, "partial": YELLOW, "blocked": RED, "stalled"
               "nudged": YELLOW, "compacted": BLUE, "cleared": CYAN, "merged": CYAN, "completed": GREEN,
               "reopened": YELLOW, "released": YELLOW}
 QUEUE_COLOR = {"review": MAGENTA, "merged": CYAN, "working": GREEN, "ready": YELLOW, "blocked": DIM, "held": DIM}
-ROWS = {"events": 12}
+ROWS = {"actions": 2, "waiting": 5, "events": 10}
+ROOM_COLOR = {"dirty": RED, "clean": GREEN}
 SLOW, VERY_SLOW, QUIET_WARN = 3600, 7200, 20 * 60
 _CPU_PREVIOUS = {}
 
@@ -272,6 +273,36 @@ def other_workers(conf, states):
     return workers
 
 
+def eligibility(conf, states):
+    """task id -> [(agent name, reset)] for every pending task: which registered agents may take it and the context
+    reset they would need first (None, 'compact' or 'clear')."""
+    infos = {a["name"]: a for a in states}
+    registered = [a for a in ag.agents(conf) if a.get("enabled", True)]
+    result = {}
+    for task in t.Queue(conf).load().get("tasks", []):
+        if task.get("status") != "pending":
+            continue
+        allowed = []
+        for agent in registered:
+            ok, reset = wq.fits(conf, agent, task, infos.get(agent["name"], {}))
+            if ok:
+                allowed.append((agent["name"], reset))
+        result[task["id"]] = allowed
+    return result
+
+
+def short_names(names):
+    """Drop the prefix every agent name shares (lab-worker-1 -> worker-1 when all start with lab-)."""
+    names = list(names)
+    if len(names) < 2:
+        return {n: n for n in names}
+    prefix = os.path.commonprefix(names)
+    prefix = prefix[: prefix.rfind("-") + 1] if "-" in prefix else ""
+    if prefix and all(n[len(prefix):].isdigit() for n in names):
+        prefix = prefix[: prefix[:-1].rfind("-") + 1]
+    return {n: n[len(prefix):] or n for n in names}
+
+
 def snapshot(conf, sample=False):
     states = ag.states(conf)
     if sample:
@@ -282,6 +313,7 @@ def snapshot(conf, sample=False):
     return {
         "project": conf.name, "milestone": t.Queue(conf).milestone(), "time": datetime.now(timezone.utc).isoformat(),
         "host": host_state(), "agents": states, "workers": other_workers(conf, states),
+        "eligible": eligibility(conf, states),
         "queue": {k: [x["id"] for x in v] for k, v in summary.items()},
         "rooms": {x["id"]: x.get("room") for v in summary.values() for x in v},
         "blocked": {x["id"]: x["reasons"] for x in summary["blocked"]},
@@ -443,10 +475,8 @@ def render(state, width=120, height=None, ui=None):
     clock = f" {DIM}{socket.gethostname()} {datetime.now():%a %H:%M:%S}{R} {DIM}│{R}" if medium else ""
     frame.top(left, clock + status)
 
-    if found:
-        frame.rule("ACTION NEEDED")
-        for line in found:
-            frame.row(line)
+    frame.rule("ACTION NEEDED" if found else "STATUS", f"{YELLOW}{B}{len(found)}{R}" if found else "")
+    frame.fixed(found, ROWS["actions"], f"{GREEN}●{R} {DIM}nothing needs the coordinator{R}")
 
     host = state["host"]
     mem_used = host["memTotal"] - host["memAvailable"]
@@ -503,7 +533,7 @@ def render(state, width=120, height=None, ui=None):
         on_task = age(times.get(agent.get("task"), (None, None))[1]) if agent.get("task") else None
         key = str(number) if number <= 9 else " "
         line = (f"{color}●{R} {DIM}{key}{R} {B}{cut(agent['name'], 16):<16}{R} {agent['pane']:<6} {color}{agent['state']:<10}{R} "
-                f"{cut(agent.get('task') or '-', task_w):<{task_w}} {agent.get('room') or '-':<6} "
+                f"{B}{cut(agent.get('task') or '-', task_w):<{task_w}}{R} {ROOM_COLOR.get(agent.get('room'), '')}{agent.get('room') or '-':<6}{R} "
                 f"{column(aged(on_task, SLOW, VERY_SLOW), 8)} {column(aged(quiet_seconds, QUIET_WARN, 2 * QUIET_WARN), 6)} ")
         if wide:
             line += f"{duration(agent.get('uptime')):<7} "
@@ -515,16 +545,45 @@ def render(state, width=120, height=None, ui=None):
     for worker in state.get("workers", []):
         on_task = age(times.get(worker["task"], (None, None))[1])
         rows.append(f"{CYAN}◆{R}   {B}{cut(worker['name'], 16):<16}{R} {'-':<6} {CYAN}{worker['kind']:<10}{R} "
-                    f"{cut(worker['task'], task_w):<{task_w}} {worker.get('room') or '-':<6} "
+                    f"{B}{cut(worker['task'], task_w):<{task_w}}{R} {ROOM_COLOR.get(worker.get('room'), '')}{worker.get('room') or '-':<6}{R} "
                     f"{column(aged(on_task, SLOW, VERY_SLOW), 8)} {DIM}{cut(worker.get('model') or '', 20)}{R}")
     frame.fixed(rows, max(len(rows), 1), "no registered agents: theseus agents add NAME PANE")
 
     queue = state["queue"]
-    counts = (f"{GREEN}working {len(queue['in_progress'])}{R} {DIM}·{R} {MAGENTA}review {len(queue['review'])}{R} {DIM}·{R} "
-              f"{CYAN}merged {len(queue['merged'])}{R} {DIM}·{R} {YELLOW}ready {len(queue['ready'])}{R} {DIM}·{R} "
+    counts = (f"{GREEN}working {B}{len(queue['in_progress'])}{R} {DIM}·{R} {MAGENTA}review {B}{len(queue['review'])}{R} {DIM}·{R} "
+              f"{CYAN}merged {B}{len(queue['merged'])}{R} {DIM}·{R} {YELLOW}ready {B}{len(queue['ready'])}{R} {DIM}·{R} "
               f"{DIM}blocked {len(queue['blocked'])} · held {len(queue['held'])}{R}")
+    shorts = short_names(a["name"] for a in state["agents"])
+
+    def who(task_id):
+        allowed = state.get("eligible", {}).get(task_id)
+        if allowed is None:
+            return ""
+        if not allowed:
+            return f"{RED}no agent may take it{R}"
+        parts = [f"{GREEN}{shorts.get(n, n)}{R}" if reset != "clear" else f"{YELLOW}{shorts.get(n, n)}*{R}"
+                 for n, reset in allowed]
+        text = " ".join(parts)
+        if visible(text) <= who_width:
+            return text
+        clears = sum(1 for _, reset in allowed if reset == "clear")
+        everyone = len(allowed) == len([a for a in state["agents"] if a.get("enabled", True)])
+        summary = f"{GREEN}{'any agent' if everyone else f'{len(allowed)} agents'}{R}"
+        return summary + (f" {YELLOW}({clears} after clear){R}" if clears else "")
+
+    # Fixed heights per terminal size, never per content, so rows do not jump between refreshes.
+    footer = 3
+    if height is None:
+        waiting_rows, events_rows = ROWS["waiting"], ROWS["events"]
+    else:
+        spare = height - len(frame.lines) - 8 - footer
+        waiting_rows = max(ROWS["waiting"], min(12, spare // 3))
+        events_rows = max(ROWS["events"], spare - waiting_rows)
     frame.rule("WAITING", counts)
-    frame.header(f"{'STATUS':<8} {'TASK':<34} {'ROOM':<6} {'FOR':<7} " + (f"{'POSTED':<7} " if medium else "") + "NEXT STEP")
+    who_width = 34 if wide else 26
+    who_head = f"{'WHO MAY TAKE IT':<{who_width}} " if medium else ""
+    frame.header(f"{'STATUS':<8} {'TASK':<30} {'ROOM':<6} {'FOR':<7} " + (f"{'POSTED':<7} " if wide else "") + who_head
+                 + "NEXT STEP")
     rows = []
     for key, label in (("review", "review"), ("merged", "merged"), ("ready", "ready"), ("blocked", "blocked"), ("held", "held")):
         color = QUEUE_COLOR[label]
@@ -535,17 +594,16 @@ def render(state, width=120, height=None, ui=None):
             posted, since = times.get(task_id, (None, None))
             waiting = age(since)
             shown = aged(waiting, SLOW, VERY_SLOW) if key in ("review", "merged") else duration(waiting)
-            rows.append(f"{color}{label:<8}{R} {cut(task_id, 34):<34} {state['rooms'].get(task_id) or '-':<6} {column(shown, 7)} "
-                        + (f"{posted_label(posted):<7} " if medium else "") + f"{DIM}{detail}{R}")
-    if rows:
-        frame.fixed(rows, len(rows))
-    elif queue["in_progress"]:
-        frame.row(f"{DIM}nothing waiting; {len(queue['in_progress'])} task(s) in progress (see AGENTS){R}")
-    else:
-        frame.row(f"{DIM}queue empty: write task records (theseus tasks add){R}")
+            room = state["rooms"].get(task_id) or "-"
+            bold = B if key in ("review", "merged", "ready") else ""
+            rows.append(f"{color}{bold}{label:<8}{R} {bold}{cut(task_id, 30):<30}{R} {ROOM_COLOR.get(room, '')}{room:<6}{R} "
+                        f"{column(shown, 7)} " + (f"{DIM}{posted_label(posted):<7}{R} " if wide else "")
+                        + (column(who(task_id), who_width) + " " if medium else "") + f"{DIM}{detail}{R}")
+    if not rows:
+        rows = [f"{DIM}nothing waiting; {len(queue['in_progress'])} task(s) in progress (see AGENTS){R}" if queue["in_progress"]
+                else f"{DIM}queue empty: write task records (theseus tasks add){R}"]
+    frame.fixed(rows, waiting_rows)
 
-    footer = 2
-    events_rows = ROWS["events"] if height is None else max(4, height - len(frame.lines) - 4 - footer)
     frame.rule("EVENTS", f"{DIM}newest first{R}")
     frame.header(f"{'TIME':<8} {'KIND':<10} {'AGENT':<18} {'TASK':<30} DETAIL")
     rows, last_day = [], day_label(datetime.now(timezone.utc).isoformat())
@@ -566,11 +624,13 @@ def render(state, width=120, height=None, ui=None):
             detail = re.sub(r";?\s*review and merge: theseus merge \S+", "", detail).strip() or "ready to merge"
         if record.get("reset"):
             detail = f"after {record['reset']} · {detail}"
-        rows.append(f"{local_clock(record['time'])} {color}{record['kind']:<10}{R} {cut(record['agent'] or '-', 18):<18} "
-                    f"{cut(record['task'] or '-', 30):<30} {DIM}{cut(detail, width - 75)}{R}")
+        weight = B if record["kind"] in ("delivered", "partial", "blocked", "stalled", "error", "completed") else ""
+        rows.append(f"{DIM}{local_clock(record['time'])}{R} {color}{weight}{record['kind']:<10}{R} "
+                    f"{cut(record['agent'] or '-', 18):<18} "
+                    f"{weight}{cut(record['task'] or '-', 30):<30}{R} {DIM}{cut(detail, width - 75)}{R}")
     frame.fixed(rows[:events_rows], events_rows, "no events yet")
     frame.row()
-    keys = "q quit · p pause/resume queue · space freeze"
+    keys = "q quit · p pause/resume queue · space freeze · * = agent needs a context clear first"
     if state["agents"]:
         keys += f" · 1-{min(len(state['agents']), 9)} jump to agent pane"
     message = ui.get("message")
@@ -622,7 +682,9 @@ def main(conf, interval=5, once=False, as_json=False):
         print(json.dumps(snapshot(conf, sample=True), indent=2, default=str))
         return 0
     if once or not sys.stdout.isatty():
-        frame = render(snapshot(conf, sample=True), shutil.get_terminal_size((120, 50)).columns)
+        terminal = shutil.get_terminal_size((120, 50))
+        sized = sys.stdout.isatty() or "LINES" in os.environ
+        frame = render(snapshot(conf, sample=True), terminal.columns, terminal.lines if sized else None)
         print(frame if sys.stdout.isatty() else ANSI.sub("", frame))
         return 0
     import select
