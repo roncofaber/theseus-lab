@@ -103,7 +103,7 @@ class DispatchTests(WorkerSandbox):
         self.assertIn("subagent", self.theseus("status").stdout)
 
     def test_capacity_is_enforced(self):
-        self.replace_config("capacity = 2", "capacity = 0")
+        self.set_config("[workers.claude-code]\ncapacity = 0\n")
         self.git("commit", "-q", "-am", "no capacity")
         self.fake("claude", FAKE_WORKER)
         refused = self.theseus("dispatch", TASK, check=False)

@@ -36,15 +36,15 @@ heavy_runs = 2
 # key), codex, opencode, gemini-cli, claude-subagent (launched by a Claude Code coordinator). A [workers.<name>]
 # section adjusts a profile (model, capacity, permission_mode, command, env, interactive); a section with another name
 # sets preset = "<profile>" to define a variant. A profile defined in the host config.toml can be named here too; a
-# section here with the same name overrides only the keys it sets. Remove default to use the host's [defaults].
-default = "claude-code"
+# section here with the same name overrides only the keys it sets. Unset keys come from the host config
+# (~/.config/theseus/config.toml [defaults] and [workers.*]), then from the package (claude-code, capacity 2).
+# default = "claude-code"
 retries = 3
 
-[workers.claude-code]
-# Empty model: the CLI's default. Keep capacity within your plan's rate limits.
-model = ""
-capacity = 2
-permission_mode = "auto"
+# [workers.claude-code]
+# capacity = 2
+# model = ""
+# permission_mode = "auto"
 
 [instances]
 # Persistent worker sessions in tmux panes, for example:

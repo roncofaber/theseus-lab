@@ -266,7 +266,7 @@ class QueueTests(Sandbox):
     def test_a_full_shared_pool_holds_assignment_until_a_slot_frees(self):
         (self.tmp / "pools.toml").write_text('[pools.gw]\nmax = 1\npriority = ["demo-port", "other"]\n')
         path = self.project / "theseus.toml"
-        path.write_text(path.read_text().replace('[workers.claude-code]\n', '[workers.claude-code]\npool = "gw"\n', 1))
+        path.write_text(path.read_text() + '\n[workers.claude-code]\npool = "gw"\n')
         self.git("commit", "-q", "-am", "pool")
         self.theseus("pool", "hold", "gw", "x", "--project", "other", "--task", "t")
         self.add("pooled-task")
@@ -282,7 +282,7 @@ class QueueTests(Sandbox):
         from theseus import config as cfg, pools, workqueue as wq
         (self.tmp / "pools.toml").write_text('[pools.gw]\nmax = 1\n')
         path = self.project / "theseus.toml"
-        path.write_text(path.read_text().replace('[workers.claude-code]\n', '[workers.claude-code]\npool = "gw"\n', 1))
+        path.write_text(path.read_text() + '\n[workers.claude-code]\npool = "gw"\n')
         self.git("commit", "-q", "-am", "pool")
         self.add("doomed-task")
         os.environ.update({k: self.env[k] for k in ("PATH", "FAKE_STATE", "FAKE_PANES", "THESEUS_COMPACT_POLL",

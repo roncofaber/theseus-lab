@@ -187,7 +187,7 @@ class TaskRuleTests(Sandbox):
         self.assertIn("outside the current milestone", "\n".join(rules.task_record_problems(self.conf)))
         self.mutate(lambda d: d.update(currentMilestone="M1"))
         self.assertEqual([], rules.task_record_problems(self.conf))
-        self.replace_config("capacity = 2", "capacity = 0")
+        self.set_config("[workers.claude-code]\ncapacity = 0\n")
         self.assertIn("exceed workers.claude-code.capacity", "\n".join(rules.task_record_problems(cfg.load(root=self.project))))
 
     def test_evidence_levels_are_separate(self):
