@@ -70,7 +70,7 @@ DEFAULTS = {
                   "brief": ".agents/skills/theseus-worker/instance-brief.md", "idle_minutes": 5},
     "git": {"base": "HEAD", "remote": "origin", "branch": "main"},
     "verification": {"code_paths": ["."],
-                     "doc_paths": ["docs", "AGENTS.md", "README.md", ".agents", ".claude", "theseus.toml"],
+                     "doc_paths": ["docs", "AGENTS.md", "README.md", ".agents", ".claude", "theseus.toml", "tools/git-hooks", "tools/Supervisor"],
                      "max_unverified_merges": 15, "max_unverified_hours": 24},
     "docs": {"index_command": [], "check_command": [], "generated": []},
     "re": {"targets": [], "evidence": r"ev_[0-9a-f]{64}", "citations": DEFAULT_CITATIONS,

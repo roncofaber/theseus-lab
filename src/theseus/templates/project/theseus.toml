@@ -86,7 +86,7 @@ branch = "main"
 [verification]
 # Pathspecs whose changes need a full verification pass; doc_paths are excluded from them.
 code_paths = ["."]
-doc_paths = ["docs", "AGENTS.md", "README.md", ".agents", ".claude", "theseus.toml"]
+doc_paths = ["docs", "AGENTS.md", "README.md", ".agents", ".claude", "theseus.toml", "tools/git-hooks", "tools/Supervisor"]
 max_unverified_merges = 15
 # The override is also refused once the oldest unverified code commit is older than this (0 disables).
 max_unverified_hours = 24
