@@ -58,7 +58,7 @@ theseus agents add worker-1 %3 --profile claude-code
 
 `theseus queue wait` exits as soon as something needs the coordinator (a delivery, a stall, an error), so the coordinator can run it in the background and react. `theseus queue pause|resume` stops and restarts assignment, and a task with `hold` set is never assigned.
 
-**Dashboard.** `theseus top` shows:
+**Dashboard.** On a terminal `theseus top` opens an interactive dashboard of every project on the host; it also works outside a project. Any command that loads a project's configuration registers it in `~/.local/share/theseus/projects.json` (`theseus projects` lists them). The Host tab shows each project's milestone progress, agents working, waiting counts and last event, the shared pools with their holders and claims, and the merged events. Each project tab shows agents, waiting tasks, events and an activity panel (events per 15 minutes over 12 hours, one sparkline per kind group). Keys: `/` filters by task, agent, kind, room or status (Esc clears), Tab or `1` to `9` switch tabs, `r` refreshes, `p` pauses or resumes the current project's queue, Enter on an agent jumps your tmux client to its pane, `q` quits. `theseus top --interval SECONDS` sets the refresh (default 5), `--host --once` prints a plain host summary, and `--once` or `--json` print one project frame as before. The project view shows:
 - the milestone's progress;
 - anything that needs attention;
 - host load;
@@ -67,7 +67,7 @@ theseus agents add worker-1 %3 --profile claude-code
 - tasks waiting for review, verification or an agent;
 - recent events.
 
-Durations turn yellow and then red as they grow. Status changes linger for about 90 seconds so they are easy to follow: a task that just started stays in the waiting list as "started → agent", and an agent's row notes a recent delivery, merge, completion or context reset. Tasks with a priority (`theseus tasks add --priority N`, `theseus tasks priority ID N`) show a ▲N marker and are listed, and assigned, before others; equal priorities keep task-file order. Keys: `q` quits, `p` pauses or resumes the queue, space freezes the display, and `1` to `9` switches your tmux client to that agent's pane. `--once` prints a single frame and `--json` prints machine-readable output.
+Durations turn yellow and then red as they grow. Status changes linger for about 90 seconds so they are easy to follow: a task that just started stays in the waiting list as "started → agent", and an agent's row notes a recent delivery, merge, completion or context reset. Tasks with a priority (`theseus tasks add --priority N`, `theseus tasks priority ID N`) show a ▲N marker and are listed, and assigned, before others; equal priorities keep task-file order. `--once` prints a single frame and `--json` prints machine-readable output.
 
 ## Verification and pushing
 

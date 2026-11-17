@@ -106,7 +106,7 @@ Fix every FAIL; WARN rows are optional features. For reverse engineering, instal
 Pick one mode, or mix them:
 
 - **Headless one-shot workers:** `theseus dispatch TASK [--provider PROFILE]`, then keep `theseus wait` running; `theseus followup NAME MESSAGE` resumes a stopped worker, `theseus stop NAME` interrupts it.
-- **Persistent workers in tmux panes** (needs tmux): start the agent CLI in a pane, register it with `theseus agents add NAME PANE --profile PROFILE`, then `theseus queue run` (or `theseus queue wait` from the coordinator) assigns ready tasks, resets context between tasks (compact; clear when moving from dirty to clean work) and reports deliveries. `theseus top` is the live dashboard.
+- **Persistent workers in tmux panes** (needs tmux): start the agent CLI in a pane, register it with `theseus agents add NAME PANE --profile PROFILE`, then `theseus queue run` (or `theseus queue wait` from the coordinator) assigns ready tasks, resets context between tasks (compact; clear when moving from dirty to clean work) and reports deliveries. `theseus top` is the interactive dashboard of every project on the host (`--once` for a plain frame).
 - **Subagents:** with `claude-subagent` and a capacity, `theseus dispatch TASK --provider claude-subagent` prepares the worktree and prompt, and the coordinator launches the subagent.
 
 Set `[instances] coordinator` to the coordinator session's name when the agent supports peer messaging (Claude Code); otherwise workers reply in their pane and the queue detects the handoff file.

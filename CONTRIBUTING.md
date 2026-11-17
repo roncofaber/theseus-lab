@@ -21,7 +21,7 @@ uv tool install --editable .
 
 ## Guidelines
 
-- The package uses only the Python standard library. Please don't add runtime dependencies.
+- Textual is the only runtime dependency, used for the interactive dashboard (`theseus top`); everything else uses the Python standard library. Please don't add other runtime dependencies.
 - Process supervision and tmux handling live in `src/theseus/scripts/` as Bash, and must pass `shellcheck`.
 - Templates for new projects are in `src/theseus/templates/project/`. A path segment starting with `dot-` becomes `.` when a project is scaffolded.
 - Keep the package neutral. No company, site or vendor-specific settings in the package, the templates or the docs; those belong in a project's `theseus.toml` as a profile variant. The test suite checks this.

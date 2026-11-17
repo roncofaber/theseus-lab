@@ -16,7 +16,7 @@ You give the project a legacy program: binaries, installers, data files, maybe t
 - **Verification gate.** Builds and tests run on a clean checkout; pushing unverified code is refused.
 - **Reverse-engineering support.** Decompile each binary once, index it and query it; cite addresses and captures in reports; run the original in a VM or compatibility layer.
 - **Clean-room mode.** Separate the agents that read original code from the ones that write the new implementation.
-- **Live dashboard.** `theseus top` shows agents, tasks, verification state and host load.
+- **Live dashboard.** `theseus top` is an interactive terminal dashboard of every project on the host: agents, tasks, pools, events, verification state and load (`--once` and `--json` for scripts).
 
 ## How it works
 

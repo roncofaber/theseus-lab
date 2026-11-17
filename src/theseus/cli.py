@@ -13,9 +13,12 @@ from . import config as cfg
 
 def load():
     try:
-        return cfg.load()
+        conf = cfg.load()
     except cfg.ConfigError as error:
         sys.exit(f"theseus: {error}")
+    from . import registry
+    registry.record(conf)
+    return conf
 
 
 def script(name):
@@ -463,7 +466,36 @@ def cmd_queue(args):
 
 def cmd_top(args):
     from . import top
-    sys.exit(top.main(load(), interval=args.interval, once=args.once, as_json=args.json))
+    interval = args.every or args.interval
+    interactive = sys.stdout.isatty() and not args.once and not args.json
+    try:
+        conf = cfg.load()
+    except cfg.ConfigError:
+        conf = None
+    if conf is not None:
+        from . import registry
+        registry.record(conf)
+    if interactive:
+        from .tui.app import run
+        sys.exit(run(interval=interval, current=conf.root if conf and not args.host else None, roots=[conf.root] if conf else []))
+    if args.host or conf is None:
+        from . import host
+        state = host.snapshot([conf.root] if conf else [])
+        print(json.dumps(state, indent=2, default=str) if args.json else host.render_host(state))
+        sys.exit(0)
+    sys.exit(top.main(conf, interval=interval, once=args.once, as_json=args.json))
+
+
+def cmd_projects(args):
+    from . import registry
+    found = registry.entries()
+    if args.json:
+        print(json.dumps(found, indent=2))
+        return
+    for entry in found:
+        print(f"{entry.get('name') or '-':<24} {entry['root']}")
+    if not found:
+        print("no projects registered yet: run any theseus command inside a project")
 
 
 def cmd_cleanup(args):
@@ -714,11 +746,16 @@ def build_parser():
     p.add_argument("--no-assign", action="store_true", help="tick: report deliveries and stalls but assign nothing")
     p.add_argument("--no-drive", action="store_true", help="wait: only watch events, do not run ticks")
     p.set_defaults(func=guarded(cmd_queue))
-    p = sub.add_parser("top", help="live dashboard of agents, queue, reviews, repository and verification")
-    p.add_argument("interval", nargs="?", type=int, default=5)
-    p.add_argument("--once", action="store_true")
-    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("top", help="interactive dashboard of every project on this host: agents, queue, pools, events")
+    p.add_argument("interval", nargs="?", type=int, default=5, help="refresh seconds (default 5)")
+    p.add_argument("--interval", dest="every", type=float, help="refresh seconds, fractions allowed")
+    p.add_argument("--once", action="store_true", help="print one plain frame and exit")
+    p.add_argument("--json", action="store_true", help="print the snapshot as JSON and exit")
+    p.add_argument("--host", action="store_true", help="the host-wide view instead of the current project")
     p.set_defaults(func=cmd_top)
+    p = sub.add_parser("projects", help="list the projects registered on this host")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_projects)
 
     p = sub.add_parser("cleanup", help="reclaim disk from retired worktrees and old scratch (dry run by default)")
     p.add_argument("--apply", action="store_true")

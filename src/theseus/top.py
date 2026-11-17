@@ -1,8 +1,8 @@
-"""theseus top: a live dashboard of the host, the agents, the queue, the repository and recent events.
+"""theseus top: the data and plain rendering behind the dashboard of the host, the agents, the queue, the repository and
+recent events.
 
-`theseus top [SECONDS]` refreshes in place; `--once` prints one frame (colors stripped when not a terminal); `--json`
-prints the snapshot. Sections are sized to their content and the events list takes the remaining height. Keys: q quit,
-p pause or resume the queue, space freeze, 1-9 switch tmux to that agent's pane.
+On a terminal `theseus top` runs the interactive Textual dashboard (theseus.tui); `--once` prints one frame of this
+module's renderer (colors stripped when not a terminal) and `--json` prints the snapshot.
 """
 import json
 import os
@@ -131,10 +131,10 @@ def agent_processes(states):
         info["procs"] = len(pids)
         info["uptime"] = now - (boot + table[agent_pids[0]][3] / ticks)
         total = sum(table[p][2] for p in pids)
-        previous = _CPU_PREVIOUS.get(info["name"])
+        previous = _CPU_PREVIOUS.get((info["name"], info["pane"]))
         if previous and now > previous[1]:
             info["cpu"] = max(0.0, (total - previous[0]) / ticks / (now - previous[1]) * 100)
-        _CPU_PREVIOUS[info["name"]] = (total, now)
+        _CPU_PREVIOUS[(info["name"], info["pane"])] = (total, now)
     return states
 
 
@@ -314,7 +314,7 @@ def recent(state, kinds, seconds=AFTERGLOW):
     return found
 
 
-def snapshot(conf, sample=False):
+def snapshot(conf, sample=False, host=None):
     states = ag.states(conf)
     if sample:
         agent_processes(states)
@@ -323,7 +323,7 @@ def snapshot(conf, sample=False):
     summary = wq.summary(conf)
     return {
         "project": conf.name, "milestone": t.Queue(conf).milestone(), "time": datetime.now(timezone.utc).isoformat(),
-        "host": host_state(), "agents": states, "workers": other_workers(conf, states),
+        "host": host if host is not None else host_state(), "agents": states, "workers": other_workers(conf, states),
         "eligible": eligibility(conf, states), "pools": pool_states(conf),
         "queue": {k: [x["id"] for x in v] for k, v in summary.items()},
         "rooms": {x["id"]: x.get("room") for v in summary.values() for x in v},
@@ -470,6 +470,82 @@ def day_label(stamp):
         return None
 
 
+REASON_COLOR = {"review": MAGENTA, "merged": CYAN, "held": DIM, "blocked": DIM, "paused": YELLOW, "none": RED,
+                "full": YELLOW, "yield": YELLOW, "next": GREEN, "busy": YELLOW}
+BLOCK_WORDS = {"waits": "waiting for", "missing": "unknown dependency", "milestone": "outside the milestone, in"}
+
+
+def waiting_reason(state, key, task_id):
+    """(kind, text) saying why a waiting task has not started; kind indexes REASON_COLOR."""
+    if key == "review":
+        return "review", "delivered, awaiting merge"
+    if key == "merged":
+        return "merged", "merged, awaiting verification"
+    if key == "held":
+        return "held", "on hold"
+    if key == "blocked":
+        parts = []
+        for item in state["blocked"].get(task_id, []):
+            kind, _, value = item.partition(":")
+            parts.append(f"{BLOCK_WORDS.get(kind, kind)} {value}".strip())
+        return "blocked", "; ".join(parts) or "blocked"
+    if state["paused"]:
+        return "paused", "queue paused"
+    allowed = state.get("eligible", {}).get(task_id, [])
+    if not allowed:
+        room = state["rooms"].get(task_id)
+        return "none", f"no eligible agent{f' for the {room} room' if room else ''}"
+    free = {a["name"] for a in state["agents"] if a["state"] == "free"}
+    if [n for n, _ in allowed if n in free]:
+        for pool in state.get("pools", []):
+            if pool["max"] and pool["active"] >= pool["max"]:
+                return "full", f"pool {pool['pool']} full ({pool['active']}/{pool['max']})"
+            ahead = pool["priority"][: pool["priority"].index(state["project"])] if state["project"] in pool["priority"] else pool["priority"]
+            waiting = [p for p in ahead if p in pool["claims"]]
+            if waiting:
+                return "yield", f"yielding to {waiting[0]}"
+        return "next", "assigning on the next tick"
+    return "busy", f"eligible agents busy ({len(allowed)})"
+
+
+def waiting_entries(state):
+    """Every waiting task in display order: review, merged, just started, ready, blocked, held."""
+    queue, times, priorities = state["queue"], state.get("times", {}), state.get("priorities", {})
+    entries = []
+    started = [(r, e) for r, e in recent(state, {"assigned"}) if r.get("task") in queue["in_progress"]]
+    for key in ("review", "merged", "started", "ready", "blocked", "held"):
+        if key == "started":
+            for record, elapsed in started:
+                entries.append({"key": key, "label": "started", "task": record["task"], "shown_id": record["task"],
+                                "room": state["rooms"].get(record["task"]), "since": elapsed, "elapsed": elapsed,
+                                "posted": None, "agent": record.get("agent"), "reason_kind": "next", "reason": ""})
+            continue
+        ids = queue[key]
+        if key in ("ready", "blocked", "held"):
+            ids = sorted(ids, key=lambda i: -priorities.get(i, 0))
+        for task_id in ids:
+            posted, since = times.get(task_id, (None, None))
+            level = priorities.get(task_id, 0)
+            kind, text = waiting_reason(state, key, task_id)
+            entries.append({"key": key, "label": key, "task": task_id, "room": state["rooms"].get(task_id),
+                            "shown_id": (f"▲{level} " if level > 0 else (f"▼{-level} " if level < 0 else "")) + task_id,
+                            "since": age(since), "posted": posted, "agent": None, "reason_kind": kind, "reason": text})
+    return entries
+
+
+def event_detail(record):
+    detail = str(record.get("detail") or "")
+    if record["kind"] == "assigned" and ":" in detail and "/" in detail:
+        detail = "worktree " + Path(detail.split(":", 1)[1].strip()).name
+    elif detail.startswith("/"):
+        detail = "worktree " + Path(detail).name
+    if record["kind"] in ("delivered", "partial", "blocked"):
+        detail = re.sub(r";?\s*review and merge: theseus merge \S+", "", detail).strip() or "ready to merge"
+    if record.get("reset"):
+        detail = f"after {record['reset']} · {detail}"
+    return detail
+
+
 def render(state, width=120, height=None, ui=None):
     ui = ui or {}
     width = max(80, min(width, 180))
@@ -577,40 +653,6 @@ def render(state, width=120, height=None, ui=None):
     counts = (f"{GREEN}working {B}{len(queue['in_progress'])}{R} {DIM}·{R} {MAGENTA}review {B}{len(queue['review'])}{R} {DIM}·{R} "
               f"{CYAN}merged {B}{len(queue['merged'])}{R} {DIM}·{R} {YELLOW}ready {B}{len(queue['ready'])}{R} {DIM}·{R} "
               f"{DIM}blocked {len(queue['blocked'])} · held {len(queue['held'])}{R}")
-    free = {a["name"] for a in state["agents"] if a["state"] == "free"}
-
-    def reason(key, task_id):
-        if key == "review":
-            return f"{MAGENTA}delivered, awaiting merge{R}"
-        if key == "merged":
-            return f"{CYAN}merged, awaiting verification{R}"
-        if key == "held":
-            return f"{DIM}on hold{R}"
-        if key == "blocked":
-            words = {"waits": "waiting for", "missing": "unknown dependency", "milestone": "outside the milestone, in"}
-            parts = []
-            for item in state["blocked"].get(task_id, []):
-                kind, _, value = item.partition(":")
-                parts.append(f"{words.get(kind, kind)} {value}".strip())
-            return f"{DIM}{'; '.join(parts) or 'blocked'}{R}"
-        if state["paused"]:
-            return f"{YELLOW}queue paused{R}"
-        allowed = state.get("eligible", {}).get(task_id, [])
-        if not allowed:
-            room = state["rooms"].get(task_id)
-            return f"{RED}no eligible agent{f' for the {room} room' if room else ''}{R}"
-        idle = [n for n, _ in allowed if n in free]
-        if idle:
-            for pool in state.get("pools", []):
-                if pool["max"] and pool["active"] >= pool["max"]:
-                    return f"{YELLOW}pool {pool['pool']} full ({pool['active']}/{pool['max']}){R}"
-                ahead = pool["priority"][: pool["priority"].index(state["project"])] if state["project"] in pool["priority"] else pool["priority"]
-                waiting = [p for p in ahead if p in pool["claims"]]
-                if waiting:
-                    return f"{YELLOW}yielding to {waiting[0]}{R}"
-            return f"{GREEN}assigning on the next tick{R}"
-        return f"{YELLOW}eligible agents busy ({len(allowed)}){R}"
-
     # Fixed heights per terminal size, never per content, so rows do not jump between refreshes.
     footer = 3
     if height is None:
@@ -622,32 +664,22 @@ def render(state, width=120, height=None, ui=None):
     frame.rule("WAITING", counts)
     frame.header(f"{'STATUS':<8} {'TASK':<34} {'ROOM':<6} {'FOR':<7} " + (f"{'POSTED':<7} " if medium else "") + "REASON")
     rows = []
-    priorities = state.get("priorities", {})
-    started = [(r, e) for r, e in recent(state, {"assigned"}) if r.get("task") in queue["in_progress"]]
-    for key, label in (("review", "review"), ("merged", "merged"), ("started", "started"), ("ready", "ready"),
-                       ("blocked", "blocked"), ("held", "held")):
-        if key == "started":
-            for record, elapsed in started:
-                task_id = record["task"]
-                rows.append(f"{GREEN}{DIM}{'started':<8}{R} {DIM}{cut(task_id, 34):<34}{R} "
-                            f"{ROOM_COLOR.get(state['rooms'].get(task_id), '')}{state['rooms'].get(task_id) or '-':<6}{R} "
-                            f"{DIM}{int(elapsed)}s{R}{' ' * max(1, 7 - len(f'{int(elapsed)}s'))}" + (f"{'':<7} " if medium else "")
-                            + f"{GREEN}→ {record.get('agent') or '?'}{R}")
+    for entry in waiting_entries(state):
+        task_id, room = entry["task"], entry["room"] or "-"
+        if entry["label"] == "started":
+            elapsed = int(entry["elapsed"])
+            rows.append(f"{GREEN}{DIM}{'started':<8}{R} {DIM}{cut(task_id, 34):<34}{R} "
+                        f"{ROOM_COLOR.get(room, '')}{room:<6}{R} "
+                        f"{DIM}{elapsed}s{R}{' ' * max(1, 7 - len(f'{elapsed}s'))}" + (f"{'':<7} " if medium else "")
+                        + f"{GREEN}→ {entry['agent'] or '?'}{R}")
             continue
-        color = QUEUE_COLOR[label]
-        ids = queue[key]
-        if key in ("ready", "blocked", "held"):
-            ids = sorted(ids, key=lambda i: -priorities.get(i, 0))
-        for task_id in ids:
-            posted, since = times.get(task_id, (None, None))
-            waiting = age(since)
-            shown = aged(waiting, SLOW, VERY_SLOW) if key in ("review", "merged") else duration(waiting)
-            room = state["rooms"].get(task_id) or "-"
-            bold = B if key in ("review", "merged", "ready") else ""
-            level = priorities.get(task_id, 0)
-            shown_id = (f"▲{level} " if level > 0 else (f"▼{-level} " if level < 0 else "")) + task_id
-            rows.append(f"{color}{bold}{label:<8}{R} {bold}{cut(shown_id, 34):<34}{R} {ROOM_COLOR.get(room, '')}{room:<6}{R} "
-                        f"{column(shown, 7)} " + (f"{DIM}{posted_label(posted):<7}{R} " if medium else "") + reason(key, task_id))
+        key, label = entry["key"], entry["label"]
+        shown = aged(entry["since"], SLOW, VERY_SLOW) if key in ("review", "merged") else duration(entry["since"])
+        bold = B if key in ("review", "merged", "ready") else ""
+        rows.append(f"{QUEUE_COLOR[label]}{bold}{label:<8}{R} {bold}{cut(entry['shown_id'], 34):<34}{R} "
+                    f"{ROOM_COLOR.get(room, '')}{room:<6}{R} {column(shown, 7)} "
+                    + (f"{DIM}{posted_label(entry['posted']):<7}{R} " if medium else "")
+                    + f"{REASON_COLOR[entry['reason_kind']]}{entry['reason']}{R}")
     if not rows:
         rows = [f"{DIM}nothing waiting; {len(queue['in_progress'])} task(s) in progress (see AGENTS){R}" if queue["in_progress"]
                 else f"{DIM}queue empty: write task records (theseus tasks add){R}"]
@@ -664,15 +696,7 @@ def render(state, width=120, height=None, ui=None):
             rows.append(f"{DIM}── {day} {'─' * 20}{R}")
             last_day = day
         color = KIND_COLOR.get(record["kind"], R)
-        detail = str(record.get("detail") or "")
-        if record["kind"] == "assigned" and ":" in detail and "/" in detail:
-            detail = "worktree " + Path(detail.split(":", 1)[1].strip()).name
-        elif detail.startswith("/"):
-            detail = "worktree " + Path(detail).name
-        if record["kind"] in ("delivered", "partial", "blocked"):
-            detail = re.sub(r";?\s*review and merge: theseus merge \S+", "", detail).strip() or "ready to merge"
-        if record.get("reset"):
-            detail = f"after {record['reset']} · {detail}"
+        detail = event_detail(record)
         weight = B if record["kind"] in ("delivered", "partial", "blocked", "stalled", "error", "completed") else ""
         rows.append(f"{DIM}{local_clock(record['time'])}{R} {color}{weight}{record['kind']:<10}{R} "
                     f"{cut(record['agent'] or '-', 18):<18} "
@@ -711,69 +735,15 @@ def jump_to(pane):
     return f"switched to {pane}"
 
 
-def handle_key(conf, key, state, ui):
-    if key in ("q", "Q", "\x03"):
-        return False
-    if key in ("p", "P"):
-        ui["message"] = wq.set_paused(conf, not wq.paused(conf))
-    elif key == " ":
-        ui["frozen"] = not ui.get("frozen")
-        ui["message"] = "frozen; space to resume" if ui["frozen"] else ""
-    elif key.isdigit() and key != "0" and state:
-        index = int(key) - 1
-        if index < len(state["agents"]):
-            ui["message"] = jump_to(state["agents"][index]["pane"])
-    return True
-
-
 def main(conf, interval=5, once=False, as_json=False):
     if as_json:
         print(json.dumps(snapshot(conf, sample=True), indent=2, default=str))
         return 0
-    if once or not sys.stdout.isatty():
-        terminal = shutil.get_terminal_size((120, 50))
-        sized = sys.stdout.isatty() or "LINES" in os.environ
-        frame = render(snapshot(conf, sample=True), terminal.columns, terminal.lines if sized else None)
-        print(frame if sys.stdout.isatty() else ANSI.sub("", frame))
-        return 0
-    import select
-    import termios
-    import tty
-    stdin = sys.stdin.fileno()
-    interactive = sys.stdin.isatty()
-    saved = termios.tcgetattr(stdin) if interactive else None
-    previous, size_seen, state, ui, next_refresh = [], None, None, {}, 0.0
-    try:
-        if interactive:
-            tty.setcbreak(stdin)
-        sys.stdout.write("\033[?1049h\033[?25l\033[2J")
-        while True:
-            terminal = shutil.get_terminal_size((120, 50))
-            if state is None or (not ui.get("frozen") and time.monotonic() >= next_refresh):
-                state = snapshot(conf)
-                next_refresh = time.monotonic() + interval
-            lines = render(state, terminal.columns, terminal.lines, ui).splitlines()[: terminal.lines]
-            if terminal != size_seen:
-                previous, size_seen = [], terminal
-                sys.stdout.write("\033[2J")
-            sys.stdout.write(repaint(previous, lines))
-            sys.stdout.flush()
-            previous = lines
-            wait = max(0.1, next_refresh - time.monotonic()) if not ui.get("frozen") else 1.0
-            ready = select.select([stdin], [], [], wait)[0] if interactive else time.sleep(wait)
-            if ready:
-                key = os.read(stdin, 1).decode(errors="ignore")
-                if not handle_key(conf, key, state, ui):
-                    return 0
-                if key in ("p", "P"):
-                    next_refresh = 0.0
-    except KeyboardInterrupt:
-        return 0
-    finally:
-        if saved is not None:
-            termios.tcsetattr(stdin, termios.TCSADRAIN, saved)
-        sys.stdout.write("\033[?25h\033[?1049l")
-        sys.stdout.flush()
+    terminal = shutil.get_terminal_size((120, 50))
+    sized = sys.stdout.isatty() or "LINES" in os.environ
+    frame = render(snapshot(conf, sample=True), terminal.columns, terminal.lines if sized else None)
+    print(frame if sys.stdout.isatty() else ANSI.sub("", frame))
+    return 0
 
 
 def repaint(previous, lines):

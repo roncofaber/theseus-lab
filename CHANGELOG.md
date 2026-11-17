@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- `theseus top` is now an interactive Textual dashboard over every project on the host: a Host tab (projects, pools, merged events) and one tab per project (agents, waiting tasks, events, activity sparklines), with `/` filtering, `p` to pause or resume a queue, `r` to refresh and Enter on an agent to switch your tmux client to its pane. It runs outside any project too.
+- Host registry (`~/.local/share/theseus/projects.json`, `THESEUS_REGISTRY` overrides) filled by every command that loads a project configuration, and `theseus projects` to list it.
+- `theseus top --host --once` and `--host --json` for a plain host summary, and `theseus top --interval SECONDS`.
+
+### Changed
+
+- Textual (`textual>=8.2,<9`) is now a runtime dependency. `theseus top --once` and `--json` keep their output; the old ANSI refresh loop is retired.
+
 ## [0.1.0] - 2026-11-16
 
 First public release.

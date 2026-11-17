@@ -4,7 +4,7 @@ Decisions behind the package layout, for contributors. User documentation starts
 
 ## Shape
 
-- Stdlib-only Python package (`src/theseus`, Python 3.11+ for `tomllib`), one CLI entry point, unittest suite. No runtime dependencies, so the CLI installs anywhere a coordinator runs.
+- Python package (`src/theseus`, Python 3.11+ for `tomllib`), one CLI entry point, unittest suite. Standard library only apart from Textual, the single runtime dependency, which drives the interactive dashboard and is imported only by `theseus top` on a terminal.
 - Logic that benefits from tests (task records, merge, guard, docs, catalog, cleanup, rules) is Python. Process supervision and tmux pane polling stay Bash (`src/theseus/scripts/`), because signal handling, `exec` chains that keep a recorded PID and systemd scopes are simplest there. The CLI runs them as `bash <packaged path>` with the `THESEUS_*` environment from `Config.environment()`; a variable already set in the process environment wins, which lets tests and one-off shells override a value.
 - Templates live under `src/theseus/templates/project/`; a leading `dot-` in a path segment becomes `.` at scaffold time, so package data never relies on dotfiles surviving a wheel build.
 
