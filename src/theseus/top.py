@@ -25,7 +25,7 @@ RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN = (f"\033[{c}m" for c in (31, 32, 33, 34
 ANSI = re.compile(r"\033\[[0-9;]*m")
 STATE_COLOR = {"working": GREEN, "quiet": YELLOW, "busy": CYAN, "free": YELLOW, "delivered": MAGENTA, "stalled": RED, "offline": RED,
                "disabled": DIM, "thrashing": RED, "gateway_error": RED}
-KIND_COLOR = {"relaunched": YELLOW, "delivered": MAGENTA, "partial": YELLOW, "blocked": RED, "stalled": RED, "error": RED, "assigned": GREEN,
+KIND_COLOR = {"relaunched": YELLOW, "delivered": MAGENTA, "partial": YELLOW, "blocked": BLUE, "stalled": RED, "error": RED, "assigned": GREEN,
               "nudged": YELLOW, "compacted": BLUE, "cleared": CYAN, "merged": CYAN, "completed": GREEN,
               "reopened": YELLOW, "released": YELLOW, "gateway_error": RED, "resent": YELLOW, "send_failed": RED,
               "gateway_paused": RED}
@@ -48,16 +48,14 @@ def read(path):
         return ""
 
 
-def host_state():
-    meminfo = {}
-    for line in read("/proc/meminfo").splitlines():
-        parts = line.split()
-        if len(parts) >= 2:
-            meminfo[parts[0].rstrip(":")] = int(parts[1]) * 1024
-    try:
-        load = list(os.getloadavg())
-    except OSError:
-        load = [0.0, 0.0, 0.0]
+GPU_CACHE = {"time": float("-inf"), "gpus": []}
+GPU_SECONDS = 2.0
+
+
+def gpu_state():
+    """Every GPU nvidia-smi reports (name, util, memUsed, memTotal, temp), queried at most every GPU_SECONDS."""
+    if time.monotonic() - GPU_CACHE["time"] < GPU_SECONDS:
+        return GPU_CACHE["gpus"]
     gpus = []
     if shutil.which("nvidia-smi"):
         try:
@@ -74,6 +72,21 @@ def host_state():
                                  "memTotal": float(parts[3]) * 2**20, "temp": float(parts[4])})
                 except ValueError:
                     continue
+    GPU_CACHE.update(time=time.monotonic(), gpus=gpus)
+    return gpus
+
+
+def host_state():
+    meminfo = {}
+    for line in read("/proc/meminfo").splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            meminfo[parts[0].rstrip(":")] = int(parts[1]) * 1024
+    try:
+        load = list(os.getloadavg())
+    except OSError:
+        load = [0.0, 0.0, 0.0]
+    gpus = gpu_state()
     return {"cpus": os.cpu_count() or 1, "load": load, "memTotal": meminfo.get("MemTotal", 0),
             "memAvailable": meminfo.get("MemAvailable", 0), "swapTotal": meminfo.get("SwapTotal", 0),
             "swapFree": meminfo.get("SwapFree", 0), "gpus": gpus}
@@ -343,6 +356,7 @@ def snapshot(conf, sample=False, host=None):
         time.sleep(0.5)
     agent_processes(states)
     summary = wq.summary(conf)
+    records = t.Queue(conf).load().get("tasks", [])
     return {
         "project": conf.name, "milestone": t.Queue(conf).milestone(), "time": datetime.now(timezone.utc).isoformat(),
         "host": host if host is not None else host_state(), "agents": states, "workers": other_workers(conf, states),
@@ -353,7 +367,8 @@ def snapshot(conf, sample=False, host=None):
         "blocked": {x["id"]: x["reasons"] for x in summary["blocked"]},
         "times": task_times(conf),
         "capacity": {k: list(v) for k, v in t.capacity_use(conf).items()},
-        "priorities": {x["id"]: int(x.get("priority") or 0) for x in t.Queue(conf).load().get("tasks", []) if x.get("priority")},
+        "priorities": {x["id"]: int(x.get("priority") or 0) for x in records if x.get("priority")},
+        "tasks": {x["id"]: x for x in records},
         "paused": wq.paused(conf), "git": git_state(conf), "verification": verification_state(conf),
         "events": merge_resets(wq.events(conf, 200)),
         "today": today_stats(wq.events(conf)), "progress": milestone_progress(conf),
@@ -774,14 +789,76 @@ def own_client():
     return clients[0] if len(clients) == 1 else None
 
 
+def tmux(*args):
+    return subprocess.run(["tmux", *args], capture_output=True, text=True)
+
+
+def back_option(client):
+    """The global tmux user option that remembers which pane a client left for a jump."""
+    return "@theseus-back-" + re.sub(r"[^A-Za-z0-9]", "-", client)
+
+
+def place(pane):
+    found = tmux("display-message", "-p", "-t", pane, "#{session_id} #{window_id}")
+    return tuple(found.stdout.split()) if found.returncode == 0 else ()
+
+
+def return_hint(origin, pane):
+    """The tmux keys that lead from pane back to origin: last pane, last window or last session."""
+    here, there = place(origin), place(pane)
+    if here and here == there:
+        return "prefix + ; (last pane)"
+    if here and there and here[0] == there[0]:
+        return "prefix + l (last window)"
+    return "prefix + L (last session)"
+
+
 def jump_to(pane):
+    """Switch this dashboard's own tmux client to pane, remember the dashboard pane for `theseus top --back` and tell
+    the client how to return."""
     client = own_client()
     if client is None:
         return "jump needs theseus top in a tmux session with exactly one attached client"
-    result = subprocess.run(["tmux", "switch-client", "-c", client, "-t", pane], capture_output=True, text=True)
+    origin = os.environ["TMUX_PANE"]
+    tmux("set-option", "-g", back_option(client), origin)
+    result = tmux("switch-client", "-c", client, "-t", pane)
     if result.returncode != 0:
         return f"tmux: {result.stderr.strip()[:80]}"
+    tmux("display-message", "-c", client,
+         f"theseus: {return_hint(origin, pane)} or `theseus top --back` returns to the dashboard")
     return f"switched to {pane}"
+
+
+def remembered(client):
+    return tmux("show-options", "-gqv", back_option(client)).stdout.strip()
+
+
+def go_back():
+    """Switch the client that jumped from a dashboard back to the dashboard pane it left. Returns (ok, message)."""
+    client = own_client()
+    if client is None or not remembered(client):
+        names = tmux("list-clients", "-F", "#{client_name}").stdout.split()
+        matches = [name for name in names if remembered(name)]
+        if len(matches) != 1:
+            return False, "--back needs to run in the tmux client that jumped (no single client remembers a dashboard)"
+        client = matches[0]
+    origin = remembered(client)
+    result = tmux("switch-client", "-c", client, "-t", origin)
+    if result.returncode != 0:
+        return False, f"tmux: {result.stderr.strip()[:80]}"
+    return True, f"switched back to {origin}"
+
+
+def capture(pane, lines=200):
+    """The visible text and the last lines of pane's history with colors (escape sequences), or '' when it fails."""
+    result = tmux("capture-pane", "-p", "-e", "-J", "-t", pane, "-S", f"-{lines}")
+    return result.stdout if result.returncode == 0 else ""
+
+
+def send_keys(pane, *keys):
+    """Press tmux keys (Enter, Escape, C-c) in pane; returns '' or tmux's error."""
+    result = tmux("send-keys", "-t", pane, *keys)
+    return "" if result.returncode == 0 else result.stderr.strip()[:80]
 
 
 def main(conf, interval=5, once=False, as_json=False):

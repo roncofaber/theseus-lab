@@ -10,8 +10,8 @@ from . import top
 
 BIN_SECONDS = 15 * 60
 BINS = 48
-ACTIVITY_GROUPS = (("assigned", ("assigned",)), ("delivered", ("delivered", "partial", "blocked")),
-                   ("merged", ("merged", "completed")), ("errors", ("error", "stalled")))
+ACTIVITY_GROUPS = (("assigned", ("assigned",)), ("delivered", ("delivered",)), ("partial", ("partial",)),
+                   ("blocked", ("blocked",)), ("merged", ("merged", "completed")), ("errors", ("error", "stalled")))
 
 
 def activity(events, now=None, bins=BINS, width=BIN_SECONDS):

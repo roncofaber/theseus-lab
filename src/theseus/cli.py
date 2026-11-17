@@ -583,6 +583,10 @@ def cmd_queue(args):
 
 def cmd_top(args):
     from . import top
+    if args.back:
+        ok, message = top.go_back()
+        print(message, file=sys.stdout if ok else sys.stderr)
+        sys.exit(0 if ok else 1)
     interval = args.every or args.interval
     interactive = sys.stdout.isatty() and not args.once and not args.json
     try:
@@ -944,6 +948,8 @@ def build_parser():
     p.add_argument("--once", action="store_true", help="print one plain frame and exit")
     p.add_argument("--json", action="store_true", help="print the snapshot as JSON and exit")
     p.add_argument("--host", action="store_true", help="the host-wide view instead of the current project")
+    p.add_argument("--back", action="store_true",
+                   help="switch this tmux client back to the dashboard pane it left when it jumped to an agent")
     p.set_defaults(func=cmd_top)
     p = sub.add_parser("projects", help="list the projects registered on this host")
     p.add_argument("--json", action="store_true")

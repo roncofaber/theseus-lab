@@ -25,7 +25,7 @@ def project_series(projects):
     for item in projects:
         if not item.get("available") or not item.get("activity"):
             continue
-        groups = [item["activity"][name] for name, _ in host.ACTIVITY_GROUPS]
+        groups = [item["activity"].get(name) or [0] * host.BINS for name, _ in host.ACTIVITY_GROUPS]
         series.append((item["name"], theme.project_color(item["name"]), [sum(column) for column in zip(*groups)]))
     return series
 

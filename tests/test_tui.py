@@ -170,6 +170,19 @@ class HostSnapshotTests(HostCase):
         self.assertFalse(registry.record(cfg.Config(worktree, conf.raw), now=10 ** 9))
         self.assertNotIn(str(worktree), [e["root"] for e in registry.entries()])
 
+    def test_default_send_capture_and_keys_go_through_the_verified_send_and_tmux(self):
+        from theseus.tui import app
+        os.environ.update({"THESEUS_SEND_VERIFY": "0", "THESEUS_SEND_POLL": "0.01"})
+        conf = cfg.load(root=self.project)
+        agent = next(a for a in host.snapshot()["projects"][0]["snapshot"]["agents"] if a["name"] == "worker-a")
+        message = app.send_verified(conf, agent, "hello there")
+        self.assertIn("worker-a", message)
+        typed = lambda: (self.tmp / "state" / "typed").read_text()
+        self.assertIn("-t %1 -l hello there", typed())
+        self.assertEqual("", top.send_keys("%1", "Escape"))
+        self.assertIn("send-keys -t %1 Escape", typed())
+        self.assertIsInstance(top.capture("%1"), str)
+
     def test_jump_refuses_outside_tmux(self):
         self.assertIn("tmux session", top.jump_to("%1"))
 
@@ -178,7 +191,13 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from theseus.tui.app import TopApp
         self.jumps = []
-        self.app = TopApp(interval=3600, snapshot_fn=host.snapshot, jump_fn=lambda pane: self.jumps.append(pane) or f"jumped {pane}")
+        self.sent, self.keys, self.captures = [], [], []
+        self.app = TopApp(interval=3600, snapshot_fn=host.snapshot, tmux_ok=True, mirror_seconds=0.05,
+                          jump_fn=lambda pane: self.jumps.append(pane) or f"jumped {pane}",
+                          capture_fn=lambda pane: self.captures.append(pane) or "\033[32mready\033[0m\n> ",
+                          send_fn=lambda conf, agent, text, expect_busy=True: self.sent.append(
+                              (agent["pane"], text, expect_busy)) or "sent",
+                          keys_fn=lambda pane, *keys: self.keys.append((pane, keys)) or "")
 
     async def settle(self, pilot, condition=None):
         """Wait for the first refresh to be applied and its tabs mounted (slow machines need more than one pause)."""
@@ -302,22 +321,484 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(str(self.project), self.app.active_item()["root"])
             self.assertFalse(wq.paused(conf))
             await pilot.press("p")
+            await self.app.workers.wait_for_complete()
             self.assertTrue(wq.paused(conf))
             await self.settle(pilot)
             await pilot.press("p")
+            await self.app.workers.wait_for_complete()
             self.assertFalse(wq.paused(conf))
 
-    async def test_enter_on_an_agent_row_jumps_to_its_pane(self):
+    async def test_enter_on_an_agent_row_opens_its_popup_whose_button_jumps_to_its_pane(self):
+        from theseus.tui.popups import AgentScreen
         async with self.app.run_test(size=(170, 60)) as pilot:
             await self.settle(pilot)
             await pilot.press("2", "a", "down", "enter")
-            self.assertEqual(["%2"], self.jumps)
+            await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen))
+            self.assertIn("%2", self.app.screen.query_one("#text").render().plain)
+            await pilot.click("#open")
+            await self.settle(pilot, lambda: self.jumps == ["%2"])
+            await pilot.press("escape")
+            await self.settle(pilot, lambda: len(self.app.screen_stack) == 1)
+
+
+def grown(base, agents=0, events=0, tasks=0, gpus=None):
+    """A copy of a real host snapshot with extra agents, events and ready tasks in the first project (and fake GPUs)."""
+    import copy
+    snap = copy.deepcopy(base)
+    if gpus is not None:
+        snap["host"]["gpus"] = [{"name": "Fake GPU", "util": 10.0 * n, "memUsed": 2.0**30 * n, "memTotal": 2.0**34,
+                                 "temp": 40.0 + n} for n in range(gpus)]
+    state = snap["projects"][0]["snapshot"]
+    template = state["agents"][0]
+    for n in range(agents):
+        state["agents"].append({**template, "name": f"extra-{n:02d}", "pane": f"%{100 + n}", "cpu": 3.0, "rss": 2**28})
+    kinds = ["assigned", "delivered", "partial", "blocked", "merged", "error"]
+    stamp = datetime.fromisoformat(base["time"])
+    for n in range(events):
+        record = {"id": 10000 + n, "project": state["project"], "kind": kinds[n % len(kinds)], "agent": f"extra-{n % 7}",
+                  "task": f"task-{n % 50:03d}", "detail": f"detail {n} " + "x" * (n % 40),
+                  "time": (stamp - timedelta(seconds=30 * (1000 - n))).isoformat().replace("+00:00", "Z")}
+        state["events"].append(record)
+        snap["events"].append(record)
+    for n in range(tasks):
+        task_id = f"task-{n:03d}"
+        state["tasks"][task_id] = {"id": task_id, "role": "research", "status": "pending", "objective": f"Objective {n}. " * 30,
+                                   "generalContract": "All variants.", "acceptance": ["Done."], "ownedPaths": [f"docs/{task_id}.md"],
+                                   "dependencies": [], "createdAt": "2026-01-01T00:00:00Z"}
+        state["queue"]["ready"].append(task_id)
+        state["rooms"][task_id] = None
+    return snap
+
+
+class TopPolishTests(HostCase, unittest.IsolatedAsyncioTestCase):
+    """No default highlight, sorting, help, popups, the pane mirror, the layout at several sizes, GPUs, themes and
+    the refresh cost."""
+
+    async def asyncSetUp(self):
+        from theseus.tui.app import TopApp
+        self.event("alpha", "assigned", 5)
+        self.event("alpha", "delivered", 3, "t2")
+        self.event("alpha", "error", 2, "t3")
+        self.base = host.snapshot()
+        self.extra = {}
+        self.jumps, self.sent, self.keys, self.captures = [], [], [], []
+        self.app = TopApp(interval=3600, snapshot_fn=lambda: grown(self.base, **self.extra), tmux_ok=True,
+                          mirror_seconds=0.05, jump_fn=lambda pane: self.jumps.append(pane) or f"jumped {pane}",
+                          capture_fn=lambda pane: self.captures.append(pane) or "\033[32mready for input\033[0m\n> ",
+                          send_fn=lambda conf, agent, text, expect_busy=True: self.sent.append(
+                              (agent["pane"], text, expect_busy)) or "sent",
+                          keys_fn=lambda pane, *keys: self.keys.append((pane, keys)) or "")
+
+    async def settle(self, pilot, condition):
+        await self.app.workers.wait_for_complete()
+        for _ in range(100):
+            await pilot.pause(0.05)
+            if condition():
+                return
+        self.fail(f"did not settle: screen={self.app.screen} focused={self.app.focused} title={self.app.title}")
+
+    async def start(self, pilot, tab="2"):
+        from textual.widgets import TabbedContent, TabPane
+        await self.settle(pilot, lambda: "updated" in self.app.title
+                          and len(list(self.app.base.query_one(TabbedContent).query(TabPane))) == 3)
+        if tab:
+            await pilot.press(tab)
+            await self.settle(pilot, lambda: self.app.active_item() is not None)
+        await pilot.pause()
+
+    def table(self, name):
+        return self.app.active_view().query_one(f"#{name}")
+
+    def rendered_rows(self, name):
+        table = self.table(name)
+        return [[str(cell.plain if hasattr(cell, "plain") else cell) for cell in table.get_row(row.key)]
+                for row in table.ordered_rows]
+
+    async def test_no_row_is_highlighted_until_asked_and_escape_or_a_click_elsewhere_clears_it(self):
+        self.extra = {"tasks": 3}
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            tables = [self.table(name) for name in ("agents", "waiting", "events")]
+            self.assertTrue(all(table.row_count for table in tables))
+            self.assertEqual([False] * 3, [table.show_cursor for table in tables])
+            await pilot.press("r")
+            await self.settle(pilot, lambda: not self.app.busy)
+            await pilot.press("1", "2")
+            await self.settle(pilot, lambda: self.app.active_item() is not None)
+            self.assertEqual([False] * 3, [table.show_cursor for table in tables])
+            agents = tables[0]
+            await pilot.click(agents, offset=(4, 1))
+            await self.settle(pilot, lambda: agents.show_cursor)
+            self.assertEqual(1, len(self.app.screen_stack), "the first click on the row under the cursor opened a popup")
+            self.assertEqual(0, agents.cursor_row)
+            await pilot.click("#status", offset=(2, 0))
+            await self.settle(pilot, lambda: not agents.show_cursor)
+            await pilot.press("w")
+            await self.settle(pilot, lambda: tables[1].show_cursor)
+            await pilot.press("escape")
+            await self.settle(pilot, lambda: not tables[1].show_cursor and self.app.focused is None)
+            await pilot.press("e", "down")
+            await self.settle(pilot, lambda: tables[2].show_cursor and tables[2].cursor_row == 1)
+
+    async def test_events_sort_by_header_click_or_keys_with_an_indicator(self):
+        self.extra = {"events": 12}
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            events = self.table("events")
+            labels = lambda: [column.label.plain for column in events.columns.values()]
+            self.assertEqual("time ▼", labels()[0])
+            times = [record["time"] for record in self.app.active_view().records.values()]
+            shown = [self.app.active_view().records[row.key.value]["time"] for row in events.ordered_rows]
+            self.assertEqual(sorted(times, reverse=True), shown)
+            await pilot.press("s")
+            await pilot.pause()
+            self.assertEqual(["time  ", "kind ▲"], labels()[:2])
+            kinds = [row[1] for row in self.rendered_rows("events")]
+            self.assertEqual(sorted(kinds), kinds)
+            await pilot.press("S")
+            await pilot.pause()
+            self.assertEqual("kind ▼", labels()[1])
+            kinds = [row[1] for row in self.rendered_rows("events")]
+            self.assertEqual(sorted(kinds, reverse=True), kinds)
+            agent_x = sum(column.get_render_width(events) for column in list(events.columns.values())[:2]) + 2
+            await pilot.click(events, offset=(agent_x, 0))
+            await pilot.pause()
+            self.assertEqual("agent ▲", labels()[2])
+            await pilot.click(events, offset=(agent_x, 0))
+            await pilot.pause()
+            self.assertEqual("agent ▼", labels()[2])
+            agents = [row[2] for row in self.rendered_rows("events")]
+            self.assertEqual(sorted(agents, reverse=True), agents)
+            self.assertNotIn("newest first", self.app.active_view().query_one("#events-panel").border_title or "")
+
+    async def test_help_lists_every_binding_and_blocks_dashboard_keys_while_open(self):
+        from theseus.tui.app import TopApp
+        from theseus.tui.popups import HelpScreen
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            await pilot.press("question_mark")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, HelpScreen))
+            body = self.app.screen.query_one("#text").render().plain
+            for binding in TopApp.BINDINGS:
+                self.assertIn(binding.tooltip or binding.description, body)
+            for words in ("double-click", "click an EVENTS header", "Open tmux pane", "of system RAM", "tmux is only needed"):
+                self.assertIn(words, body)
+            conf = cfg.load(root=self.project)
+            await pilot.press("p", "r", "1")
+            await pilot.pause(0.2)
+            self.assertFalse(wq.paused(conf))
+            self.assertIsNotNone(self.app.active_item())
+            await pilot.press("escape")
+            await self.settle(pilot, lambda: len(self.app.screen_stack) == 1)
+            await pilot.press("f1")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, HelpScreen))
+            await pilot.press("question_mark")
+            await self.settle(pilot, lambda: len(self.app.screen_stack) == 1)
+
+    async def test_enter_on_waiting_and_event_rows_opens_their_details(self):
+        from theseus.tui.popups import Dialog
+        self.extra = {"tasks": 3, "events": 3}
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            await pilot.press("w", "enter")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, Dialog))
+            body = self.app.screen.query_one("#text").render().plain
+            for words in ("task-000", "owned paths", "docs/task-000.md", "acceptance", "Objective 0.", "createdAt"):
+                self.assertIn(words, body)
+            await pilot.press("escape")
+            await self.settle(pilot, lambda: len(self.app.screen_stack) == 1)
+            await pilot.press("e")
+            events = self.table("events")
+            events.move_cursor(row=events.get_row_index("event:alpha:10002"))
+            await pilot.press("enter")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, Dialog))
+            body = self.app.screen.query_one("#text").render().plain
+            self.assertIn("detail 2 xx", body)
+            self.assertIn("linked task", body)
+            await pilot.click("#close")
+            await self.settle(pilot, lambda: len(self.app.screen_stack) == 1)
+
+    async def test_agent_popup_mirrors_the_pane_sends_lines_and_keys_and_stops_polling_when_closed(self):
+        from theseus.tui.popups import AgentScreen, Confirm
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            agents = self.table("agents")
+            await pilot.click(agents, offset=(4, 1), times=2)
+            await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen))
+            self.assertEqual(2, len(self.app.screen_stack))
+            screen = self.app.screen
+            await self.settle(pilot, lambda: "ready for input" in screen.query_one("#mirror-text").render().plain)
+            self.assertIn("live mirror", screen.query_one("#note").render().plain.lower())
+            await pilot.click("#send")
+            await pilot.press(*"hello", "enter")
+            await self.settle(pilot, lambda: self.sent == [("%1", "hello", True)])
+            await pilot.click("#compact")
+            await self.settle(pilot, lambda: self.sent[-1] == ("%1", "/compact", False))
+            await pilot.click("#key-escape")
+            await self.settle(pilot, lambda: ("%1", ("Escape",)) in self.keys)
+            await pilot.click("#interrupt")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, Confirm))
+            await pilot.press("n")
+            await self.settle(pilot, lambda: self.app.screen is screen)
+            self.assertNotIn(("%1", ("C-c",)), self.keys)
+            await pilot.click("#interrupt")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, Confirm))
+            await pilot.press("y")
+            await self.settle(pilot, lambda: ("%1", ("C-c",)) in self.keys)
+            await pilot.press("escape")
+            await self.settle(pilot, lambda: len(self.app.screen_stack) == 1)
+            await pilot.pause(0.2)
+            count = len(self.captures)
+            await pilot.pause(0.3)
+            self.assertEqual(count, len(self.captures))
+            self.assertIsNone(screen.timer._task, "the mirror timer still runs after the popup closed")
+
+    async def test_the_open_pane_button_needs_tmux(self):
+        from theseus.tui.popups import AgentScreen
+        self.app.tmux_ok = False
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            await pilot.press("a", "enter")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen))
+            self.assertFalse(self.app.screen.query("#open"))
+            await pilot.press("o")
+            await pilot.pause(0.1)
+            self.assertEqual([], self.jumps)
+
+    async def test_every_section_fits_without_scrolling_the_screen(self):
+        from theseus.tui.app import Panel
+        self.extra = {"agents": 6, "events": 40, "tasks": 12, "gpus": 2}
+        for size in ((80, 24), (120, 40), (200, 60)):
+            async with self.app.run_test(size=size) as pilot:
+                await self.start(pilot, tab=None)
+                for tab in ("1", "2"):
+                    await pilot.press(tab)
+                    await pilot.pause(0.1)
+                    view = self.app.active_view()
+                    self.assertEqual(0, view.max_scroll_y, f"{size} tab {tab} scrolls as a whole")
+                    for panel in view.query(Panel):
+                        if not panel.display:
+                            continue
+                        region = panel.region
+                        self.assertGreaterEqual(region.height, 3, f"{size} tab {tab} {panel.id} {region}")
+                        self.assertLessEqual(region.bottom, size[1] - 1, f"{size} tab {tab} {panel.id} {region}")
+                        self.assertLessEqual(region.right, size[0], f"{size} tab {tab} {panel.id} {region}")
+            self.setUpApp()
+
+    def setUpApp(self):
+        from theseus.tui.app import TopApp
+        old = self.app
+        self.app = TopApp(interval=3600, snapshot_fn=old.snapshot_fn, tmux_ok=True, mirror_seconds=0.05,
+                          jump_fn=old.jump_fn, capture_fn=old.capture_fn, send_fn=old.send_fn, keys_fn=old.keys_fn)
+
+    async def test_gpu_block_shows_one_line_per_gpu_and_collapses_without_gpus(self):
+        for count, size in ((0, (170, 50)), (1, (170, 50)), (4, (170, 50)), (4, (80, 30)), (8, (200, 60))):
+            self.extra = {"gpus": count}
+            self.setUpApp()
+            async with self.app.run_test(size=size) as pilot:
+                await self.start(pilot, tab=None)
+                await pilot.pause(0.1)
+                gpus = self.app.base.query_one("#gpus")
+                self.assertEqual(bool(count), gpus.display)
+                if count:
+                    lines = gpus.render().plain.splitlines()
+                    self.assertEqual(count + 1, len(lines))
+                    self.assertIn("Fake GPU", lines[0])
+                    self.assertLessEqual(gpus.region.right, size[0])
+                    self.assertGreater(gpus.region.height, count)
+                self.assertNotIn("GPU0", self.app.base.query_one("#meters").render().plain)
+
+    async def test_resizing_repeatedly_raises_nothing(self):
+        async with self.app.run_test(size=(120, 40)) as pilot:
+            await self.start(pilot, tab=None)
+            for tab in ("1", "2"):
+                await pilot.press(tab)
+                for size in ((80, 24), (200, 60), (60, 20), (170, 50), (100, 30)) * 3:
+                    await pilot.resize_terminal(*size)
+                    await pilot.pause()
+            await pilot.pause(0.2)
+
+    async def test_refresh_cost_with_50_agents_500_events_and_200_tasks(self):
+        self.extra = {"agents": 50, "events": 500, "tasks": 200}
+        asyncio.get_running_loop().set_debug(False)
+        async with self.app.run_test(size=(200, 60)) as pilot:
+            await self.start(pilot)
+            costs = []
+            for n in range(9):
+                snap = grown(self.base, agents=50, events=500 + 3 * n, tasks=200)
+                for number, agent in enumerate(snap["projects"][0]["snapshot"]["agents"]):
+                    agent["cpu"], agent["rss"] = float((n * 7 + number) % 300), 2**27 * (1 + (n + number) % 40)
+                started = time.process_time()
+                await self.app.apply(snap)
+                await pilot.pause()
+                costs.append(time.process_time() - started)
+            average = sorted(costs[1:])[len(costs[1:]) // 2]
+            print(f"\nrefresh cost (CPU time of apply and the repaint) with 50 agents, 500 events, 200 tasks: "
+                  f"median {average * 1000:.1f} ms (first {costs[0] * 1000:.1f} ms)")
+            self.assertLess(average, 0.05 * float(os.environ.get("THESEUS_PERF_SLACK", "1")))
+
+    async def test_tables_are_readable_and_activity_colors_differ_from_errors_under_every_builtin_theme(self):
+        from rich.color import Color as RichColor
+        from textual.theme import BUILTIN_THEMES
+        from theseus.tui import theme
+
+        def rgb(color, terminal, foreground):
+            if color is None or color.is_default:
+                return (terminal.foreground_color if foreground else terminal.background_color)[:3]
+            return color.get_truecolor(terminal, foreground)[:3]
+
+        async with self.app.run_test(size=(170, 50)) as pilot:
+            await self.start(pilot)
+            self.addCleanup(theme.apply)
+            for name in BUILTIN_THEMES:
+                self.app.theme = name
+                await pilot.pause(0.1)
+                self.assertEqual("ansi" if BUILTIN_THEMES[name].ansi else "rgb", theme.MODE, name)
+                table = self.table("events")
+                strip = table.render_line(0)
+                terminal = self.app.ansi_theme
+                ratios = [theme.contrast(rgb(seg.style.color, terminal, True), rgb(seg.style.bgcolor, terminal, False))
+                          for seg in strip if seg.text.strip() and seg.style]
+                self.assertTrue(ratios, name)
+                self.assertGreaterEqual(min(ratios), 4.5, f"{name}: header contrast {min(ratios):.2f}")
+                error = theme.SERIES["errors"]
+                self.assertEqual(6, len(set(theme.SERIES.values())), name)
+                for category in ("assigned", "delivered", "partial", "blocked", "merged"):
+                    self.assertNotEqual(error, theme.SERIES[category], f"{name} {category}")
+                    if theme.MODE == "rgb":
+                        gap = abs((theme.hue_of(RichColor.parse(theme.SERIES[category]).triplet)
+                                   - theme.hue_of(RichColor.parse(error).triplet) + 180) % 360 - 180)
+                        self.assertGreaterEqual(gap, 30, f"{name} {category} too close to the error hue")
+
+
+class ColorFallbackTests(unittest.TestCase):
+    def test_activity_categories_keep_distinct_ansi_colors_on_a_16_color_console(self):
+        import io
+        from rich.console import Console
+        from textual.theme import BUILTIN_THEMES
+        from theseus.tui import charts, theme
+        bins = lambda count: [0] * (host.BINS - 1) + [count]
+        activity = {name: bins(n + 1) for n, (name, _) in enumerate(host.ACTIVITY_GROUPS)}
+        try:
+            for name, found in BUILTIN_THEMES.items():
+                variables = found.to_color_system().generate()
+                theme.apply(variables, found.dark, found.ansi, "standard")
+                console = Console(color_system="standard", force_terminal=True, file=io.StringIO(), width=300)
+                console.print(charts.legend(charts.kind_series(activity))[0])
+                codes = re.findall(r"\033\[([0-9;]+)m■", console.file.getvalue())
+                self.assertEqual(6, len(codes), name)
+                self.assertEqual(6, len(set(codes)), f"{name}: {codes}")
+                self.assertNotIn(codes[-1], codes[:-1])
+                projects = {console.export_text if False else c for c in theme.PROJECTS}
+                self.assertEqual(len(theme.PROJECTS), len(projects), name)
+        finally:
+            theme.apply()
+
+    def test_project_colors_are_distinct_and_never_the_error_color(self):
+        from rich.color import Color, ColorSystem
+        from textual.theme import BUILTIN_THEMES
+        from theseus.tui import theme
+        try:
+            for name, found in BUILTIN_THEMES.items():
+                variables = found.to_color_system().generate()
+                theme.apply(variables, found.dark, found.ansi, "standard")
+                numbers = [int(c[6:-1]) if c.startswith("color(") else Color.parse(c).downgrade(ColorSystem.STANDARD).number
+                           for c in theme.PROJECTS]
+                self.assertEqual(len(numbers), len(set(numbers)), name)
+                self.assertFalse({1, 9} & set(numbers), name)
+                if not found.ansi:
+                    theme.apply(variables, found.dark, False, "truecolor")
+                    error = theme.hue_of(Color.parse(theme.RED).triplet)
+                    for color in theme.PROJECTS:
+                        gap = abs((theme.hue_of(Color.parse(color).triplet) - error + 180) % 360 - 180)
+                        self.assertGreaterEqual(gap, 30, f"{name} {color}")
+        finally:
+            theme.apply()
+
+
+@unittest.skipUnless(shutil.which("tmux"), "tmux is not installed")
+class PrivateTmuxTests(Sandbox):
+    """The tmux option syntax of jump_to and go_back on a private, throwaway tmux server (never the user's)."""
+
+    def test_the_back_option_is_valid_tmux_syntax(self):
+        socket = f"theseus-test-{os.getpid()}"
+        env = {**os.environ, "TMUX_TMPDIR": str(self.tmp)}
+        env.pop("TMUX", None)
+        tmux = lambda *args: subprocess.run(["tmux", "-L", socket, "-f", "/dev/null", *args], capture_output=True,
+                                            text=True, env=env)
+        self.assertEqual(0, tmux("new-session", "-d", "-s", "probe").returncode)
+        self.addCleanup(tmux, "kill-server")
+        option = top.back_option("/dev/pts/9")
+        result = tmux("set-option", "-g", option, "%0")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("%0", tmux("show-options", "-gqv", option).stdout.strip())
+
+
+class JumpBackTests(Sandbox):
+    """jump_to and go_back against a fake tmux that records its arguments (never a real tmux server)."""
+
+    FAKE = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$FAKE_STATE/calls"
+case "$1" in
+    display-message)
+        if [ "$2" = "-p" ]; then
+            case "$4" in
+                %0) echo '$1 @1' ;;
+                %7) echo '$2 @5' ;;
+                *) echo '$1' ;;
+            esac
+        fi ;;
+    list-clients) echo /dev/pts/9 ;;
+    show-options) cat "$FAKE_STATE/option" 2>/dev/null ;;
+    set-option) printf '%s' "$4" > "$FAKE_STATE/option" ;;
+esac
+"""
+
+    def setUp(self):
+        super().setUp()
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "tmux").write_text(self.FAKE)
+        (bin_dir / "tmux").chmod(0o755)
+        os.environ.update({"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_STATE": str(self.tmp),
+                           "TMUX": "/tmp/fake-socket,1,0", "TMUX_PANE": "%0"})
+
+    def calls(self):
+        return (self.tmp / "calls").read_text().splitlines()
+
+    def test_jump_remembers_the_dashboard_pane_and_tells_the_client_how_to_return(self):
+        self.assertEqual("switched to %7", top.jump_to("%7"))
+        calls = self.calls()
+        self.assertIn("set-option -g @theseus-back--dev-pts-9 %0", calls)
+        self.assertIn("switch-client -c /dev/pts/9 -t %7", calls)
+        notice = next(c for c in calls if c.startswith("display-message -c /dev/pts/9"))
+        self.assertIn("prefix + L (last session)", notice)
+        self.assertIn("theseus top --back", notice)
+        self.assertLess(calls.index("set-option -g @theseus-back--dev-pts-9 %0"),
+                        calls.index("switch-client -c /dev/pts/9 -t %7"))
+
+    def test_back_switches_the_same_client_to_the_remembered_pane(self):
+        top.jump_to("%7")
+        os.environ["TMUX_PANE"] = "%7"
+        ok, message = top.go_back()
+        self.assertTrue(ok, message)
+        self.assertEqual("switch-client -c /dev/pts/9 -t %0", self.calls()[-1])
+        result = self.theseus("top", "--back", env={**self.env, **{k: os.environ[k] for k in ("PATH", "FAKE_STATE", "TMUX", "TMUX_PANE")}},
+                              check=False, cwd=self.tmp)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("switched back to %0", result.stdout)
+
+    def test_back_without_a_remembered_pane_fails_cleanly(self):
+        ok, message = top.go_back()
+        self.assertFalse(ok)
+        self.assertIn("--back", message)
 
 
 class ChartTests(unittest.TestCase):
     def project(self, name, assigned=0, delivered=0, merged=0, errors=0, available=True):
         bins = lambda count: [0] * (host.BINS - 1) + [count]
-        activity = {"assigned": bins(assigned), "delivered": bins(delivered), "merged": bins(merged), "errors": bins(errors)}
+        activity = {"assigned": bins(assigned), "delivered": bins(delivered), "partial": bins(0), "blocked": bins(0),
+                    "merged": bins(merged), "errors": bins(errors)}
         return {"name": name, "root": f"/{name}", "available": available, "activity": activity if available else None}
 
     def test_project_series_sum_every_group_per_bin_with_project_colors(self):
@@ -330,10 +811,12 @@ class ChartTests(unittest.TestCase):
         self.assertEqual([theme.project_color("alpha"), theme.project_color("beta")], [style for _, style, _ in series])
 
     def test_kind_series_keep_the_state_colors_and_order(self):
-        from theseus.tui import charts
+        from theseus.tui import charts, theme
         series = charts.kind_series(self.project("alpha", 1, 2, 3, 4)["activity"])
-        self.assertEqual(["green", "magenta", "cyan", "red"], [style for _, style, _ in series])
-        self.assertEqual([1, 2, 3, 4], [values[-1] for _, _, values in series])
+        names = ["assigned", "delivered", "partial", "blocked", "merged", "errors"]
+        self.assertEqual([theme.SERIES[name] for name in names], [style for _, style, _ in series])
+        self.assertEqual(theme.RED, series[-1][1])
+        self.assertEqual([1, 2, 0, 0, 3, 4], [values[-1] for _, _, values in series])
         self.assertTrue(all(len(values) == host.BINS for _, _, values in charts.kind_series(None)))
 
     def test_stacked_bars_draw_one_row_per_event_on_a_baseline_with_a_time_axis(self):
@@ -368,18 +851,25 @@ class ChartTests(unittest.TestCase):
         wrapped = charts.legend(series, 60)
         self.assertGreater(len(wrapped), 1)
         self.assertTrue(all(len(line) <= 60 for line in wrapped))
-        self.assertEqual("■ assigned 1   ■ delivered/partial/blocked 2   ■ merged/completed 3   ■ errors/stalled 4",
+        self.assertEqual("■ assigned 1   ■ delivered 2   ■ partial 0   ■ blocked 0   ■ merged/completed 3   ■ errors/stalled 4",
                          " ".join(line.plain for line in charts.legend(series)))
 
-    def test_agent_rows_show_cpu_and_memory_bars(self):
-        from theseus.tui import rows
+    def test_agent_rows_show_cpu_per_core_and_memory_as_a_share_of_system_ram(self):
+        from theseus.tui import rows, theme
         agent = {"name": "a", "pane": "%1", "state": "working", "task": None, "room": None, "idleMinutes": None}
         state = {"agents": [{**agent, "cpu": 250.0, "rss": 2 * 2**30}, {**agent, "name": "b", "cpu": 40.0, "rss": 2**30},
-                            {**agent, "name": "c", "cpu": None, "rss": None}], "workers": [], "events": []}
-        cells = {key.split(":")[1]: [c.plain for c in found[7:9]] for key, found, _ in rows.agent_rows(state)}
-        self.assertEqual(["█████ 250%", "█████ 2.0G"], cells["a"])
-        self.assertEqual(["██░░░  40%", "██▌░░ 1.0G"], cells["b"])
+                            {**agent, "name": "c", "cpu": None, "rss": None},
+                            {**agent, "name": "d", "cpu": 5.0, "rss": 2**28}],
+                 "workers": [], "events": [], "host": {"memTotal": 8 * 2**30}}
+        found = {key.split(":")[1]: cells[7:9] for key, cells, _ in rows.agent_rows(state)}
+        cells = {name: [c.plain for c in pair] for name, pair in found.items()}
+        self.assertEqual(["█████ 250%", "█████ 2.0G 25%"], cells["a"])
+        self.assertEqual(["██░░░  40%", "██▌░░ 1.0G 12%"], cells["b"])
         self.assertEqual(["-", "-"], cells["c"])
+        self.assertEqual(["▎░░░░   5%", "▋░░░░ 256.0M  3%"], cells["d"])
+        bar = lambda name, index: found[name][index].style
+        self.assertEqual([theme.NEUTRAL] * 3, [bar(name, 0) for name in ("a", "b", "d")])
+        self.assertEqual([theme.RED, theme.YELLOW, theme.NEUTRAL], [bar(name, 1) for name in ("a", "b", "d")])
 
     def test_history_and_meters(self):
         from theseus.tui import charts
