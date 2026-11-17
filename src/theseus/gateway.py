@@ -38,6 +38,7 @@ import time
 from . import agents as ag
 from . import hostconfig
 from . import profiles
+from . import redaction
 from . import store
 
 DEFAULT_RESEND = ("The gateway error is over. Continue the current task from the state of your worktree and finish with "
@@ -57,24 +58,16 @@ STATUS_NAMES = {400: "bad request", 401: "unauthorized", 403: "forbidden", 404: 
                 504: "gateway timeout", 520: "origin error", 521: "origin down", 522: "connect timeout",
                 523: "origin unreachable", 524: "origin timeout", 529: "overloaded", 530: "tunnel down"}
 PARALLEL_CAP = "parallel cap"
-REDACTIONS = ((re.compile(r"(api[_ -]?key\s*[:=]\s*)[^\s,.;]+", re.IGNORECASE), r"\1[redacted]"),
-              (re.compile(r"\b(?:sk|pk|key)-[A-Za-z0-9_\-]{8,}"), "[redacted]"),
-              (re.compile(r"\b[0-9a-fA-F]{24,}\b"), "[redacted]"),
-              (re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"), "[email]"))
 
 
 def scrub(text):
     """text without API keys, key hashes or email addresses, its lines kept."""
-    text = str(text or "")
-    for pattern, replacement in REDACTIONS:
-        text = pattern.sub(replacement, text)
-    return text
+    return redaction.redact(text)
 
 
 def redact(text, limit=240):
     """A one-line excerpt of an error text without API keys, key hashes or email addresses."""
-    text = scrub(" ".join(str(text or "").split()))
-    return text if len(text) <= limit else text[:limit - 3] + "..."
+    return redaction.excerpt(text, limit)
 
 
 def classify(text, kind=None):

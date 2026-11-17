@@ -254,3 +254,20 @@ class CleanupTests(Sandbox):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RedactionTests(Sandbox):
+    def test_a_saved_screen_is_redacted_and_private(self):
+        from theseus import supervisor
+        screen = ("> run it\nusing api_key=abc123secret for someone@example.org\n"
+                  "token sk-abcdefghijklmnop and hash 3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c\n  indented line kept\n")
+        path = self.tmp / "crash-1.txt"
+        supervisor.save_screen(path, screen)
+        text = path.read_text()
+        for secret in ("abc123secret", "someone@example.org", "sk-abcdefghijklmnop", "3f9a8b7c6d5e"):
+            self.assertNotIn(secret, text)
+        self.assertIn("api_key=[redacted]", text)
+        self.assertIn("[email]", text)
+        self.assertEqual(5, len(text.split("\n")), "lines are kept")
+        self.assertIn("\n  indented line kept\n", text)
+        self.assertEqual(0o600, path.stat().st_mode & 0o777)

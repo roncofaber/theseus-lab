@@ -592,11 +592,9 @@ def record_exit(conf, name, gen, status=None, signal=None, srv=None):
     reason = classify(run, status)
     rec = record(conf, name) or {}
     if reason in ("crash", "exit") and rec.get("target"):
-        screen = (srv or server_of(rec)).capture(rec["pane"], history=200, ansi=False)
+        screen = (srv or server_of(rec)).capture(rec["pane"], history=200, ansi=False, join=True)
         if screen:
-            path = agent_dir(conf, name) / f"crash-{run['gen']}.txt"
-            path.write_text(screen)
-            path.chmod(0o600)
+            save_screen(agent_dir(conf, name) / f"crash-{run['gen']}.txt", screen)
     status_value = int(status) if str(status or "").lstrip("-").isdigit() else None
     with store.for_project(conf) as conn:
         if not store.close_run(conn, run["id"], reason, status_value, signal or None):
@@ -608,6 +606,15 @@ def record_exit(conf, name, gen, status=None, signal=None, srv=None):
     else:
         event(conf, "stopped", name, None, f"gen {run['gen']} ({reason})")
     return reason
+
+
+def save_screen(path, screen):
+    """Write a captured screen to a private file, redacted like the gateway excerpts. Every screen theseus keeps on
+    disk goes through here."""
+    from . import redaction
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as handle:
+        handle.write(redaction.redact(screen))
+    path.chmod(0o600)
 
 
 def crash_history(conf, name, now=None):
