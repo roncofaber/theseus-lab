@@ -3,6 +3,7 @@ the verified send with a stuck input box, fresh-context recovery and the host-wi
 an in-process stand-in for tmux, or the fake tmux executable of test_queue for the command-line checks."""
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from helpers import Sandbox
@@ -153,7 +154,7 @@ class FakeSend(GatewayCase):
         self.sent = []
         saved = self.ag.send_verified
 
-        def fake_send(conf, agent, text, task=None, expect_busy=True, profile=None, record=True, sleep=None):
+        def fake_send(conf, agent, text, task=None, expect_busy=True, profile=None, record=True, sleep=None, **extra):
             self.sent.append(text)
             return True, "sent"
         self.ag.send_verified = fake_send
@@ -272,3 +273,130 @@ class TypedErrorTests(FakeSend):
         self.assertNotIn("someone@example.org", gateway.classify(BUDGET_422)["excerpt"])
         self.assertEqual("token [redacted] used", gateway.redact("token sk-abcdefghijklmnop used"))
 
+
+class FakePanes:
+    """In-process tmux for many panes at once: Enter makes a pane show the busy marker on its next capture only, unless
+    the pane is deaf (nothing happens) or sticky (the typed text stays in its input line)."""
+
+    def __init__(self, deaf=(), sticky=()):
+        import threading
+        self.deaf, self.sticky, self.lines, self.busy, self.typed = set(deaf), set(sticky), {}, set(), []
+        self.lock = threading.Lock()
+
+    def __call__(self, *args):
+        args = list(args)
+        pane = args[args.index("-t") + 1] if "-t" in args else None
+        with self.lock:
+            if args[0] == "send-keys" and args[-1] == "Enter":
+                if pane not in self.deaf and pane not in self.sticky:
+                    self.busy.add(pane)
+            elif args[0] == "send-keys" and "-l" in args:
+                self.typed.append((pane, args[-1]))
+                if pane in self.sticky:
+                    self.lines[pane] = [f"{PROMPT} {args[-1]}"]
+            elif args[0] == "capture-pane":
+                lines = list(self.lines.get(pane, ["> "]))
+                if pane in self.busy:
+                    self.busy.discard(pane)
+                    lines.append("working (esc to interrupt)")
+                return subprocess.CompletedProcess(args, 0, "\n".join(lines) + "\n", "")
+            elif args[0] == "display":
+                return subprocess.CompletedProcess(args, 0, "1\n", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+
+class BatchedSendTests(GatewayCase):
+    """A queue tick types every message at once and verifies them together within its send budget, so many agents
+    that never confirm cost one verification window, not one each."""
+
+    def agents(self, count):
+        return [{"name": f"agent-{n:02d}", "pane": f"%{100 + n}"} for n in range(count)]
+
+    def use(self, panes):
+        saved = self.ag.tmux
+        self.ag.tmux = panes
+        self.addCleanup(setattr, self.ag, "tmux", saved)
+
+    def test_agents_that_never_confirm_cost_one_window_together_and_keep_send_failed(self):
+        from theseus import workqueue as wq
+        os.environ["THESEUS_SEND_VERIFY"] = "1"
+        agents = self.agents(8)
+        panes = FakePanes(deaf={a["pane"] for a in agents[:6]})
+        self.use(panes)
+        started = time.monotonic()
+        with self.ag.batched(30) as sends:
+            for agent in agents:
+                self.assertEqual((True, "typed; verifying"), self.ag.send_verified(self.conf, agent, f"Hello {agent['name']}."))
+            recorded = wq.verify_sends(self.conf, sends)
+        self.assertLess(time.monotonic() - started, 4, "six silent agents verified one after another take 6 s or more")
+        self.assertEqual(sorted(a["name"] for a in agents[:6]), sorted(e["agent"] for e in recorded))
+        self.assertTrue(all(e["kind"] == "send_failed" and "not busy after Enter" in e["detail"] for e in recorded))
+
+    def test_the_budget_starts_when_the_tick_verifies_and_an_unverified_profile_owes_nothing_twice(self):
+        from theseus import workqueue as wq
+        agent = self.agents(1)[0]
+        self.use(FakePanes())
+        with self.ag.batched(0.5) as sends:
+            self.ag.send_verified(self.conf, agent, "Continue.", "slow-task", kind="nudge")
+            time.sleep(0.6)
+            self.assertEqual([], wq.verify_sends(self.conf, sends))
+        self.assertEqual(["ok"], [item["result"] for item in sends.items], "time spent before verifying is not budget")
+        self.write("theseus.local.toml", '[workers.claude-code.interactive]\nbusy_pattern = ""\n')
+        from theseus import config as cfg
+        conf = cfg.load(root=self.project)
+        wq.owe_prompt(conf, "worker-a", "slow-task", "a test")
+        with self.ag.batched(5):
+            self.assertEqual("sent", wq.deliver_owed(conf, self.agent)[0])
+        self.assertIsNone(wq.owed(conf, "worker-a"), "a profile without a busy marker gets its prompt once")
+
+    def test_sends_left_over_by_the_budget_are_finished_by_the_next_tick(self):
+        from theseus import workqueue as wq
+        os.environ["THESEUS_SEND_VERIFY"] = "5"
+        answered, stuck, quick = self.agents(3)
+        panes = FakePanes(deaf={answered["pane"]}, sticky={stuck["pane"]})
+        self.use(panes)
+        started = time.monotonic()
+        with self.ag.batched(0.2) as sends:
+            for agent in (answered, stuck, quick):
+                self.ag.send_verified(self.conf, agent, "Continue the task.", "slow-task", kind="nudge")
+            self.assertEqual([], wq.verify_sends(self.conf, sends))
+        self.assertLess(time.monotonic() - started, 3, "the budget bounds the tick")
+        carried = {name: entry["verify"] for name, entry in wq.runtime(self.conf).items() if entry.get("verify")}
+        self.assertEqual({answered["name"], stuck["name"]}, set(carried), "the quick agent confirmed within the budget")
+        self.assertTrue(all(entry["carried"] for entry in carried.values()))
+        os.environ["THESEUS_SEND_VERIFY"] = "0.3"
+        with self.ag.batched(10) as sends:
+            found = wq.resume_sends(self.conf, [answered, stuck, quick], sends)
+            self.assertEqual([], found, "an agent that answered between ticks is not a failed send")
+            self.assertEqual([stuck["name"]], [item["agent"] for item in sends.items])
+            found = wq.verify_sends(self.conf, sends)
+        self.assertEqual([("send_failed", stuck["name"])], [(e["kind"], e["agent"]) for e in found])
+        self.assertIn("still holds the text after a second Enter", found[0]["detail"])
+        self.assertFalse(any(entry.get("verify") for entry in wq.runtime(self.conf).values()))
+
+
+class RestartPromptTests(GatewayCase):
+    def test_a_fresh_restart_with_its_task_owes_one_prompt_and_calls_off_a_gateway_resend(self):
+        from unittest import mock
+        from theseus import cli, store, supervisor
+        from theseus import workqueue as wq
+        with store.opened() as conn:
+            store.put_gateway_retry(conn, self.conf.name, "worker-a", task="slow-task", pool="claude-code", phase="waiting",
+                                    next_epoch=1.0)
+        task = {"id": "slow-task"}
+        restarts = []
+        gens = iter([{"gen": 1}, {"gen": 2}])
+        with mock.patch.object(supervisor, "current_task", return_value=task), \
+                mock.patch.object(supervisor, "last_run", side_effect=lambda *a: next(gens)), \
+                mock.patch.object(supervisor, "update"), mock.patch.object(supervisor, "record", return_value=None), \
+                mock.patch.object(supervisor, "restart", side_effect=lambda *a, **k: restarts.append(k) or (True, "ready")), \
+                mock.patch.object(self.ag, "entry", return_value=self.agent), mock.patch("builtins.print"):
+            self.assertEqual(1, cli.restart_agents(self.conf, ["worker-a"], fresh=True, with_task=False))
+            self.assertEqual([], restarts, "an agent with a task is not restarted fresh without --with-task")
+            self.pane.on_enter = [["Working (esc to interrupt)"]]
+            self.assertEqual(0, cli.restart_agents(self.conf, ["worker-a"], True, True, "Resume from your report."))
+        self.assertEqual([{"fresh": True}], restarts)
+        self.assertEqual(["Resume from your report."], self.pane.typed())
+        self.assertIsNone(wq.owed(self.conf, "worker-a"))
+        with store.opened() as conn:
+            self.assertEqual("resent", store.gateway_retry(conn, self.conf.name, "worker-a")["phase"])

@@ -86,6 +86,43 @@ class QueueTests(Sandbox):
                          [(s["state"], s["task"]) for s in samples])
         self.assertEqual(("first-task", "worker-a", "delivered"), (delivery["task"], delivery["agent"], delivery["result"]))
 
+    def test_a_fresh_context_gets_one_restart_prompt_before_anything_else(self):
+        self.replace_config("idle_minutes = 5", "idle_minutes = 0")
+        self.git("commit", "-q", "-am", "instant stall")
+        self.env["THESEUS_SEND_VERIFY"] = "0.5"
+        self.add("long-task")
+        self.theseus("queue", "tick")
+        from theseus import config as cfg, store
+        with store.opened() as conn:
+            store.put_gateway_retry(conn, "demo-port", "worker-a", task="long-task", pool="claude-code", code=524,
+                                    phase="waiting", next_epoch=1.0)
+        hint = "> \n  new task? /clear to save 150.0k tokens\n"
+        (self.state / "screen-%1").write_text(hint)
+        (self.state / "stuck-%1").write_text("")
+        out = self.theseus("queue", "tick").stdout
+        self.assertIn("nudged", out)
+        self.assertIn("send_failed", out, "the first restart prompt was not confirmed")
+        with store.opened() as conn:
+            self.assertEqual("resent", store.gateway_retry(conn, "demo-port", "worker-a")["phase"],
+                             "the scheduled gateway resend is called off")
+        self.theseus("queue", "tick")
+        (self.state / "stuck-%1").unlink()
+        out = self.theseus("queue", "tick").stdout
+        self.assertRegex(out, r"nudged\s+worker-a\s+long-task restart prompt after an idle stop")
+        (self.state / "screen-%1").write_text("> \n")
+        self.assertIn("stalled", self.theseus("queue", "tick").stdout, "a stall after the prompt goes to the coordinator")
+        texts = [line.split(" -l ", 1)[1] for line in self.typed().splitlines() if " -t %1 -l " in line]
+        after = texts[texts.index("/clear") + 1:]
+        self.assertEqual(3, len(after), after)
+        self.assertTrue(all("Your context was cleared" in text for text in after), "nothing but the restart prompt")
+        prompt = after[0]
+        for expected in ("long-task", "Objective: Do it.", "docs/investigations/long-task.md", "prompt.md",
+                         "read large files in line ranges".lower()):
+            self.assertIn(expected.lower(), prompt.lower())
+        conf = cfg.load(root=self.project)
+        from theseus import workqueue as wq
+        self.assertIsNone(wq.owed(conf, "worker-a"))
+
     def test_a_minimum_capability_limits_which_agents_take_it(self):
         (self.tmp / "config.toml").write_text('[workers.strong]\npreset = "claude-code"\ncapability = 3\n'
                                               '[workers.with-mcp]\npreset = "claude-code"\nmcp_servers = ["theseus"]\n')

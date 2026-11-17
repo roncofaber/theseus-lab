@@ -757,7 +757,7 @@ class ChartTests(unittest.TestCase):
 
     def test_agent_rows_show_plain_cpu_memory_and_a_context_meter(self):
         from theseus.tui import rows, theme
-        self.assertEqual(("CPU (core %)", "MEM (RAM)", "context"), rows.AGENT_COLUMNS[4:7])
+        self.assertEqual(("CPU (core %)", "MEM (RAM)", "context"), rows.AGENT_COLUMNS[3:6])
         agent = {"name": "a", "pane": "%1", "state": "working", "task": None, "room": None, "idleMinutes": None}
         state = {"agents": [{**agent, "cpu": 250.0, "rss": 2 * 2**30,
                              "context": {"tokens": 170000, "limit": 200000, "source": "transcript"}},
@@ -767,7 +767,7 @@ class ChartTests(unittest.TestCase):
                             {**agent, "name": "d", "cpu": 5.0, "rss": 2**28,
                              "context": {"tokens": 120000, "limit": 200000, "source": "transcript"}}],
                  "workers": [], "events": [], "host": {"memTotal": 8 * 2**30}}
-        found = {key.split(":")[1]: cells[4:7] for key, cells, _ in rows.agent_rows(state)}
+        found = {key.split(":")[1]: cells[3:6] for key, cells, _ in rows.agent_rows(state)}
         cells = {name: [c.plain for c in triple] for name, triple in found.items()}
         self.assertEqual(["250%", "2.0G 25%", "███▍ 170k/200k"], cells["a"])
         self.assertEqual(["40%", "1.0G 12%", "█▋░░ 87k/200k ~"], cells["b"])
