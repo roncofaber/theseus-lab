@@ -368,6 +368,20 @@ class SupervisorTests(Sandbox):
         self.assertEqual(2, len(starts))
         self.assertIn("resume= ", starts[-1])
 
+    def test_the_transcript_of_a_supervised_agent_comes_from_its_stored_session_id(self):
+        sessions = self.tmp / "claude/sessions"
+        sessions.mkdir(parents=True)
+        self.replace_config("status_command = []", f'status_command = []\nsessions_dir = "{sessions}"')
+        self.git("commit", "-q", "-am", "sessions dir")
+        self.up("demo-fake-1")
+        from theseus import agents, transcripts
+        rec = agents.get(self.conf(), "demo-fake-1")
+        path = transcripts.transcript_path(sessions, rec["session_id"], str(self.project))
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"type": "assistant", "message": {"model": "m", "usage": {"input_tokens": 1234}}}) + "\n")
+        self.assertEqual(1234, agents.session_transcript(self.conf(), rec)["tokens"])
+        self.assertEqual(1234, agents.state(self.conf(), rec)["context"]["tokens"])
+
     def add_task(self, task_id):
         self.theseus("tasks", "milestone", "M1")
         self.theseus("tasks", "add", task_id, "--role", "research", "--owned", f"docs/investigations/{task_id}.md",

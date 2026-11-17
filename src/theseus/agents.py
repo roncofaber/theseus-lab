@@ -144,7 +144,8 @@ def on(server, *args):
 
 def session_transcript(conf, agent):
     """The Claude Code transcript state (theseus.transcripts.read) of the session in the agent's pane, or None when
-    the profile has no sessions directory or no live client names the pane."""
+    the profile has no sessions directory or no live client names the pane. A supervised agent's stored session id
+    (kept current from the agent CLI's status) names its transcript directly."""
     from . import profiles
     from . import transcripts
     try:
@@ -155,6 +156,14 @@ def session_transcript(conf, agent):
     if not directory:
         return None
     server, pane = where(agent)
+    if agent.get("managed") and agent.get("session_id"):
+        from . import supervisor
+        path = transcripts.transcript_path(directory, agent["session_id"], str(supervisor.cwd(conf)))
+        if path.exists():
+            try:
+                return transcripts.read(path)
+            except OSError:
+                return None
     pids, exclude = None, ()
     if server.is_legacy:
         address = tmux("display", "-p", "-t", pane, "#{window_id}.#{pane_id}").stdout.strip()
