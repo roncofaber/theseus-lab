@@ -5,6 +5,8 @@ machine state, not repository content. It starts from [[instances.panes]] in the
 project runs: `theseus agents add|remove|enable|disable`. A disabled agent keeps its record but receives no new work
 from the queue. A project's <data>/agents.json, the registry before the store, is imported once and left in place.
 """
+import os
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -154,6 +156,90 @@ def pane_stall(conf, pane, profile=None, screen=None):
     return next((pattern for pattern in patterns if pattern in text), None)
 
 
+def send_settings(conf):
+    """(timeout, poll) in seconds for verified sends: instances.send_verify_seconds, THESEUS_SEND_VERIFY and
+    THESEUS_SEND_POLL override them (tests)."""
+    timeout = os.environ.get("THESEUS_SEND_VERIFY") or conf.section("instances").get("send_verify_seconds")
+    poll = os.environ.get("THESEUS_SEND_POLL") or 0.5
+    return (10.0 if timeout in (None, "") else float(timeout)), float(poll)
+
+
+def input_holds(screen, text, pattern=None, lines=8):
+    """Whether the pane's input line still holds the start of text (typed but never submitted). With the profile's
+    input_pattern the last matching line in the bottom lines is the input line; without one, any bottom line counts."""
+    wanted = " ".join(text.split())[:40]
+    if not wanted:
+        return False
+    bottom = screen[-lines:]
+    if pattern:
+        regex = re.compile(pattern)
+        held = [m.group(1) for m in (regex.match(line) for line in bottom) if m]
+        if not held:
+            return False
+        content = " ".join(held[-1].split())
+        return bool(content) and (wanted.startswith(content[:40]) or content.startswith(wanted))
+    return any(wanted[:20] in " ".join(line.split()) for line in bottom)
+
+
+def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, record=True, sleep=time.sleep):
+    """Type text into an agent's pane and confirm it was submitted: within instances.send_verify_seconds the pane must
+    show the profile's busy marker (expect_busy) or, for slash commands, no longer hold the text in its input line.
+    If the text is still in the input line, Enter is pressed once more and the pane checked again. Returns (ok, detail);
+    a failure records a send_failed event unless record is False. Profiles without a busy marker are sent unverified."""
+    from . import profiles
+    from . import workqueue
+    pane = agent["pane"]
+    profile = profile or workqueue.launched(conf, agent)
+    settings = profiles.interactive(conf, profile)
+    try:
+        busy_pattern = profiles.instance_env(conf, profile)["THESEUS_BUSY_PATTERN"]
+    except profiles.ProfileError:
+        busy_pattern = conf.section("instances").get("busy_pattern") or ""
+    timeout, poll = send_settings(conf)
+    input_pattern = settings.get("input_pattern")
+
+    def submitted():
+        screen = pane_screen(pane)
+        if expect_busy:
+            return any(busy_pattern in line for line in screen[-3:]), screen
+        return not input_holds(screen, text, input_pattern), screen
+
+    def wait():
+        deadline = time.monotonic() + timeout
+        while True:
+            ok, screen = submitted()
+            if ok or time.monotonic() >= deadline:
+                return ok, screen
+            sleep(poll)
+
+    if settings.get("clear_input"):
+        tmux("send-keys", "-t", pane, settings["clear_input"])
+    typed = tmux("send-keys", "-t", pane, "-l", text)
+    if typed.returncode != 0:
+        detail = f"tmux send-keys failed: {(typed.stderr or '').strip()[:120]}"
+    else:
+        sleep(0.3)
+        tmux("send-keys", "-t", pane, "Enter")
+        if expect_busy and not busy_pattern:
+            return True, "sent (unverified: the profile has no busy marker)"
+        ok, screen = wait()
+        if ok:
+            return True, "sent"
+        if input_holds(screen, text, input_pattern):
+            tmux("send-keys", "-t", pane, "Enter")
+            ok, screen = wait()
+            if ok:
+                return True, "sent after a second Enter"
+            detail = "the input line still holds the text after a second Enter"
+        else:
+            detail = "not busy after Enter and the text is not in the input line"
+        detail += f" ({timeout:g}s each)"
+    if record:
+        short = " ".join(text.split())
+        workqueue.event(conf, "send_failed", agent["name"], task, f"{detail}: {short[:60]!r}")
+    return False, detail
+
+
 def current_task(conf, name):
     """The open task assigned to this agent (owner provider:<name>:...), if any."""
     from . import tasks as t
@@ -213,11 +299,14 @@ def handoff_final(conf, handoff):
 
 
 def state(conf, agent):
-    """Live state: offline, busy, working, delivered, thrashing, stalled, quiet, free (plus disabled). A handoff counts
+    """Live state: offline, busy, working, delivered, thrashing, gateway_error, stalled, quiet, free (plus disabled).
+    An idle pane whose bottom lines show a gateway error of its profile while it holds a task is gateway_error, with the
+    parsed error in "gateway" (theseus.gateway); "contextTokens" is the profile's context hint when shown. A handoff counts
     as delivered only once the pane is idle and the handoff is final (handoff_final). A pane that shows one of the profile's
     stall patterns (interactive.stall_patterns) while it holds a task is thrashing at once, busy or not, with the
     pattern in "stall". Without a busy marker for the agent's profile a long silence is reported as quiet, never stalled, so the
     queue does not type nudges into a working agent."""
+    from . import gateway
     from . import rooms
     from . import tasks as t
     pane = agent["pane"]
@@ -230,6 +319,8 @@ def state(conf, agent):
         return info
     screen = pane_screen(pane)
     busy = pane_busy(conf, pane, agent.get("provider"), screen)
+    info["busy"] = busy
+    info["contextTokens"] = gateway.context_tokens(conf, agent.get("provider"), screen)
     if task:
         handoff = handoff_path(task)
         worktree = task.get("worktree")
@@ -241,6 +332,10 @@ def state(conf, agent):
         elif stall := pane_stall(conf, pane, agent.get("provider"), screen):
             info["state"] = "thrashing"
             info["stall"] = stall
+        elif not busy and (error := gateway.detect(conf, agent.get("provider"), screen)) \
+                and not gateway.stale(conf, agent["name"], error):
+            info["state"] = "gateway_error"
+            info["gateway"] = error
         elif busy:
             info["state"] = "working"
         elif info["idleMinutes"] is not None and info["idleMinutes"] >= idle_limit(conf):

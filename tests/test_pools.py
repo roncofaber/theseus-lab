@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+import helpers  # noqa: F401  (isolates the host store for the whole run)
 from theseus import pools, store
 
 ISOLATED = ("THESEUS_POOLS", "THESEUS_POOL_STATE", "THESEUS_DB", "THESEUS_REGISTRY", "THESEUS_BACKUPS",

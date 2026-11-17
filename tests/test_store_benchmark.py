@@ -14,6 +14,7 @@ import time
 import unittest
 from pathlib import Path
 
+import helpers  # noqa: F401  (isolates the host store for the whole run)
 from theseus import store
 
 EVENTS = 200_000

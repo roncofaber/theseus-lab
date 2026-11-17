@@ -207,6 +207,8 @@ class HostView(VerticalScroll):
             yield ItemGrid(id="cards", min_column_width=44, regular=False)
         with Panel("POOLS", id="pools-panel"):
             yield table("pools", R.POOL_COLUMNS)
+        with Panel("GATEWAY health per pool, last 24 hours", id="gateway-panel"):
+            yield table("gateway", R.GATEWAY_COLUMNS)
         with Panel("EVENTS across projects, newest first", id="events-panel"):
             yield table("events", R.HOST_EVENT_COLUMNS)
 
@@ -237,6 +239,7 @@ class HostView(VerticalScroll):
                 card.show(items[card.root])
                 card.display = not needle or needle in card.search
         fill(self.query_one("#pools", DataTable), R.matches(R.pool_rows(snap["pools"]), text))
+        fill(self.query_one("#gateway", DataTable), R.matches(R.gateway_rows(snap.get("gateway")), text))
         fill(self.query_one("#events", DataTable), R.matches(R.event_rows(snap["events"], project=True), text))
 
 

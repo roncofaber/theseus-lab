@@ -280,21 +280,7 @@ def cmd_instance(args):
         print(f"worktree {worktree} base {base[:12]}")
         return
     if args.instance_action == "send":
-        from . import tasks as t
-        task = t.Queue(conf).get(args.task)
-        record = (f"Owned paths: {', '.join(task['ownedPaths'])}. Objective: {task['objective']} "
-                  f"Contract: {task.get('generalContract') or 'not recorded'} Acceptance: {' | '.join(task['acceptance'])}.")
-        if task.get("assignmentNote"):
-            record += f" Coordinator notes: {task['assignmentNote']}"
-        log_dir = (task.get("execution") or {}).get("logDir")
-        if log_dir:
-            record += f" Log directory (handoff.md, changed.sha256): {log_dir}."
-        from . import rooms
-        record += rooms.message(conf, task)
-        if task.get("worktree") == str(conf.root):
-            record += (" In-place assignment: there is no separate worktree; edit only your owned paths in the main checkout,"
-                       " other workers share it, and never commit, stash or push.")
-        sys.exit(run_script("instance-send.sh", [args.pane, args.task, args.worktree, record, args.deadline or ""], conf, args.pane))
+        sys.exit(instance_send(conf, args))
     if args.instance_action == "watch":
         sys.exit(run_script("instance-watch.sh", args.panes, conf))
     if args.instance_action == "restart":
@@ -308,6 +294,59 @@ def cmd_instance(args):
                 if entry["pane"] == args.pane:
                     print(rooms.clear_taint(conf, entry["name"]))
         sys.exit(status)
+
+
+def instance_send(conf, args):
+    """theseus instance send AGENT (TEXT | --file PATH), or the older PANE TASK WORKTREE [DEADLINE] task message."""
+    import time
+    from . import agents, workqueue
+    registered = agents.agents(conf)
+    agent = next((a for a in registered if args.target in (a["name"], a["pane"])), None)
+    if agent is None:
+        if not args.target.startswith("%") and ":" not in args.target:
+            print(f"theseus: {args.target} is neither a registered agent nor a tmux pane (%N or session:window.pane)",
+                  file=sys.stderr)
+            return 2
+        agent = {"name": args.target, "pane": args.target}
+    if args.file and args.rest or not args.file and len(args.rest) not in (1, 2, 3):
+        print("usage: theseus instance send AGENT (TEXT | --file PATH), or PANE TASK WORKTREE [DEADLINE]", file=sys.stderr)
+        return 2
+    task_id = None
+    if args.file:
+        text = Path(args.file).read_text().strip()
+    elif len(args.rest) == 1:
+        text = args.rest[0]
+    else:
+        from . import rooms
+        from . import tasks as t
+        task_id, worktree = args.rest[0], args.rest[1]
+        task = t.Queue(conf).get(task_id)
+        record = (f"Owned paths: {', '.join(task['ownedPaths'])}. Objective: {task['objective']} "
+                  f"Contract: {task.get('generalContract') or 'not recorded'} Acceptance: {' | '.join(task['acceptance'])}.")
+        if task.get("assignmentNote"):
+            record += f" Coordinator notes: {task['assignmentNote']}"
+        log_dir = (task.get("execution") or {}).get("logDir")
+        if log_dir:
+            record += f" Log directory (handoff.md, changed.sha256): {log_dir}."
+        record += rooms.message(conf, task)
+        if task.get("worktree") == str(conf.root):
+            record += (" In-place assignment: there is no separate worktree; edit only your owned paths in the main checkout,"
+                       " other workers share it, and never commit, stash or push.")
+        deadline = args.rest[2] if len(args.rest) == 3 else ""
+        text = workqueue.task_message(conf, task_id, worktree, record, deadline, workqueue.launched(conf, agent))
+    if not text:
+        print("theseus: nothing to send", file=sys.stderr)
+        return 2
+    poll = float(os.environ.get("THESEUS_TYPE_POLL") or 5)
+    deadline_at = time.monotonic() + args.wait
+    while agents.pane_busy(conf, agent["pane"], workqueue.launched(conf, agent)) and time.monotonic() < deadline_at:
+        time.sleep(poll)
+    if agents.pane_busy(conf, agent["pane"], workqueue.launched(conf, agent)):
+        print(f"{agent['pane']} still busy after {args.wait:g}s; not sending", file=sys.stderr)
+        return 1
+    ok, detail = agents.send_verified(conf, agent, text, task_id)
+    print(f"{agent['pane']}: {detail}" + (f" ({task_id})" if task_id and ok else ""), file=sys.stdout if ok else sys.stderr)
+    return 0 if ok else 1
 
 
 def cmd_dispatch(args):
@@ -773,11 +812,12 @@ def build_parser():
     p.add_argument("--no-commit", action="store_true")
     p.add_argument("--in-place", action="store_true",
                    help="no worktree and no commit: edit owned paths in the main checkout (docs-only rounds, or before a first commit)")
-    p = ins.add_parser("send", help="type the task message into an idle pane")
-    p.add_argument("pane")
-    p.add_argument("task")
-    p.add_argument("worktree")
-    p.add_argument("deadline", nargs="?")
+    p = ins.add_parser("send", help="type text into an agent's pane once idle and confirm it was submitted (send_failed "
+                                    "otherwise); PANE TASK WORKTREE [DEADLINE] types a task message")
+    p.add_argument("target", metavar="AGENT", help="registered agent name or tmux pane")
+    p.add_argument("rest", nargs="*", metavar="TEXT", help="the text, or TASK WORKTREE [DEADLINE]")
+    p.add_argument("--file", help="send the contents of this file instead of TEXT")
+    p.add_argument("--wait", type=float, default=180, help="seconds to wait for an idle pane first (default 180)")
     p = ins.add_parser("watch", help="print HANDOFF and IDLE-NO-HANDOFF events (run under a monitor)")
     p.add_argument("panes", nargs="*", metavar="INSTANCE:PANE")
     p = ins.add_parser("restart", help="restart a pane's agent and resume its session (reloads MCP servers and skills)")

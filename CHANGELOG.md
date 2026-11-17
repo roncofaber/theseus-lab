@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Added
 
+- Gateway error recovery for persistent instances: an idle pane showing a gateway error of its profile (`interactive.gateway_patterns`) is in state `gateway_error`; retryable errors (429, 5xx) are resent after `max(retry_after, backoff)` with `gateway_error` and `resent` events, a fresh context (`/clear` and a restart prompt) from the second error of a task or above `gateway.clear_tokens`, and a `stalled` event after `gateway.attempts`; fatal errors record an `error` event and are never resent. Retry state lives in the host store (schema version 3, additive). A host-wide circuit breaker (`[gateway]` in the host config) pauses assignments and resends on a gateway pool (`gateway_paused`), and `theseus top` shows gateway health per pool.
+- Verified send: every message the queue types is checked for submission (busy marker, one more Enter for a stuck input line, `send_failed` otherwise), and `theseus instance send AGENT (TEXT | --file PATH)` exposes it to coordinators.
+- `THESEUS_DB_GUARD`: a path the host store refuses to open; the test suite isolates the host store, host configuration and XDG roots for the whole run and fences off the real database with it.
 - `theseus top` is now an interactive Textual dashboard over every project on the host: a Host tab (projects, pools, merged events) and one tab per project (agents, waiting tasks, events, activity sparklines), with `/` filtering, `p` to pause or resume a queue, `r` to refresh and Enter on an agent to switch your tmux client to its pane. It runs outside any project too.
 - Host registry filled by every command that loads a project configuration, and `theseus projects` to list it.
 - `theseus top --host --once` and `--host --json` for a plain host summary, and `theseus top --interval SECONDS`.

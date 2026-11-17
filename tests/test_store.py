@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import helpers  # noqa: F401  (isolates the host store for the whole run)
 from theseus import pools, store
 
 SPEC = {"max": 2, "priority": ["first", "second"]}

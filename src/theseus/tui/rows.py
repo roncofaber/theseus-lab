@@ -1,5 +1,8 @@
 """Table rows and panel texts for the dashboard: (key, cells, search text) and Rich text built from snapshots, with no
 widget code."""
+import time
+from datetime import datetime, timezone
+
 from rich.text import Text
 
 from .. import host, top
@@ -10,6 +13,7 @@ WAITING_COLUMNS = ("status", "task", "room", "for", "posted", "reason")
 EVENT_COLUMNS = ("time", "kind", "agent", "task", "detail")
 HOST_EVENT_COLUMNS = ("time", "project", "kind", "agent", "task", "detail")
 POOL_COLUMNS = ("pool", "working", "holders", "claims")
+GATEWAY_COLUMNS = ("pool", "recent codes", "last error", "last success", "paused until")
 WAITING_STYLE = {"review": "magenta", "merged": "cyan", "ready": "yellow", "blocked": "dim", "held": "dim"}
 
 
@@ -113,6 +117,22 @@ def pool_rows(state_pools):
         rows.append(row(f"pool:{pool['pool']}", [
             cell(pool["pool"], "bold"), cell(f"{pool['active']}/{pool['max']}", "bold red" if full else "bold green"),
             holders if holders else "-", cell(", ".join(pool["claims"]) or "-", "yellow" if pool["claims"] else "")]))
+    return rows
+
+
+def gateway_rows(entries, now=None):
+    now = time.time() if now is None else now
+    rows = []
+    for entry in entries or []:
+        codes = " ".join(str(code or "?") for code in entry.get("codes") or []) or "-"
+        last_error = f"{top.duration(now - entry['lastError'])} ago" if entry.get("lastError") else "-"
+        last_ok = f"{top.duration(now - entry['lastSuccess'])} ago" if entry.get("lastSuccess") else "never"
+        until = entry.get("pausedUntil")
+        paused = (top.local_clock(datetime.fromtimestamp(until, timezone.utc).isoformat()) + (f" {entry['reason']}" if entry.get("reason") else "")
+                  if until else "-")
+        rows.append(row(f"gateway:{entry['pool']}", [cell(entry["pool"], "bold"), cell(codes, "yellow"), cell(last_error),
+                                                      cell(last_ok, "green" if entry.get("lastSuccess") else "dim"),
+                                                      cell(paused, "bold red" if until else "")]))
     return rows
 
 

@@ -7,8 +7,10 @@ A profile describes one agent CLI:
 - session: "preassign" when the CLI accepts a session ID chosen by theseus, "none" otherwise;
 - env, model_flag, permission_mode: how the model and permissions are passed;
 - retry: whether a retryable gateway error (Claude JSON output) resumes the run automatically;
-- interactive: the persistent-instance behavior in a tmux pane (launch, resume, busy marker, stall patterns, extra
-  environment, compact and clear commands, where session records live, whether the agent can message the coordinator).
+- interactive: the persistent-instance behavior in a tmux pane (launch, resume, busy marker, stall patterns, gateway
+  error patterns and the idle marker shown after one, the context-size hint, the input line and the key that empties it,
+  extra environment, compact and clear commands, where session records live, whether the agent can message the
+  coordinator).
 
 Placeholders: {command} {prompt} {message} {session} {model} {permission_mode} {keep} {agent}; an item "{model_args}" expands to
 [model_flag, model] when a model is set and to nothing otherwise. Presets marked verified: false follow the CLI's
@@ -36,6 +38,13 @@ CLAUDE_INTERACTIVE = {
     "resume_missing": "No conversation found with session ID",
     "busy_pattern": "esc to interrupt",
     "stall_patterns": ["Autocompact is thrashing"],
+    "gateway_patterns": [r"API Error: 5\d\d", r"\bError 52\d\b", r"API Error: 529|overloaded_error",
+                         r"API Error: 429|429 Too Many Requests|rate_limit_error|[Rr]ate limit (reached|exceeded)",
+                         r"API Error: 4\d\d", r"Resend your message to try again", r"[Pp]rompt is too long"],
+    "gateway_ready": "Resend your message to try again",
+    "context_pattern": r"/clear to save ([0-9.]+)(k?) tokens",
+    "input_pattern": "^\\s*[>\u276f]\\s?(.*)$",
+    "clear_input": "C-u",
     "env": {},
     "compact": "/compact Keep only: {keep}; drop finished task details.",
     "clear": "/clear",
@@ -300,6 +309,14 @@ def interactive_launch(conf, profile, agent=None):
 def stall_patterns(conf, profile_name=None):
     """Screen text that means the agent stopped and needs the coordinator (interactive.stall_patterns)."""
     return list((resolve(conf, profile_name).get("interactive") or {}).get("stall_patterns") or [])
+
+
+def interactive(conf, profile_name=None):
+    """The persistent-instance settings of a profile ({} when it has none or does not resolve)."""
+    try:
+        return dict(resolve(conf, profile_name).get("interactive") or {})
+    except ProfileError:
+        return {}
 
 
 def instance_env(conf, profile_name=None, agent=None):

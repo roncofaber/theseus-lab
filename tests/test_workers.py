@@ -34,8 +34,10 @@ while :; do sleep 0.1; done
 
 FAKE_TMUX = """#!/usr/bin/env bash
 case "$1" in
-    capture-pane) cat "$FAKE_TMUX_SCREEN" 2>/dev/null ;;
-    send-keys) shift; printf '%s\\n' "$*" >> "$FAKE_TMUX_LOG" ;;
+    capture-pane) cat "$FAKE_TMUX_SCREEN" 2>/dev/null
+        if [ -e "$FAKE_TMUX_SCREEN.busy" ]; then echo "working (esc to interrupt)"; rm -f "$FAKE_TMUX_SCREEN.busy"; fi ;;
+    send-keys) shift; printf '%s\\n' "$*" >> "$FAKE_TMUX_LOG"
+        if [ "${!#}" = Enter ]; then touch "$FAKE_TMUX_SCREEN.busy"; fi ;;
     *) exit 1 ;;
 esac
 """

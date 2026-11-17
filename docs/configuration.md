@@ -80,7 +80,8 @@ capacity = 2       # everything else comes from the host profile
 | `[commands]` | `build`, `smoke`, `verify`, `smoke_timeout`. Each is a list of shell commands; `$THESEUS_BUILD_DIR` is a build folder unique to each checkout |
 | `[limits]` | `heavy_runs`: how many builds and verifications may run at once on this machine |
 | `[workers]` | `default` (agent profile), `retries`; `[workers.<profile>]` adjusts or defines a profile (see [Agent profiles](agent-profiles.md)) |
-| `[instances]` | Long-running agents: `coordinator` (session name to report to, for agents that support messaging), `brief`, `idle_minutes`, `handoff_settle_seconds`; `busy_pattern`, `launch`, `sessions_dir` override the profile |
+| `[instances]` | Long-running agents: `coordinator` (session name to report to, for agents that support messaging), `brief`, `idle_minutes`, `handoff_settle_seconds`, `send_verify_seconds` (how long a verified send waits for the busy marker, default 10); `busy_pattern`, `launch`, `sessions_dir` override the profile |
+| `[gateway]` | Gateway error recovery in persistent panes: `attempts` (3), `backoff` (`[120, 240, 480]` seconds), `slow_codes` (`[530]`) and `slow_factor` (2), `stagger_seconds` (30, spacing of 429 resends across a pool), `resend` (the continue text), `clear_tokens` (120000), `fresh_after_errors` (2), `screen_lines` (15, bottom lines searched for an error) |
 | `[git]` | `base` (`HEAD`, or `origin/main` to fetch first), `remote`, `branch` |
 | `[verification]` | `code_paths`, `doc_paths` (changes there need no verification), `max_unverified_merges`, `max_unverified_hours` |
 | `[rooms]` | Clean-room mode: `enabled`, `taint` (`until-clear` or `permanent`), `clean_instances`, `dirty_instances`, `dirty_paths`, `dirty_data`, `spec_paths` |
@@ -101,7 +102,8 @@ The scaffolded `theseus.toml` documents every key with comments. It sets `[worke
 | `[pools.<name>]` | `max`, `priority` (see [Sharing agents between projects](#sharing-agents-between-projects)) |
 | `[store]` | `[store.retention]` and `[store.backups]` (see [Host store](#host-store)) |
 | `[tools.paths]` | Tool locations on this machine, by tool name (see [External tools](#external-tools)) |
-| `[defaults]` | Values for project keys a project leaves unset: `workers.default`, `workers.retries`, `limits.heavy_runs`, `paths.data`, `paths.scratch`, `paths.worktrees`, `instances.idle_minutes`, `instances.handoff_settle_seconds`, `queue.interval`, `re.clients` |
+| `[gateway]` | The host-wide gateway circuit breaker: `breaker_errors` (3 different agents), `breaker_window_minutes` (10), `strong_codes` (`[530]`, one such error pauses the pool) |
+| `[defaults]` | Values for project keys a project leaves unset: `workers.default`, `workers.retries`, `limits.heavy_runs`, `paths.data`, `paths.scratch`, `paths.worktrees`, `instances.idle_minutes`, `instances.handoff_settle_seconds`, `instances.send_verify_seconds`, `queue.interval`, `re.clients`, and the `gateway.*` keys of the project table |
 
 `theseus config check` reports an unknown section, an unknown profile key, pool key or store key as an error naming the file and the key, and an unknown `[defaults]` key as a warning (it is ignored). A host file that does not parse, or has an unknown section, makes every command that reads it (anything that loads a project, `theseus pool`, the host store settings) stop with that message; `theseus top` leaves the pools out.
 

@@ -6,15 +6,21 @@ A tick looks at every registered agent and acts on its state:
 - stalled (idle past instances.idle_minutes with no handoff): one `continue` nudge, then a `stalled` event;
 - thrashing (the pane shows a stall pattern of its profile, such as Claude Code's autocompact thrashing notice): one
   `stalled` event at once and no nudge, since typing more into that context only refills it;
-- free (enabled, no open task): if a ready task fits its room, the agent is reset (a full /clear when it carries dirty
-  context into clean work, a /compact otherwise), the task is assigned on a fresh worktree, and its message is sent.
+- gateway_error (an idle pane shows a gateway error of its profile): retried with backoff, a fresh context when needed
+  and a host-wide circuit breaker (theseus.gateway); a `stalled` event once the resends run out, an `error` event at
+  once for a fatal error;
+- free (enabled, no open task, its gateway pool not paused): if a ready task fits its room, the agent is reset (a full
+  /clear when it carries dirty context into clean work, a /compact otherwise), the task is assigned on a fresh
+  worktree, and its message is sent.
 A task with a "profile" goes only to agents registered with that profile, or to agents whose profile differs from it only in
 MCP servers or environment: those are relaunched onto it in their pane first (session resumed, a `relaunched` event),
 and back onto their registered profile before their next task that does not need it. The profile an agent currently
 runs is kept in the runtime state (`launched`).
 Tasks with "hold": true are never assigned by the queue; `theseus queue pause` stops all assignment. Events go to the
-host store (theseus.store); `theseus queue wait` blocks until one needs the coordinator. Each tick also writes one
-state sample per registered agent and, at most once a day across the host, runs the store's maintenance and backup.
+host store (theseus.store); `theseus queue wait` blocks until one needs the coordinator. Every message the queue types
+(task messages, nudges, gateway resends, restart prompts) goes through agents.send_verified, which confirms the agent
+started working and records `send_failed` when it did not. Each tick also writes one state sample per registered agent
+and, at most once a day across the host, runs the store's maintenance and backup.
 <data>/queue/events.jsonl still receives a plain-text copy of every event as an audit trail; it is deprecated and
 nothing reads it after the one-time import.
 """
@@ -195,9 +201,10 @@ def assign_and_send(conf, agent, task):
         record += f" Coordinator notes: {task['assignmentNote']}"
     record += rooms.message(conf, task)
     deadline = conf.section("queue").get("deadline") or ""
-    result = run_script(conf, "instance-send.sh", [agent["pane"], task["id"], str(worktree), record, deadline], agent)
-    if result.returncode != 0:
-        return False, (result.stderr or result.stdout).strip()
+    text = task_message(conf, task["id"], worktree, record, deadline, launched(conf, agent))
+    ok, detail = ag.send_verified(conf, agent, text, task["id"])
+    if not ok:
+        return False, f"task message not submitted: {detail}"
     state = runtime(conf)
     state.setdefault(agent["name"], {}).update({"last_task": task["id"], "assigned": ag.now(), "nudged": None,
                                                 "thrashing": None})
@@ -205,15 +212,39 @@ def assign_and_send(conf, agent, task):
     return True, str(worktree)
 
 
-def nudge(conf, agent, task):
+def task_message(conf, task_id, worktree, record, deadline="", profile=None):
+    """The message that hands a persistent agent its task: the standing brief to re-read, the worktree, the task record,
+    an optional deadline and how to report back."""
+    from . import profiles
+    brief = os.environ.get("THESEUS_BRIEF") or str(conf.root / (conf.section("instances").get("brief") or ""))
+    coordinator = os.environ.get("THESEUS_COORDINATOR") or str(conf.section("instances").get("coordinator") or "")
+    try:
+        messaging = profiles.instance_env(conf, profile)["THESEUS_MESSAGING"] == "1"
+    except profiles.ProfileError:
+        messaging = True
+    message = f"Read and follow {brief} first. New task {task_id} in worktree {worktree}. {record}"
+    if deadline:
+        message += f" Deadline: {deadline}; if the work cannot be finished by then, deliver a partial handoff with what works."
+    message += " Run only the checks named here. Finish with the handoff and a done line"
+    message += f" sent to the coordinator session {coordinator} with SendMessage." if coordinator and messaging else "."
+    return message
+
+
+def nudge(conf, agent, task, info=None):
+    """Type the continue nudge (queue.nudge) through the verified send; when the pane's context hint is at least
+    gateway.clear_tokens, clear the context and send a restart prompt instead."""
+    from . import gateway
     text = conf.section("queue").get("nudge") or (
         "Continue the current task from the state of your worktree; if an error stopped you, retry the last step, "
         "and finish with the handoff and your done line.")
-    result = run_script(conf, "instance-type.sh", [agent["pane"], text], agent)
+    limit = gateway.settings(conf)["clear_tokens"]
+    tokens = (info or {}).get("contextTokens") or 0
+    fresh = bool(limit and tokens >= limit)
+    ok, _ = gateway.recover(conf, agent, task, fresh, f"an idle stop at {tokens} tokens of context", text=text)
     state = runtime(conf)
     state.setdefault(agent["name"], {})["nudged"] = task["id"]
     save_runtime(conf, state)
-    return result.returncode == 0
+    return ok
 
 
 def tick(conf, assign=True):
@@ -222,6 +253,7 @@ def tick(conf, assign=True):
     claimed = set()
     samples = []
     with locked(conf):
+        from . import gateway
         from . import pools
         registered = ag.agents(conf)
         pool_names = {a["name"]: pools.pool_of(conf, a.get("provider")) for a in registered}
@@ -245,9 +277,13 @@ def tick(conf, assign=True):
                 save_runtime(conf, state)
                 recorded.append(events(conf, 1)[-1])
                 info = ag.state(conf, agent)
+            elif info["state"] == "gateway_error":
+                recorded.extend(gateway.handle(conf, agent, info))
             elif info["state"] == "stalled":
-                if runtime(conf).get(name, {}).get("nudged") != task_id:
-                    if nudge(conf, agent, t.Queue(conf).get(task_id)):
+                if gateway.paused_until(gateway.pool_key(conf, launched(conf, agent))):
+                    pass
+                elif runtime(conf).get(name, {}).get("nudged") != task_id:
+                    if nudge(conf, agent, t.Queue(conf).get(task_id), info):
                         recorded.append(event(conf, "nudged", name, task_id, f"idle {info['idleMinutes']} min without a handoff"))
                 elif not events(conf, 1, kinds=["stalled"], task=task_id):
                     recorded.append(event(conf, "stalled", name, task_id, f"still idle after a nudge ({info['idleMinutes']} min)"))
@@ -257,8 +293,12 @@ def tick(conf, assign=True):
                     state.setdefault(name, {}).update({"thrashing": task_id, "nudged": task_id})
                     save_runtime(conf, state)
                     recorded.append(event(conf, "stalled", name, task_id, f"thrashing: the pane shows {info['stall']!r}; not nudged"))
+            if info.get("busy") and info["state"] in ("working", "busy"):
+                gateway.observe(conf, agent, info)
             samples.append((name, info["state"], info["task"]))
             if info["state"] != "free" or not assign or paused(conf):
+                continue
+            if gateway.paused_until(gateway.pool_key(conf, launched(conf, agent))):
                 continue
             from . import profiles as pf
             used, capacity = t.capacity_use(conf).get(agent.get("provider") or pf.default_name(conf), (0, None))

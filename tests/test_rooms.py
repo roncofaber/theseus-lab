@@ -117,7 +117,9 @@ class RoomTests(Sandbox):
         self.add("re-x", "dirty", ["docs/investigations/re-x.md"])
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
-        (bin_dir / "tmux").write_text('#!/usr/bin/env bash\n[ "$1" = send-keys ] && printf "%s\\n" "$*" >> "$TMUX_LOG"\nexit 0\n')
+        (bin_dir / "tmux").write_text('#!/usr/bin/env bash\nif [ "$1" = send-keys ]; then printf "%s\\n" "$*" >> "$TMUX_LOG"; '
+                                      'touch "$TMUX_LOG.busy"; fi\nif [ "$1" = capture-pane ] && [ -e "$TMUX_LOG.busy" ]; then '
+                                      'echo "esc to interrupt"; rm -f "$TMUX_LOG.busy"; fi\nexit 0\n')
         (bin_dir / "tmux").chmod(0o755)
         env = dict(self.env, PATH=f"{bin_dir}:{self.env['PATH']}", TMUX_LOG=str(self.tmp / "tmux.log"))
         self.theseus("instance", "send", "%1", "driver-skeleton", "/w", env=env)

@@ -1,5 +1,5 @@
-"""Agent registry, work queue and dashboard with a fake tmux: panes are idle prompts whose typed input is logged, so
-assignments, resets and nudges can be observed without real sessions."""
+"""Agent registry, work queue and dashboard with a fake tmux: panes are idle prompts whose typed input is logged and that
+show the busy marker once after Enter, so assignments, resets and nudges can be observed without real sessions."""
 import json
 import os
 import unittest
@@ -9,8 +9,10 @@ from helpers import Sandbox
 FAKE_TMUX = """#!/usr/bin/env bash
 case "$1" in
     display) case " $FAKE_PANES " in *" $4 "*) echo 1 ;; *) exit 1 ;; esac ;;
-    capture-pane) cat "$FAKE_STATE/screen-$4" 2>/dev/null || echo "> " ;;
-    send-keys) printf '%s\\n' "$*" >> "$FAKE_STATE/typed" ;;
+    capture-pane) cat "$FAKE_STATE/screen-$4" 2>/dev/null || echo "> "
+        if [ -e "$FAKE_STATE/busy-$4" ]; then echo "working (esc to interrupt)"; rm -f "$FAKE_STATE/busy-$4"; fi ;;
+    send-keys) printf '%s\\n' "$*" >> "$FAKE_STATE/typed"
+        if [ "${!#}" = Enter ] && [ ! -e "$FAKE_STATE/stuck-$3" ]; then touch "$FAKE_STATE/busy-$3"; fi ;;
 esac
 """
 

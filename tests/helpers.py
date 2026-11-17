@@ -12,10 +12,33 @@ REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src"
 
 
+def isolate_session():
+    """Point the host store, host configuration and XDG roots of this whole test process, and of every subprocess it
+    starts, at a private temporary directory before any test runs, and make theseus refuse the user's real host
+    database (THESEUS_DB_GUARD) should a test or a subprocess drop that isolation."""
+    real_data = Path(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")) / "theseus"
+    session = Path(tempfile.mkdtemp(prefix="theseus-session-"))
+    os.environ.update({
+        "XDG_DATA_HOME": str(session / "xdg-data"),
+        "XDG_CONFIG_HOME": str(session / "xdg-config"),
+        "THESEUS_DB": str(session / "xdg-data/theseus/theseus.db"),
+        "THESEUS_CONFIG": str(session / "xdg-config/theseus/config.toml"),
+        "THESEUS_DB_GUARD": str(real_data),
+    })
+    import atexit
+    import shutil
+    atexit.register(shutil.rmtree, session, True)
+
+
+if "THESEUS_DB_GUARD" not in os.environ:
+    isolate_session()
+
+
 def base_env(root):
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("THESEUS_", "GIT_")) and key not in ("JAVA_HOME", "GHIDRA_INSTALL_DIR")}
     env.update({
+        "THESEUS_DB_GUARD": os.environ["THESEUS_DB_GUARD"],
         "THESEUS_DATA": str(root / "data"),
         "THESEUS_SCRATCH": str(root / "scratch"),
         "THESEUS_WORKTREES": str(root / "worktrees"),

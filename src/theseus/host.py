@@ -76,7 +76,7 @@ def snapshot(roots=None):
             events.extend({**record, "project": item["name"]} for record in item["snapshot"]["events"])
     events.sort(key=lambda record: record.get("time") or "")
     return {"time": datetime.now(timezone.utc).isoformat(), "host": host, "projects": projects,
-            "pools": pool_snapshots(), "events": events[-300:]}
+            "pools": pool_snapshots(), "gateway": top.gateway_health(), "events": events[-300:]}
 
 
 def summary_counts(item):
@@ -113,6 +113,11 @@ def render_host(state):
         lines.append(f"{pool['pool']:<22} {pool['active']}/{pool['max']} working  {holders}{claims}")
     if not state["pools"]:
         lines.append("no pools defined")
+    lines += ["", "GATEWAY"]
+    for entry in state.get("gateway") or []:
+        lines.append(f"{entry['pool']:<22} {top.gateway_text(entry)}")
+    if not state.get("gateway"):
+        lines.append("no gateway errors in the last 24 h")
     lines += ["", "EVENTS (newest first)"]
     for record in reversed(state["events"][-15:]):
         lines.append(f"{top.local_clock(record['time'])} {top.cut(record['project'], 16):<16} {record['kind']:<10} "

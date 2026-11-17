@@ -37,7 +37,7 @@ Instances are long-lived worker sessions in tmux panes listed in `[[instances.pa
 
 1. `theseus instance compact PANE` between tasks (a session cannot compact itself). `theseus instance restart PANE` resumes the same session in a fresh process, which is how instances pick up a new MCP server, skill or setting (for example after `theseus setup rea`).
 2. `theseus instance assign TASK INSTANCE SUFFIX` creates the worktree and branch and commits the assignment.
-3. `theseus instance send PANE TASK WORKTREE [DEADLINE]` types the task message once the pane is idle.
+3. `theseus instance send PANE TASK WORKTREE [DEADLINE]` types the task message once the pane is idle. To type anything else into a worker's pane use `theseus instance send AGENT TEXT` (or `--file PATH`), never raw `tmux send-keys`: it confirms the text was submitted and records `send_failed` otherwise.
 4. `theseus instance watch` under a monitor prints `HANDOFF name` and `IDLE-NO-HANDOFF name`.
 5. `theseus merge TASK` (exit 3: conflict, nothing committed), then `theseus build`, `theseus smoke`.
 

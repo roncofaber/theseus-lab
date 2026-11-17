@@ -24,10 +24,11 @@ R, B, DIM = "\033[0m", "\033[1m", "\033[2m"
 RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN = (f"\033[{c}m" for c in (31, 32, 33, 34, 35, 36))
 ANSI = re.compile(r"\033\[[0-9;]*m")
 STATE_COLOR = {"working": GREEN, "quiet": YELLOW, "busy": CYAN, "free": YELLOW, "delivered": MAGENTA, "stalled": RED, "offline": RED,
-               "disabled": DIM, "thrashing": RED}
+               "disabled": DIM, "thrashing": RED, "gateway_error": RED}
 KIND_COLOR = {"relaunched": YELLOW, "delivered": MAGENTA, "partial": YELLOW, "blocked": RED, "stalled": RED, "error": RED, "assigned": GREEN,
               "nudged": YELLOW, "compacted": BLUE, "cleared": CYAN, "merged": CYAN, "completed": GREEN,
-              "reopened": YELLOW, "released": YELLOW}
+              "reopened": YELLOW, "released": YELLOW, "gateway_error": RED, "resent": YELLOW, "send_failed": RED,
+              "gateway_paused": RED}
 QUEUE_COLOR = {"review": MAGENTA, "merged": CYAN, "working": GREEN, "ready": YELLOW, "blocked": DIM, "held": DIM}
 ROWS = {"actions": 2, "waiting": 5, "events": 10}
 ROOM_COLOR = {"dirty": RED, "clean": GREEN}
@@ -302,6 +303,27 @@ def pool_states(conf):
         return []
 
 
+def gateway_health():
+    from . import gateway
+    try:
+        return gateway.health()
+    except Exception:
+        return []
+
+
+def gateway_text(entry, now=None):
+    """One line of gateway health: recent status codes, last error and success, and the pause in force."""
+    now = time.time() if now is None else now
+    codes = " ".join(str(code or "?") for code in entry["codes"]) or "-"
+    last_ok = f"{duration(now - entry['lastSuccess'])} ago" if entry.get("lastSuccess") else "never"
+    text = f"{entry['errors']} error(s) in 24 h: {codes} · last success {last_ok}"
+    if entry.get("pausedUntil"):
+        text += f" · PAUSED until {local_clock(datetime.fromtimestamp(entry['pausedUntil'], timezone.utc).isoformat())}"
+        if entry.get("reason"):
+            text += f" ({entry['reason']})"
+    return text
+
+
 def recent(state, kinds, seconds=AFTERGLOW):
     """Events of the given kinds within the afterglow window, newest first."""
     found = []
@@ -324,7 +346,7 @@ def snapshot(conf, sample=False, host=None):
     return {
         "project": conf.name, "milestone": t.Queue(conf).milestone(), "time": datetime.now(timezone.utc).isoformat(),
         "host": host if host is not None else host_state(), "agents": states, "workers": other_workers(conf, states),
-        "eligible": eligibility(conf, states), "pools": pool_states(conf),
+        "eligible": eligibility(conf, states), "pools": pool_states(conf), "gateway": gateway_health(),
         "queue": {k: [x["id"] for x in v] for k, v in summary.items()},
         "rooms": {x["id"]: x.get("room") for v in summary.values() for x in v},
         "profiles": {x["id"]: x["profile"] for v in summary.values() for x in v if x.get("profile")},
@@ -430,6 +452,9 @@ def issues(state):
     for agent in state["agents"]:
         if agent["state"] in ("stalled", "offline"):
             found.append(f"{RED}●{R} {agent['name']} is {agent['state']}")
+    for entry in state.get("gateway") or []:
+        if entry.get("pausedUntil"):
+            found.append(f"{RED}●{R} gateway pool {entry['pool']} is paused: no new assignments or resends")
     review = state["queue"]["review"]
     if review:
         found.append(f"{MAGENTA}●{R} {len(review)} delivery(ies) to review and merge: {', '.join(review[:3])}")
@@ -628,6 +653,9 @@ def render(state, width=120, height=None, ui=None):
         claims = f" {DIM}·{R} {YELLOW}claims: {', '.join(pool['claims'])}{R}" if pool["claims"] else ""
         frame.row(f"pool {B}{pool['pool']}{R} {RED if full else GREEN}{B}{pool['active']}/{pool['max']}{R} working "
                   f"{DIM}·{R} this project {mine}" + (f" {DIM}·{R} {others}" if others else "") + claims)
+    for entry in state.get("gateway") or []:
+        color = RED if entry.get("pausedUntil") else YELLOW
+        frame.row(f"gateway {B}{entry['pool']}{R} {color}{gateway_text(entry)}{R}")
     today = state.get("today") or {}
     median = today.get("medianHandoff")
     frame.row(f"today {B}{today.get('delivered', 0)}{R} delivered {DIM}·{R} {B}{today.get('completed', 0)}{R} completed "

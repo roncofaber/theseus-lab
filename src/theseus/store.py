@@ -1,8 +1,9 @@
 """Host store: one SQLite database per machine for host-level and runtime state shared by every project.
 
 The database lives at ~/.local/share/theseus/theseus.db (XDG_DATA_HOME is respected; THESEUS_DB overrides the path).
-It holds the projects this host runs, coordinator sessions, registered agents, queue events, pool leases and claims,
-deliveries and periodic agent-state samples. Task records stay in each project's tasks.json in Git; the optional task
+THESEUS_DB_GUARD names a path (file or directory) the store must never open, so a test harness fails loudly instead of
+touching the real host database. It holds the projects this host runs, coordinator sessions, registered agents, queue events, pool leases and claims,
+deliveries, periodic agent-state samples and gateway errors, retry episodes and pauses. Task records stay in each project's tasks.json in Git; the optional task
 index here is a read-only copy for cross-project queries. There is no daemon: every short-lived process opens the file
 with connect(), and each write runs in its own BEGIN IMMEDIATE transaction so concurrent processes serialize on it.
 """
@@ -22,6 +23,7 @@ BUSY_TIMEOUT = 30.0
 CLAIM_TTL = 15 * 60
 LEASE_TTL = 30 * 60
 DAY = 24 * 3600
+GATEWAY_ERROR_DAYS = 7
 DEFAULTS = {"retention": {"samples_days": 14, "events_days": 0},
             "backups": {"directory": "", "daily": 7, "weekly": 4}}
 
@@ -132,15 +134,58 @@ MIGRATIONS = [
         "CREATE INDEX events_project_kind ON events(project, kind, epoch)",
         "CREATE INDEX samples_epoch ON samples(epoch)",
     ],
+    [
+        """CREATE TABLE gateway_errors (
+            id INTEGER PRIMARY KEY,
+            pool TEXT NOT NULL,
+            project TEXT NOT NULL,
+            agent TEXT,
+            task TEXT,
+            code INTEGER,
+            retryable INTEGER NOT NULL,
+            retry_after REAL,
+            time TEXT NOT NULL,
+            epoch REAL NOT NULL)""",
+        "CREATE INDEX gateway_errors_pool ON gateway_errors(pool, epoch)",
+        """CREATE TABLE gateway_retries (
+            project TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            task TEXT,
+            pool TEXT,
+            code INTEGER,
+            phase TEXT NOT NULL,
+            attempt INTEGER NOT NULL DEFAULT 0,
+            errors INTEGER NOT NULL DEFAULT 0,
+            retry_after REAL,
+            next_epoch REAL,
+            resent_epoch REAL,
+            signature TEXT,
+            recovered INTEGER NOT NULL DEFAULT 0,
+            updated_epoch REAL,
+            PRIMARY KEY (project, agent))""",
+        """CREATE TABLE gateway_pools (
+            pool TEXT PRIMARY KEY,
+            paused_until REAL,
+            reason TEXT,
+            last_success REAL)""",
+    ],
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
 def path():
     if os.environ.get("THESEUS_DB"):
-        return Path(os.environ["THESEUS_DB"])
-    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-    return Path(base) / "theseus" / "theseus.db"
+        found = Path(os.environ["THESEUS_DB"])
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+        found = Path(base) / "theseus" / "theseus.db"
+    guard = os.environ.get("THESEUS_DB_GUARD")
+    if guard:
+        resolved, fenced = found.expanduser().resolve(), Path(guard).expanduser().resolve()
+        if resolved == fenced or fenced in resolved.parents:
+            raise StoreError(f"refusing to open {resolved}: it lies under THESEUS_DB_GUARD={guard} (a test harness "
+                             f"fences off the real host store)")
+    return found
 
 
 def iso(epoch=None):
@@ -463,6 +508,96 @@ def event_bins(conn, project, since, bin_seconds, kinds=None, until=None):
                         [start, width, *args]).fetchall()
     totals = {row[0]: row[1] for row in rows}
     return [(start + n * width, totals.get(n, 0)) for n in range(count)]
+
+
+RETRY_FIELDS = ("task", "pool", "code", "phase", "attempt", "errors", "retry_after", "next_epoch", "resent_epoch", "signature",
+                "recovered")
+
+
+def gateway_retry(conn, project, agent):
+    """The gateway retry episode of one agent, or None."""
+    row = conn.execute("SELECT * FROM gateway_retries WHERE project = ? AND agent = ?", (project, agent)).fetchone()
+    return dict(row) if row else None
+
+
+def put_gateway_retry(conn, project, agent, now=None, **fields):
+    now = time.time() if now is None else now
+    unknown = set(fields) - set(RETRY_FIELDS)
+    if unknown:
+        raise StoreError(f"unknown gateway retry field(s): {', '.join(sorted(unknown))}")
+    with transaction(conn):
+        current = gateway_retry(conn, project, agent) or {"phase": "idle", "attempt": 0, "errors": 0, "recovered": 0}
+        current.update(fields)
+        values = [current.get(key) for key in RETRY_FIELDS]
+        conn.execute(f"""INSERT OR REPLACE INTO gateway_retries (project, agent, {', '.join(RETRY_FIELDS)}, updated_epoch)
+                         VALUES (?, ?, {', '.join('?' * len(RETRY_FIELDS))}, ?)""", [project, agent, *values, now])
+    return gateway_retry(conn, project, agent)
+
+
+def gateway_waiting(conn, pool):
+    """Retry episodes on one pool, host-wide, that wait for their next resend."""
+    return [dict(row) for row in conn.execute("SELECT * FROM gateway_retries WHERE pool = ? AND phase = 'waiting'", (pool,))]
+
+
+def drop_gateway_retry(conn, project, agent):
+    with transaction(conn):
+        conn.execute("DELETE FROM gateway_retries WHERE project = ? AND agent = ?", (project, agent))
+
+
+def add_gateway_error(conn, pool, project, code, retryable, agent=None, task=None, retry_after=None, at=None):
+    text, epoch = stamp(at)
+    with transaction(conn):
+        conn.execute("""INSERT INTO gateway_errors (pool, project, agent, task, code, retryable, retry_after, time, epoch)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     (pool, project, agent, task, code, int(bool(retryable)), retry_after, text, epoch))
+
+
+def gateway_errors(conn, pool=None, since=None, retryable=None):
+    """Gateway errors oldest first, host-wide (every project), optionally for one pool and since an epoch."""
+    clauses, args = [], []
+    if pool is not None:
+        clauses.append("pool = ?")
+        args.append(pool)
+    if since is not None:
+        clauses.append("epoch >= ?")
+        args.append(epoch_of(since))
+    if retryable is not None:
+        clauses.append("retryable = ?")
+        args.append(int(bool(retryable)))
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return [dict(row) for row in conn.execute(f"SELECT * FROM gateway_errors{where} ORDER BY epoch, id", args)]
+
+
+def gateway_pool(conn, pool):
+    row = conn.execute("SELECT * FROM gateway_pools WHERE pool = ?", (pool,)).fetchone()
+    return dict(row) if row else {"pool": pool, "paused_until": None, "reason": None, "last_success": None}
+
+
+def gateway_pools(conn):
+    return [dict(row) for row in conn.execute("SELECT * FROM gateway_pools ORDER BY pool")]
+
+
+def pause_gateway(conn, pool, until, reason, now=None):
+    """Pause a gateway pool until an epoch; True only for the call that started the pause (none was in force), so
+    exactly one caller records the gateway_paused event. A running pause is only ever extended."""
+    now = time.time() if now is None else now
+    with transaction(conn):
+        current = gateway_pool(conn, pool)
+        started = not current["paused_until"] or current["paused_until"] <= now
+        if not started and current["paused_until"] >= until:
+            return False
+        conn.execute("""INSERT INTO gateway_pools (pool, paused_until, reason, last_success) VALUES (?, ?, ?, ?)
+                        ON CONFLICT(pool) DO UPDATE SET paused_until = excluded.paused_until, reason = excluded.reason""",
+                     (pool, until, reason, current["last_success"]))
+    return started
+
+
+def gateway_success(conn, pool, at=None):
+    epoch = time.time() if at is None else epoch_of(at)
+    with transaction(conn):
+        conn.execute("""INSERT INTO gateway_pools (pool, last_success) VALUES (?, ?)
+                        ON CONFLICT(pool) DO UPDATE SET last_success = MAX(COALESCE(last_success, 0), excluded.last_success)""",
+                     (pool, epoch))
 
 
 def pool_spec(pool, spec):
@@ -878,6 +1013,7 @@ def trim(conn, now=None):
         for table, key in (("samples", "samples_days"), ("events", "events_days")):
             days = float(retention.get(key) or 0)
             removed[table] = conn.execute(f"DELETE FROM {table} WHERE epoch < ?", (now - days * DAY,)).rowcount if days else 0
+        conn.execute("DELETE FROM gateway_errors WHERE epoch < ?", (now - GATEWAY_ERROR_DAYS * DAY,))
     return removed
 
 

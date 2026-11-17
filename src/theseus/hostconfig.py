@@ -1,7 +1,8 @@
 """Host configuration: ~/.config/theseus/config.toml (XDG_CONFIG_HOME is respected; THESEUS_CONFIG overrides the path).
 
 Everything specific to one user or machine lives here rather than in the package or a project: host-wide agent profiles
-([workers.<name>]), pools ([pools.<name>]), host store retention and backups ([store]), tool locations ([tools.paths])
+([workers.<name>]), pools ([pools.<name>]), host store retention and backups ([store]), the gateway circuit breaker
+([gateway]), tool locations ([tools.paths])
 and host defaults for project keys a project leaves unset ([defaults]). Layers, lowest to highest: package presets and
 defaults, this file, the project's theseus.toml, its theseus.local.toml, then THESEUS_* variables and command line flags.
 
@@ -13,9 +14,13 @@ import tomllib
 from pathlib import Path
 
 NAME = "config.toml"
-SECTIONS = ("workers", "pools", "store", "tools", "defaults")
+SECTIONS = ("workers", "pools", "store", "tools", "defaults", "gateway")
 DEFAULT_KEYS = ("workers.default", "workers.retries", "limits.heavy_runs", "paths.data", "paths.scratch", "paths.worktrees",
-                "instances.idle_minutes", "instances.handoff_settle_seconds", "queue.interval", "re.clients")
+                "instances.idle_minutes", "instances.handoff_settle_seconds", "instances.send_verify_seconds", "queue.interval",
+                "re.clients", "gateway.attempts", "gateway.backoff", "gateway.slow_codes", "gateway.slow_factor",
+                "gateway.resend", "gateway.clear_tokens", "gateway.fresh_after_errors", "gateway.screen_lines",
+                "gateway.stagger_seconds")
+GATEWAY_DEFAULTS = {"breaker_errors": 3, "breaker_window_minutes": 10, "strong_codes": [530]}
 POOL_KEYS = ("max", "priority")
 STORE_KEYS = {"retention": ("samples_days", "events_days"), "backups": ("directory", "daily", "weekly")}
 
@@ -85,6 +90,11 @@ def pool_sources():
             for key in values or {}:
                 found[f"{name}.{key}"] = label
     return found
+
+
+def gateway():
+    """The host-wide gateway circuit breaker ([gateway] in config.toml over GATEWAY_DEFAULTS)."""
+    return {**GATEWAY_DEFAULTS, **(read().get("gateway") or {})}
 
 
 def store(defaults):
@@ -157,6 +167,10 @@ def validate(data, file, profile_problems, tool_names=None):
             continue
         errors += [f"{file}: [store.{section}] unknown key {key}; known: {', '.join(STORE_KEYS[section])}"
                    for key in value if key not in STORE_KEYS[section]]
+    for key in data.get("gateway") or {}:
+        if key not in GATEWAY_DEFAULTS:
+            errors.append(f"{file}: [gateway] unknown key {key}; known: {', '.join(GATEWAY_DEFAULTS)} (per-project gateway "
+                          f"keys go under [defaults] gateway.<key>)")
     for key, value in (data.get("tools") or {}).items():
         if key != "paths" or not isinstance(value, dict):
             errors.append(f"{file}: [tools] unknown key {key}; the host file holds only [tools.paths] (a project lists the tools it "

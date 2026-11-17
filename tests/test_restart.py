@@ -1,6 +1,7 @@
 """theseus instance restart with stand-ins: a fake tmux whose pane shell is a small loop process, and a fake agent
 named claude that writes a per-process session record, so the real panes and sessions are never touched. The pane's
-screen is the shell's output; every line typed and entered is logged."""
+screen is the shell's output (plus the busy marker once after a message is entered); every line typed and entered is
+logged."""
 import json
 import os
 import signal
@@ -34,12 +35,14 @@ done
 FAKE_TMUX = """#!/usr/bin/env bash
 case "$1" in
     display) cat "$FAKE_STATE/shell.pid" ;;
-    capture-pane) cat "$FAKE_STATE/screen" 2>/dev/null; echo "> " ;;
+    capture-pane) cat "$FAKE_STATE/screen" 2>/dev/null; echo "> "
+        if [ -e "$FAKE_STATE/busy" ]; then echo "working (esc to interrupt)"; rm -f "$FAKE_STATE/busy"; fi ;;
     send-keys)
         if [ "$4" = "-l" ]; then printf '%s' "$5" > "$FAKE_STATE/buffer"; exit 0; fi
         if [ "$4" = "Enter" ]; then
             b=$(cat "$FAKE_STATE/buffer")
             printf '%s\\n' "$b" >> "$FAKE_STATE/typed"
+            [ "${b#/}" = "$b" ] && touch "$FAKE_STATE/busy"
             if [ "$b" = "/exit" ]; then for p in $(pgrep -P "$(cat "$FAKE_STATE/shell.pid")"); do [ -f "$FAKE_SESSIONS/$p.json" ] && kill -TERM "$p"; done; else printf '%s' "$b" > "$FAKE_STATE/command"; fi
         fi ;;
 esac
