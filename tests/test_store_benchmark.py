@@ -3,8 +3,10 @@ dashboard's activity bins over 12 hours, the latest-200 events query and a pool 
 query plans use the indexes rather than scanning or sorting the whole table.
 
 On a workstation (SQLite 3.53, best of 5) the bins took 0.03 ms for one project and 0.15 ms for the host, the latest
-200 events 0.2 ms, an acquire with its release 0.02 ms and trimming 30,000 samples 17 ms; without the events(project,
-id) index the latest-200 query took 25 ms, which the plan check catches even where the time bound would not."""
+200 events 0.2 ms, a project's last 12 hours of events 0.4 ms, an acquire with its release 0.02 ms and trimming 30,000
+samples 17 ms; without the events(project, id) index the latest-200 query took 25 ms, which the plan check catches even
+where the time bound would not. Reading a project's whole history (40,000 events) took 57 ms, so readers use since=,
+limit= or event_bins rather than the full list."""
 import os
 import random
 import tempfile
@@ -100,6 +102,14 @@ class StoreBenchmark(unittest.TestCase):
                                                                                                 limit=200))))
         self.assertEqual(200, len(found[-1]))
         self.report("latest 200 events of the host", best_of(lambda: store.events(self.conn, limit=200)))
+
+    def test_events_of_the_last_twelve_hours(self):
+        since = self.now - 12 * 3600
+        found = []
+        self.report("a project's events of the last 12 h",
+                    best_of(lambda: found.append(store.events(self.conn, PROJECTS[0], since=since))))
+        self.assertGreater(len(found[-1]), 100)
+        self.assertTrue(all(e["epoch"] >= since for e in found[-1]))
 
     def test_pool_acquire(self):
         def cycle():

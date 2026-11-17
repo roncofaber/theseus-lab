@@ -237,6 +237,26 @@ class QueueTests(Sandbox):
         self.assertIn("assigned", self.theseus("queue", "tick").stdout)
         self.assertIn("demo-port 1", self.theseus("pool").stdout)
 
+    def test_a_failed_assignment_gives_its_pool_slot_back(self):
+        from unittest import mock
+        from theseus import config as cfg, pools, workqueue as wq
+        (self.tmp / "pools.toml").write_text('[pools.gw]\nmax = 1\n')
+        path = self.project / "theseus.toml"
+        path.write_text(path.read_text().replace('[workers.claude-code]\n', '[workers.claude-code]\npool = "gw"\n', 1))
+        self.git("commit", "-q", "-am", "pool")
+        self.add("doomed-task")
+        os.environ.update({k: self.env[k] for k in ("PATH", "FAKE_STATE", "FAKE_PANES", "THESEUS_COMPACT_POLL",
+                                                    "THESEUS_TYPE_POLL")})
+        held = []
+        def fail(conf, agent, task):
+            held.append(pools.status("gw")["active"])
+            return False, "boom"
+        with mock.patch.object(wq, "assign_and_send", side_effect=fail):
+            recorded = wq.tick(cfg.load(root=self.project))
+        self.assertEqual([1], held, "the slot is taken before the assignment starts")
+        self.assertIn(("error", "doomed-task", "boom"), [(r["kind"], r["task"], r["detail"]) for r in recorded])
+        self.assertEqual(0, pools.status("gw")["active"])
+
     def test_priority_orders_assignment_and_transitions_linger_on_the_dashboard(self):
         self.add("ordinary-task")
         self.theseus("tasks", "add", "urgent-task", "--role", "research", "--owned", "docs/investigations/urgent-task.md",

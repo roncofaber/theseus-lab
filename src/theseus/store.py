@@ -183,6 +183,17 @@ def connect(db=None):
     return conn
 
 
+def open_unchecked(db=None):
+    """A connection to the live file without the version guard or migrations, for restore: it must work when the
+    current database is newer than this code or unreadable."""
+    target = Path(db) if db else path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(target, timeout=BUSY_TIMEOUT, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT * 1000)}")
+    return conn
+
+
 def set_wal(conn):
     # Switching a fresh file to WAL takes an exclusive lock that does not always go through the busy handler.
     deadline = time.time() + BUSY_TIMEOUT
@@ -432,7 +443,8 @@ def events(conn, project=None, since=None, limit=None, kinds=None, until=None, a
     if task is not None:
         where += (" AND" if where else " WHERE") + " task = ?"
         args.append(task)
-    sql = f"SELECT {EVENT_COLUMNS} FROM events{where} ORDER BY id DESC"
+    # With a time range, +id keeps the planner on the (project, epoch) range instead of walking every id.
+    sql = f"SELECT {EVENT_COLUMNS} FROM events{where} ORDER BY {'+id' if since is not None else 'id'} DESC"
     if limit:
         sql += f" LIMIT {int(limit)}"
     return [dict(row) for row in reversed(conn.execute(sql, args).fetchall())]
@@ -941,8 +953,11 @@ def backup(conn, directory=None, now=None, label="", strict=True):
     try:
         conn.backup(copy)
         copy.execute("PRAGMA journal_mode = DELETE")
-    finally:
+    except BaseException:
         copy.close()
+        temporary.unlink(missing_ok=True)
+        raise
+    copy.close()
     found = integrity(temporary)
     if found != ["ok"] and strict:
         temporary.unlink(missing_ok=True)
@@ -990,9 +1005,8 @@ def rotate(directory=None):
     return removed
 
 
-def restore(conn, source, now=None):
-    """Replace the live database's content with a backup file after checking it, saving the current content first
-    as a pre-restore copy. Returns {"saved": the pre-restore copy, "restored": source, "version": schema version}."""
+def check_backup(source):
+    """Refuse a restore source that is missing, unreadable, damaged or newer than this code."""
     source = Path(source)
     if not source.is_file():
         raise StoreError(f"no backup file {source}")
@@ -1009,20 +1023,56 @@ def restore(conn, source, now=None):
         raise StoreError(f"{source} failed integrity_check: {'; '.join(found[:5])}")
     if restored_version > SCHEMA_VERSION:
         raise StoreError(f"{source} has schema version {restored_version}, newer than this theseus knows ({SCHEMA_VERSION})")
-    try:
-        saved = backup(conn, now=now, label="pre-restore", strict=False)["path"]
-    except sqlite3.DatabaseError:
-        target = backup_target(backup_dir(), time.time() if now is None else now, "pre-restore")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(database_name(conn), target)
-        saved = str(target)
+    return source
+
+
+def load_backup(conn, source):
     reader = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
     try:
         reader.backup(conn)
     finally:
         reader.close()
+    set_wal(conn)
     migrate(conn)
-    return {"saved": saved, "restored": str(source), "version": version(conn)}
+    return version(conn)
+
+
+def restore(conn, source, now=None):
+    """Replace the live database's content with a backup file after checking it, saving the current content first
+    as a pre-restore copy. Returns {"saved": the pre-restore copy, "restored": source, "version": schema version}."""
+    source = check_backup(source)
+    saved = backup(conn, now=now, label="pre-restore", strict=False)["path"]
+    return {"saved": saved, "restored": str(source), "version": load_backup(conn, source)}
+
+
+def restore_file(source, db=None, now=None):
+    """restore() for the live file, which may be newer than this code (no version guard) or not a database at all:
+    then its files are copied aside as the pre-restore copy and the backup is loaded into a fresh file."""
+    source = check_backup(source)
+    target = Path(db) if db else path()
+    conn = open_unchecked(target)
+    try:
+        try:
+            conn.execute("PRAGMA schema_version").fetchone()
+        except sqlite3.DatabaseError:
+            pass
+        else:
+            return restore(conn, source, now)
+    finally:
+        conn.close()
+    saved = backup_target(backup_dir(), time.time() if now is None else now, "pre-restore")
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(target, saved)
+    for suffix in ("-wal", "-shm"):
+        if Path(f"{target}{suffix}").exists():
+            shutil.copy2(f"{target}{suffix}", f"{saved}{suffix}")
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{target}{suffix}").unlink(missing_ok=True)
+    conn = open_unchecked(target)
+    try:
+        return {"saved": str(saved), "restored": str(source), "version": load_backup(conn, source)}
+    finally:
+        conn.close()
 
 
 def check(conn, quick=False):

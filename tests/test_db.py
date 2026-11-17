@@ -99,6 +99,7 @@ class StoreCliTests(Sandbox):
 
     def test_a_newer_database_stops_every_command_with_a_clear_error(self):
         self.theseus("queue", "status")
+        copy = self.theseus("db", "backup").stdout.split()[1]
         connection = sqlite3.connect(self.db)
         connection.execute(f"PRAGMA user_version = {store.SCHEMA_VERSION + 5}")
         connection.close()
@@ -107,6 +108,19 @@ class StoreCliTests(Sandbox):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("newer than", result.stderr)
             self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("restored", self.theseus("db", "restore", copy, "--yes").stdout)
+        self.theseus("queue", "status")
+
+    def test_restore_replaces_a_live_file_that_is_not_a_database(self):
+        self.theseus("queue", "status")
+        copy = self.theseus("db", "backup").stdout.split()[1]
+        for suffix in ("-wal", "-shm"):
+            Path(f"{self.db}{suffix}").unlink(missing_ok=True)
+        self.db.write_bytes(b"garbage" * 4096)
+        self.assertIn("restored", self.theseus("db", "restore", copy, "--yes").stdout)
+        [saved] = self.backups.glob("*pre-restore*")
+        self.assertEqual(b"garbage" * 4096, saved.read_bytes())
+        self.assertIn("integrity     ok", self.theseus("db", "check").stdout)
 
 
 class ProjectNameTests(Sandbox):

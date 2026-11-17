@@ -513,6 +513,11 @@ def cmd_db(args):
                  "rerun with --yes (the current database is backed up first)")
     if action == "restore" and not args.file:
         sys.exit("usage: theseus db restore FILE --yes")
+    if action == "restore":
+        result = store.restore_file(args.file)
+        print(f"saved the previous database as {result['saved']}")
+        print(f"restored {result['restored']} (schema version {result['version']})")
+        return
     with store.opened() as conn:
         if action == "backup":
             result = store.backup(conn)
@@ -525,10 +530,6 @@ def cmd_db(args):
             print(f"trimmed {removed}; ANALYZE, optimize, {result['freed_pages']} free page(s) returned"
                   f"{' after converting to incremental vacuum' if result['vacuumed'] else ''}, WAL truncated; "
                   f"{size_text(result['before'])} -> {size_text(result['after'])}")
-        elif action == "restore":
-            result = store.restore(conn, args.file)
-            print(f"saved the previous database as {result['saved']}")
-            print(f"restored {result['restored']} (schema version {result['version']})")
         elif action == "prune":
             older = args.older_than_days * 86400 if args.older_than_days else None
             names = store.prune_projects(conn, older_than=older, dry_run=not args.yes)
