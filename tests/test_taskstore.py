@@ -1,5 +1,6 @@
 """Task store (schema v7, taskrepo, taskservice): the lossless round trip of the legacy files, the v6 to v7 migration,
 claim races decided by the database with no transaction held across worktree creation, and who may call what."""
+import importlib.util
 import json
 import multiprocessing
 import os
@@ -265,6 +266,54 @@ class WriteRuleTests(TaskStoreCase):
             call(*args, **kwargs)
         self.assertEqual("refused", caught.exception.code)
         return caught.exception
+
+
+class McpTests(TaskStoreCase):
+    def setUp(self):
+        super().setUp()
+        self.start()
+        self.svc.add(COORDINATOR, spec("mine"))
+        self.svc.assign(QUEUE, "mine", "agent-a", lambda c: (self.tmp / "wt", "b", self.tmp / "wt/.theseus"),
+                        owner="p:a:a-mine", provider="p")
+        secret = ts.issue_credentials(COORDINATOR, "agent-a", "agent-a")
+        self.credentials = self.tmp / "credentials"
+        self.credentials.write_text(json.dumps({"agent_id": "agent-a", "run_secret": secret}))
+
+    def test_a_server_takes_its_role_from_credentials_or_the_coordinator_rule(self):
+        from theseus import mcp_server, profiles
+        worker_env = {"THESEUS_CREDENTIALS": str(self.credentials)}
+        self.assertEqual("worker", mcp_server.resolve(None, worker_env, self.tmp).role)
+        self.assertEqual("forbidden", self.code(mcp_server.resolve, "coordinator", worker_env, self.tmp))
+        self.assertEqual("unauthenticated", self.code(mcp_server.resolve, None, {}, self.tmp),
+                         "a worker server without credentials refuses to start")
+        self.assertEqual("unauthenticated", self.code(mcp_server.resolve, "coordinator", {"THESEUS_AGENT_ID": "x"},
+                                                      self.tmp))
+        self.assertEqual("coordinator", mcp_server.resolve("coordinator", {}, self.tmp).role)
+        path = profiles.mcp_config(SimpleNamespace(data=self.tmp / "data"), {"name": "p", "mcp_servers": ["theseus"]},
+                                   "agent-a", self.credentials)
+        self.assertEqual({"command": "theseus", "args": ["mcp"], "env": {"THESEUS_CREDENTIALS": str(self.credentials)}},
+                         json.loads(path.read_text())["mcpServers"]["theseus"])
+        self.assertEqual(self.tmp / "data/mcp/p/agent-a.json", path)
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "needs the optional extra theseus-lab[mcp]")
+    def test_the_worker_server_offers_only_the_worker_tools(self):
+        import asyncio
+        from mcp import Client
+        from theseus import mcp_server
+        worker_env = {"THESEUS_CREDENTIALS": str(self.credentials)}
+        server = mcp_server.build(self.conf, mcp_server.resolve(None, worker_env, self.tmp), worker_env)
+
+        async def session():
+            async with Client(server) as client:
+                listed = await client.list_tools()
+                shown = await client.call_tool("task_show", {"task": "mine"})
+                stale = await client.call_tool("task_show", {"task": "other"})
+                return listed, shown, stale
+
+        listed, shown, stale = asyncio.run(session())
+        self.assertEqual(sorted(mcp_server.WORKER_TOOLS), sorted(t.name for t in getattr(listed, "tools", listed)))
+        self.assertEqual("mine", json.loads(shown.content[0].text)["task"]["id"])
+        self.assertTrue(stale.is_error)
 
 
 class MigrationTests(TaskStoreCase):

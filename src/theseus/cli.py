@@ -329,30 +329,14 @@ def task_command(conf, args):
     action = args.task_command
     principal = taskservice.principal(via="cli", readonly=action == "show")
     queue = t.Queue(conf)
-    svc = queue.service
     if action == "show":
-        shown = svc.show(principal, args.id)
-        data = shown["task"].get(args.field) if args.field else {
-            "task": shown["task"], "notes": shown["notes"], "attempt": shown["attempt"],
-            "prompt": t.task_prompt(queue, shown["task"])}
-        print(json.dumps(data, indent=2, ensure_ascii=False))
+        shown = t.show_own(queue, principal, args.id)
+        print(json.dumps(shown["task"].get(args.field) if args.field else shown, indent=2, ensure_ascii=False))
     elif action == "note":
-        noted = svc.note(principal, args.id, args.text, question=args.question,
-                         on_behalf=principal.role == "coordinator")
+        noted = t.report(queue, principal, args.id, "note", text=args.text, question=args.question)
         print(f"{args.id}: {noted['kind']} recorded")
     else:
-        handoff = Path(args.handoff).resolve() if args.handoff else None
-        text = handoff.read_text(errors="replace") if handoff and handoff.is_file() else None
-        if action == "done" and text is None:
-            sys.exit(f"theseus: no handoff at {handoff}; write it first (see the worker skill)")
-        worktree = handoff.parent.parent if handoff and handoff.parent.name == cfg.WORKER_LOG else None
-        touches = t.patch_targets(worktree) if worktree else []
-        if action == "done":
-            done = svc.deliver(principal, args.id, handoff_path=str(handoff), result=t.handoff_result(handoff),
-                               handoff_text=text, observed_touches=touches, source="command")
-        else:
-            done = svc.blocked(principal, args.id, args.reason, handoff_path=str(handoff) if handoff else None,
-                               handoff_text=text, source="command")
+        done = t.report(queue, principal, args.id, action, handoff=args.handoff, reason=getattr(args, "reason", None))
         print(f"{args.id} is already delivered" if done.get("already") else
               f"{args.id} -> verification ({done['result']}); the coordinator reviews it next")
 
@@ -1181,6 +1165,11 @@ def drop_project_tasks(row):
     return taskservice.open(conf).drop_tasks(taskservice.COORDINATOR)
 
 
+def cmd_mcp(args):
+    from . import mcp_server
+    mcp_server.run(args.role)
+
+
 def cmd_cleanup(args):
     from . import cleanup
     conf = load()
@@ -1382,6 +1371,10 @@ def build_parser():
     for subparser in tk.choices.values():
         subparser.add_argument("--json", action="store_true", help="print one JSON object")
     task.set_defaults(func=guarded(json_reply(cmd_task)))
+    p = sub.add_parser("mcp", help="the task tools as an MCP server over stdio (needs theseus-lab[mcp]): a worker's "
+                                   "tools from THESEUS_CREDENTIALS, or the coordinator's with --role coordinator")
+    p.add_argument("--role", choices=("coordinator",), help="only in the coordinator's own MCP config")
+    p.set_defaults(func=guarded(cmd_mcp))
 
     inst = sub.add_parser("instance", help="persistent worker sessions in tmux panes")
     ins = inst.add_subparsers(dest="instance_action", required=True)

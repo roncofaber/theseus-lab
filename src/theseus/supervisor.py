@@ -406,7 +406,7 @@ def launch(conf, profile_name, name, session=None, resume=False):
     where = cwd(conf)
     spec = {"command": parts["launch"][0], "args": parts["launch"][1:], "model": profile.get("model") or "",
             "env": digests(parts["env"]), "interactive_env": digests(parts["interactive_env"]),
-            "mcp": mcp_digest(conf, profile, parts["mcp"]), "extra_args": parts["extra"], "cwd": str(where),
+            "mcp": mcp_digest(conf, profile, parts["mcp"], name), "extra_args": parts["extra"], "cwd": str(where),
             "launch_shell": str(settings().get("launch_shell") or "exec"),
             # The run's launch_hash keeps the formula older theseus versions compare, since they share the host store.
             "hash": short_digest([parts["launch"] + parts["mcp"] + parts["extra"], sorted(env), str(where)])}
@@ -421,8 +421,8 @@ def digests(variables):
     return {key: short_digest(value) for key, value in variables.items()}
 
 
-def mcp_digest(conf, profile, flags):
-    path = profiles.mcp_config(conf, profile)
+def mcp_digest(conf, profile, flags, agent=None):
+    path = profiles.mcp_config(conf, profile, agent, profiles.agent_credentials(conf, agent))
     return short_digest([flags, json.loads(path.read_text()) if path else None])
 
 

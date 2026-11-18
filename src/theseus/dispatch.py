@@ -72,7 +72,8 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
     if consumers:
         lines.append(f"note: {len(consumers)} files outside ownedPaths use names declared inside them (`theseus tasks consumers {task_id}`)")
     session = str(uuid.uuid4()) if profile.get("session") == "preassign" else ""
-    launch = profiles.launch_argv(profile, prompt, session, model, conf) or []
+    launch = profiles.launch_argv(profile, prompt, session, model, conf, agent=f"worker-{name}",
+                                  credentials=record_dir / "credentials") or []
     resume = profiles.resume_template(profile, session, model, conf)
     extra_env = profiles.env(profile, model)
     if launch and extra_env:

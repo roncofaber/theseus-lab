@@ -171,7 +171,7 @@ OVERRIDABLE = set(PRESETS["claude-code"]) | {"preset", "fallback", "pool", "mcp_
                                              "capability", "health"}
 CAPABILITY = 1
 INTERACTIVE_KEYS = set(CLAUDE_INTERACTIVE) | {"launch", "resume"}
-THESEUS_MCP = {"command": "theseus", "args": ["mcp", "--role", "worker"]}
+THESEUS_MCP = {"command": "theseus", "args": ["mcp"]}
 
 
 class ProfileError(Exception):
@@ -292,10 +292,12 @@ def env(profile, model=None):
     return {k: fill(v, {"model": model}) for k, v in (profile.get("env") or {}).items()}
 
 
-def mcp_config(conf, profile):
+def mcp_config(conf, profile, agent=None, credentials=None):
     """Path of the MCP config a profile's agents start with (only the servers in mcp_servers), written under the data
     root, or None when the profile keeps the client's own MCP servers. Each server definition comes from the user's
-    Claude Code configuration; "theseus" is the theseus MCP server."""
+    Claude Code configuration; "theseus" is the theseus MCP server. With theseus listed the file is per agent, and its
+    theseus entry names the agent's credentials file in `env`: some clients (Codex, the MCP SDK's own) pass a stdio
+    server only an allow list of the environment plus that entry."""
     names = profile.get("mcp_servers")
     if names is None:
         return None
@@ -309,12 +311,13 @@ def mcp_config(conf, profile):
     servers = {}
     for name in names:
         if name == "theseus":
-            servers[name] = THESEUS_MCP
+            servers[name] = {**THESEUS_MCP, **({"env": {"THESEUS_CREDENTIALS": str(credentials)}} if credentials else {})}
         elif name in known:
             servers[name] = known[name]
         else:
             raise ProfileError(f"profile {profile['name']}: MCP server {name!r} is not defined in {client}")
-    path = conf.data / "mcp" / f"{profile['name']}.json"
+    path = conf.data / "mcp" / (f"{profile['name']}/{agent}.json" if "theseus" in names and agent else
+                                f"{profile['name']}.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps({"mcpServers": servers}, indent=2) + "\n"
     if not path.exists() or path.read_text() != text:
@@ -322,13 +325,18 @@ def mcp_config(conf, profile):
     return path
 
 
-def mcp_args(conf, profile):
-    path = mcp_config(conf, profile) if conf is not None else None
+def mcp_args(conf, profile, agent=None, credentials=None):
+    path = mcp_config(conf, profile, agent, credentials) if conf is not None else None
     if path is None:
         return []
     if not profile.get("mcp_flags"):
         raise ProfileError(f"profile {profile['name']} sets mcp_servers but its CLI has no mcp_flags")
     return [fill(flag, {"mcp_config": str(path)}) for flag in profile["mcp_flags"]]
+
+
+def agent_credentials(conf, agent):
+    """Where a supervised agent's credentials file is (written by `agents _exec`)."""
+    return conf.data / "agents" / agent / "credentials" if conf is not None and agent else None
 
 
 def extra_args(profile, **values):
@@ -341,11 +349,12 @@ def extra_args(profile, **values):
     return [os.path.expanduser(fill(item, data)) for item in extra]
 
 
-def launch_argv(profile, prompt, session, model, conf=None):
+def launch_argv(profile, prompt, session, model, conf=None, agent=None, credentials=None):
     argv = render(profile.get("headless"), profile, prompt=prompt, session=session, model=model)
     if not argv:
         return argv
-    return argv + mcp_args(conf, profile) + extra_args(profile, prompt=prompt, session=session, model=model)
+    return argv + mcp_args(conf, profile, agent, credentials) + extra_args(profile, prompt=prompt, session=session,
+                                                                           model=model)
 
 
 def resume_template(profile, session, model, conf=None):
@@ -390,7 +399,8 @@ def interactive_launch(conf, profile, agent=None):
 def interactive_parts(conf, profile, agent):
     """The parts of a supervised instance's launch, before any session arguments: launch (the filled template as an
     argument list), mcp (the MCP flags), extra (extra_args), env (the profile's env) and interactive_env."""
-    parts = {"launch": shlex.split(launch_template(conf, profile, agent)), "mcp": mcp_args(conf, profile),
+    parts = {"launch": shlex.split(launch_template(conf, profile, agent)),
+             "mcp": mcp_args(conf, profile, agent, agent_credentials(conf, agent)),
              "extra": extra_args(profile, agent=agent), "env": env(profile), "interactive_env": interactive_env(profile)}
     if not parts["launch"]:
         raise ProfileError(f"profile {profile.get('name')} has no launch command")

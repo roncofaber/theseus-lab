@@ -877,5 +877,31 @@ def write_outbox(inbox, entry):
     return target
 
 
+def show_own(queue, principal, task_id):
+    """A worker's view of its task: the record, notes, attempt and the rendered prompt."""
+    shown = queue.service.show(principal, task_id)
+    return {"task": shown["task"], "notes": shown["notes"], "attempt": shown["attempt"],
+            "prompt": task_prompt(queue, shown["task"])}
+
+
+def report(queue, principal, task_id, kind, *, text=None, question=False, handoff=None, reason=None):
+    """A worker's report (kind note, done or blocked) through the service; the coordinator may report for a subagent
+    of its own session. done reads the handoff's Result and the patch targets next to it."""
+    svc = queue.service
+    if kind == "note":
+        return svc.note(principal, task_id, text, question=question, on_behalf=principal.role == "coordinator")
+    handoff = Path(handoff).resolve() if handoff else None
+    body = handoff.read_text(errors="replace") if handoff and handoff.is_file() else None
+    worktree = handoff.parent.parent if handoff and handoff.parent.name == cfg.WORKER_LOG else None
+    if kind == "done":
+        if body is None:
+            raise TaskError(f"no handoff at {handoff}; write it first (see the worker skill)")
+        return svc.deliver(principal, task_id, handoff_path=str(handoff), result=handoff_result(handoff),
+                           handoff_text=body, observed_touches=patch_targets(worktree) if worktree else (),
+                           source="command")
+    return svc.blocked(principal, task_id, reason or "", handoff_path=str(handoff) if handoff else None,
+                       handoff_text=body, source="command")
+
+
 def fail(error):
     sys.exit(str(error))

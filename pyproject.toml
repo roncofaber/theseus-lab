@@ -26,6 +26,9 @@ classifiers = [
     "Topic :: Software Development :: Disassemblers",
 ]
 
+[project.optional-dependencies]
+mcp = ["mcp>=2.3,<3"]
+
 [project.urls]
 Homepage = "https://github.com/roncofaber/theseus-lab"
 Documentation = "https://github.com/roncofaber/theseus-lab/tree/main/docs"

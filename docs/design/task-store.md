@@ -471,3 +471,19 @@ Phase 4 adds soft ownership. A task's conflict set is its owned patterns plus it
 - Stale panes: `agents add` records the pane's process id (`agents.pane_pid`, added by v7). The pane rule denies only while that process is an ancestor of the caller (read from `/proc`), or when no pid was recorded. `theseus agents` marks a registration whose pane now runs another process.
 - `task show` includes `prompt`: the brief to follow and the worker prompt template rendered for the task.
 - Retention: `[store.retention] credentials_days` (30) trims credentials of runs that ended before the cutoff, revoked ones, and dispatch credentials with no active attempt.
+
+## 23. Phase 5 implementation notes
+
+- `theseus mcp` (in `theseus.mcp_server`, optional extra `theseus-lab[mcp]` = `mcp>=2.3,<3`) serves the task tools over stdio with the SDK's `MCPServer`.
+- The role comes from credentials only:
+  - `THESEUS_CREDENTIALS` makes a worker server, which re-authenticates on every call, so a run that ended stops working;
+  - `--role coordinator` is accepted only from a caller the deny-by-default rule makes the coordinator, and together with credentials it is refused;
+  - a server with neither refuses to start (Q5).
+- Worker tools: `task_show`, `task_note` (with `question`), `task_done` (handoff path defaults to the attempt's log directory, since a supervised agent's MCP server starts in the main checkout) and `task_blocked`.
+- Coordinator tools, as Q9 decided: `tasks_list`, `tasks_show`, `tasks_ready`, `tasks_questions`, `tasks_add`, `tasks_edit`, `tasks_hold`, `tasks_release`, `tasks_reopen` and `tasks_note`. They go through `tasks.py`, so an in-progress task's copy is rewritten as from the CLI. Refusals come back as tool errors (`code: message`).
+- MCP config: a profile listing `theseus` in `mcp_servers` gets a per-agent file, `<data>/mcp/<profile>/<agent>.json`. Its theseus entry is `{"command": "theseus", "args": ["mcp"], "env": {"THESEUS_CREDENTIALS": <agent file>}}`, the entry Codex and SDK-based clients need (section 17). Supervised agents use `<data>/agents/NAME/credentials`; headless dispatch workers use `worker-NAME` and `<data>/workers/NAME/credentials`.
+  - The launch spec digests the per-agent file, so such agents report drift once at upgrade.
+  - `THESEUS_MCP` lost its `--role worker`.
+  - Only the claude-code preset has `mcp_flags`. A Codex profile needs its own `mcp_flags`, written for Codex's TOML overrides, before it can list servers.
+- The coordinator adds its server by hand: `claude mcp add theseus -- theseus mcp --role coordinator`.
+- Test 7 of section 13 (an in-process `mcp.Client` lists the worker tools and calls `task_show`) skips without the extra. The SDK cannot be installed on this host without network access, so it has not run here. Role resolution and the per-agent config are tested without the SDK.
