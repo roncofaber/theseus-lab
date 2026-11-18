@@ -3,6 +3,7 @@ show the busy marker once after Enter, so assignments, resets and nudges can be 
 import json
 import os
 import unittest
+from unittest import mock
 
 from helpers import Sandbox
 
@@ -202,6 +203,15 @@ class QueueTests(Sandbox):
         taskservice.grant(taskservice.QUEUE, agent["id"], agent["id"], conf.data / "agents/worker-a/credentials")
         self.assertTrue(wq.has_credentials(conf, agent))
         self.assertIn("theseus task done first-task", wq.pointer("first-task", "/wt", agent, True))
+
+    def test_the_task_message_names_no_session_while_a_supervised_coordinator_runs(self):
+        from theseus import config as cfg, coordinator, workqueue as wq
+        conf = cfg.load(root=self.project)
+        os.environ.pop("THESEUS_COORDINATOR", None)
+        with mock.patch.dict(conf.section("instances"), {"coordinator": "old-session"}):
+            self.assertIn("old-session", wq.task_message(conf, "t", "/wt", "rec"))
+            coordinator.save(conf, desired="up")
+            self.assertNotIn("old-session", wq.task_message(conf, "t", "/wt", "rec"))
 
     def test_a_running_task_s_patches_hold_a_task_that_owns_their_target(self):
         self.add("first-task")

@@ -432,8 +432,20 @@ def task_message(conf, task_id, worktree, record, deadline="", profile=None):
     if deadline:
         message += f" Deadline: {deadline}; if the work cannot be finished by then, deliver a partial handoff with what works."
     message += " Run only the checks named here. Finish with the handoff and a done line"
+    if supervised_coordinator(conf):
+        coordinator = ""
     message += f" sent to the coordinator session {coordinator} with SendMessage." if coordinator and messaging else "."
     return message
+
+
+def supervised_coordinator(conf):
+    """True while the project's coordinator runs as the supervised session: it learns of deliveries from the store and
+    the attention push, so a done line addressed by session name would reach whatever session once held that name."""
+    from . import coordinator
+    try:
+        return coordinator.state(conf).get("desired") == "up"
+    except Exception:
+        return False
 
 
 def nudge(conf, agent, task, info=None):
