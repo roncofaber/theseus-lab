@@ -1108,6 +1108,8 @@ def cmd_attention(args):
 def cmd_coordinator(args):
     from . import attention
     conf = load()
+    if args.action in ("register", "unregister"):
+        coordinator_principal()
     try:
         if args.action == "register":
             print(attention.register(conf, args.pane, args.profile))

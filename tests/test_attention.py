@@ -97,7 +97,10 @@ class PushTests(Sandbox):
         self.assertEqual([], push(one, 5), "a resolved item alone types nothing")
         self.assertEqual(["theseus: reminder: 1 item still needs you (1 delivery); run theseus attention"], push(one, 15))
         self.assertEqual([], push(one, 30), "one reminder only")
-        self.assertEqual(3, len(self.typed_lines()), self.typed_lines())
+        (self.state / "stuck-%9").write_text("")
+        self.assertEqual(1, len(push(two, 31)), "a line submitted without a busy marker seen counts as typed")
+        self.assertEqual([], push(two, 32), "and is not typed again every tick")
+        self.assertEqual(4, len(self.typed_lines()), self.typed_lines())
         self.assertEqual("1 item needs you (1 delivery)", self.attention.summary(one))
 
     def test_escalation_runs_the_command_once_per_item_left_open(self):

@@ -7,8 +7,8 @@ Kinds and the condition that resolves each:
 - merged: a merged task, until it is completed (verified) or unmerged;
 - question: a worker's open question (`task note --question`), until `tasks note ID` or an edit answers it;
 - agent: an agent at a permission prompt (waiting) or startup dialog (blocked), failed after its restart budget, a
-  hand-made pane gone (offline), or reported stalled since its assignment (a `stalled` event) and still not working,
-  until the agent's live state no longer says so;
+  hand-made pane gone (offline), or given up on by the queue (still idle after its nudge, thrashing in a hand-made
+  pane, a gateway error past its resends or fatal), until the agent's live state no longer says so;
 - gateway: a gateway pause or cap cut in force on a pool the project's agents use, until it lifts;
 - assign: a pending task whose assignment kept failing for longer than queue.assign_backoff_seconds, until it is
   assigned, held or no longer pending;
@@ -167,14 +167,37 @@ def task_items(conf, queue, tasks, events, now):
     return found
 
 
+def gateway_phase(conf, name, task_id):
+    """The phase of the agent's gateway retry episode for this task (exhausted, fatal, ...), or None."""
+    try:
+        with store.opened(readonly=True) as conn:
+            row = store.gateway_retry(conn, conf.name, name)
+    except Exception:
+        return None
+    return row["phase"] if row and row.get("task") == task_id else None
+
+
+def stall(conf, info, runtime):
+    """Why the queue gave up on an agent's task and handed it to the coordinator, from its live state and the queue's
+    own markers: still idle after the nudge, thrashing, or a gateway error past its resends or fatal. None otherwise."""
+    task_id, state = info.get("task"), info["state"]
+    marks = runtime.get(info["name"]) or {}
+    if state == "stalled" and marks.get("nudged") == task_id:
+        return f"idle {info.get('idleMinutes')} min after a nudge"
+    if state == "thrashing" and marks.get("thrashing") == task_id and not info.get("managed"):
+        return f"thrashing: the pane shows {info.get('stall')!r}"
+    if state == "gateway_error" and gateway_phase(conf, info["name"], task_id) in ("exhausted", "fatal"):
+        return "a gateway error the queue no longer resends"
+    return None
+
+
 def agent_items(conf, states, events, now):
     found = []
-    assigned, stalled = {}, {}
+    stalled = {}
     for record in events:
-        if record["kind"] == "assigned" and record.get("task"):
-            assigned[record["task"]] = record["epoch"]
-        elif record["kind"] == "stalled" and record.get("task"):
+        if record["kind"] == "stalled" and record.get("task"):
             stalled[record["task"]] = record
+    runtime = wq.runtime(conf)
     for info in states:
         name, state, task_id = info["name"], info["state"], info.get("task")
         managed = info.get("managed")
@@ -194,12 +217,12 @@ def agent_items(conf, states, events, now):
                                f"{name}: pane {info.get('pane')} is gone",
                                f"start its agent again and theseus agents add, or theseus agents remove {name}", agent=name,
                                task=task_id))
-        elif task_id and state in ("stalled", "thrashing", "gateway_error", "quiet") and task_id in stalled \
-                and stalled[task_id]["epoch"] >= assigned.get(task_id, 0):
-            record = stalled[task_id]
-            found.append(entry(conf, f"agent:{name}:stalled:{task_id}", "agent", "stalled agent", record["epoch"],
-                               f"{name} stalled on {task_id}: {record['detail']}", f"theseus agents logs {name}",
-                               agent=name, task=task_id))
+        elif task_id and (why := stall(conf, info, runtime)):
+            record = stalled.get(task_id)
+            since = record["epoch"] if record else streak_start(conf, name, state, now)
+            found.append(entry(conf, f"agent:{name}:stalled:{task_id}", "agent", "stalled agent", since,
+                               f"{name} stalled on {task_id}: {why}", f"theseus agents logs {name}", agent=name,
+                               task=task_id))
     return found
 
 
@@ -424,7 +447,16 @@ def type_line(conf, record, text):
     agent = {"name": "coordinator", "pane": pane, "provider": profile}
     if record.get("server"):
         agent.update(managed=True, server=record["server"])
-    return ag.send_verified(conf, agent, text, record=False, profile=profile)
+    ok, detail = ag.send_verified(conf, agent, text, record=False, profile=profile)
+    if ok or detail.startswith(("not typed", "tmux send-keys failed")):
+        return ok, detail
+    try:
+        unsent = own_line(ag.pane_screen(pane, server), pattern)
+    except Exception:
+        unsent = True
+    # Submitted but no busy marker seen (a harness whose marker differs from the profile's): typing it again every
+    # tick would break "once per change", so it counts as delivered and the reminder covers a miss.
+    return (False, detail) if unsent else (True, f"typed, not confirmed busy ({detail})")
 
 
 # push and escalation (the queue driver, after each tick)
