@@ -273,7 +273,7 @@ def doctor(conf):
             location = skill_location(client)
             rows.append(("ok" if location else "FAIL", f"rea skill ({client})",
                          str(location) if location else "missing; run `theseus setup rea`"))
-    return rows + host_rows() + store_rows()
+    return rows + host_rows() + store_rows() + task_rows(conf)
 
 
 def store_rows():
@@ -299,7 +299,30 @@ def store_rows():
                                              f"and is not recorded: give one a different [project] name"))
     if not found:
         rows.append(("ok", "project names", "no two project roots claim the same name"))
+    kind = store.filesystem_type(store.path().parent)
+    remote = bool(kind) and (kind in ("nfs", "cifs", "smb2", "smbfs", "afs", "fuseblk") or kind.startswith("fuse"))
+    rows.append(("WARN" if remote else "ok", "store filesystem",
+                 f"{kind}: SQLite's locking is unreliable on a network filesystem; keep the live store local and copy "
+                 f"backups off-site ([store.backups] offsite)" if remote else f"{kind or 'unknown'} (local)"))
+    offsite = store.offsite_dir()
+    if offsite:
+        copy = store.last_backup(offsite) if offsite.is_dir() else None
+        age = time.time() - store.epoch_of(copy["time"]) if copy else None
+        rows.append(("ok" if age is not None and age < 2 * store.DAY else "WARN", "off-site backup",
+                     f"{copy['time']} {copy['path']}" if copy else f"none yet in {offsite}"))
     return rows
+
+
+def task_rows(conf):
+    """The project's task store state: imported, and whether the committed export is current, stale or hand-edited."""
+    from . import tasks as t
+    try:
+        state = t.export_state(t.Queue(conf))
+    except t.TaskError as error:
+        code = getattr(error, "code", "")
+        return [("WARN", "tasks", f"{error}" if code == "not-imported" else f"cannot check: {error}")]
+    status = {"current": "ok", "stale": "ok", "edited": "WARN"}[state["state"]]
+    return [(status, f"tasks export ({state['state']})", state["detail"])]
 
 
 def setup_rea(conf, update=False):

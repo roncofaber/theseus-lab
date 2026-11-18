@@ -958,10 +958,11 @@ def wake_times(conf, now=None):
 
 
 def housekeeping():
-    """The store's daily maintenance and backup; a failure is recorded in the store and never stops the queue."""
+    """The store's daily maintenance and backup, and the hourly backup while tasks change; a failure is recorded in the
+    store and never stops the queue."""
     try:
         with store.for_host() as conn:
-            for line in store.daily(conn):
+            for line in store.daily(conn) + store.hourly(conn):
                 if "failed" in line:
                     print(f"theseus store: {line}", file=sys.stderr)
     except Exception as error:

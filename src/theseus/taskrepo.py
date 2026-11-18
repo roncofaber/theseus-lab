@@ -13,7 +13,7 @@ from . import store
 
 TASK_JSON = ("contract", "acceptance", "blockers", "merge", "result", "evidence", "extra", "legacy")
 ATTEMPT_JSON = ("execution", "record")
-PROJECT_JSON = ("policy", "tasks_legacy")
+PROJECT_JSON = ("policy", "tasks_legacy", "last_export")
 TASK_COLUMNS = ("id", "status", "role", "objective", "contract", "acceptance", "milestone", "priority", "hold", "room",
                 "profile", "min_capability", "note", "blockers", "merge", "result", "evidence", "extra", "legacy", "seq",
                 "created")

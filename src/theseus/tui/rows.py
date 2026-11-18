@@ -357,6 +357,9 @@ def overview(state, width=200):
                ("branch", Text.assemble((git["branch"], "bold"), (f" {git['dirty']} dirty" if git["dirty"] else " clean",
                                                                   theme.YELLOW if git["dirty"] else theme.GREEN)), ""),
                ("verified", verified, ""),
+               ("export", (state.get("export") or {}).get("state") or "-",
+                {"current": theme.GREEN, "stale": theme.YELLOW, "edited": f"bold {theme.RED}"}.get(
+                    (state.get("export") or {}).get("state"), "dim")),
                ("queue", "PAUSED" if state.get("paused") else "running", f"bold {theme.YELLOW}" if state.get("paused") else "")]
     review = oldest_review(state)
     issues = top.issues(state)

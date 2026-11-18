@@ -930,6 +930,8 @@ class TaskService:
             repo.add_observed(task["pk"], active["id"], list(dict.fromkeys(observed_touches)))
             self.write(repo, task, {"status": "verification"}, {"status", "execution"})
             detail = f"handoff result {result or 'not stated'}" + (f": {reason}" if reason else "")
+            if source == "detected":
+                detail += " (detected: the worker did not run `theseus task done`)"
             recorded = {"from": "in_progress", "result": kind, "source": source, "reason": reason,
                         "handoff_sha256": None if handoff_text is None else sha256(handoff_text), "attempt": active["n"]}
             self.event(repo, p, task, kind, {k: v for k, v in recorded.items() if v is not None}, queue=detail,
@@ -946,17 +948,35 @@ class TaskService:
 
     # records
 
-    def export(self, p, *, head=None):
-        """The snapshot of the project's tasks in the legacy files; with head (the commit the export is written at),
-        also records it as projects.last_export."""
+    def export(self, p, *, record=False, head=None):
+        """The snapshot of the project's tasks in the legacy files. record (the caller writes it into the checkout)
+        stores when, at which commit (head) and with what content it was written, as projects.last_export."""
         allow(p, "coordinator")
-        if head is None:
+        if not record:
             with self.reading() as (repo, project):
                 return self.snapshot(repo, project)
         with self.unit() as (repo, project):
             snap = self.snapshot(repo, project)
-            repo.update_project(self.name, last_export=f"{now()} {head}")
+            repo.update_project(self.name, last_export={"time": now(), "head": head, "sha256": digests(snap)})
             return snap
+
+    def export_state(self, p, files):
+        """How the task files in the checkout (a Snapshot) stand against the store: current; stale (the store moved on
+        since the export they hold, which is normal between verified merges); or edited (they hold something no
+        export wrote, which theseus ignores). Returns {state, detail}."""
+        with self.reading() as (repo, project):
+            fresh = self.snapshot(repo, project)
+            recorded = project["last_export"] or {}
+            changed = sum(1 for task in repo.tasks(project["id"])
+                          if task["updated"] > (recorded.get("time") or ""))
+        if digests(files) == digests(fresh):
+            return {"state": "current", "detail": "the committed export matches the store"}
+        if digests(files) == recorded.get("sha256"):
+            return {"state": "stale", "detail": f"{changed} task(s) changed since the export of {recorded.get('time')}; "
+                                                f"`theseus tasks export` (and commit docs/project/) records them"}
+        return {"state": "edited", "detail": "docs/project/ task files differ from every export theseus wrote: a hand "
+                                             "edit, which theseus ignores. Re-export to drop it, or take it with "
+                                             "`theseus tasks import --replace`"}
 
     def snapshot(self, repo, project):
         attempts = repo.project_attempts(project["id"])
@@ -1121,6 +1141,10 @@ def conflict(task, other):
     files += [f for f in theirs if t.is_owned(f, task["owned"])]
     reasons += [f"touches:{f}@{other['id']}" for f in dict.fromkeys(files)]
     return reasons
+
+
+def digests(snap):
+    return {name: sha256(getattr(snap, name)) for name in ("tasks", "archive", "history")}
 
 
 def parsed(snap):

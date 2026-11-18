@@ -90,8 +90,23 @@ def resolved(conf):
 
 
 def cmd_upgrade(args):
-    from . import scaffold
-    emit(scaffold.upgrade(load().root, dry_run=args.dry_run))
+    from . import scaffold, tasks as t
+    conf = load()
+    emit(scaffold.upgrade(conf.root, dry_run=args.dry_run))
+    try:
+        state = t.export_state(t.Queue(conf))
+        print(f"tasks: in the host store ({state['state']})")
+    except t.TaskError as error:
+        if getattr(error, "code", "") != "not-imported":
+            raise
+        if not args.import_tasks:
+            print("tasks: not in the host store yet; pause the queue (`theseus queue pause`, stop `queue run`), then "
+                  "`theseus upgrade --import-tasks` or `theseus tasks import`, and commit docs/project/")
+        elif not args.dry_run:
+            from . import workqueue
+            with t.acting(coordinator_principal()), workqueue.locked(conf, announce=True):
+                print(t.import_(t.Queue(conf)))
+                print(t.export(t.Queue(conf)))
 
 
 def source_rows(conf):
@@ -420,6 +435,7 @@ def tasks_action(conf, queue, args):
         emit(t.observe(queue, args.id, args.how, "userTested" if args.user else "observed"))
     elif action == "complete":
         emit(t.complete(queue, args.id, args.summary, args.commit, args.check or [], args.log, args.limit, args.from_log, args.force))
+        emit(t.export(queue))
     elif action == "check-delivery":
         lines, outside = t.check_delivery(queue, args.id, args.accept or [])
         emit(lines)
@@ -604,7 +620,19 @@ def cmd_verify(args):
                                         capture_output=True, text=True).stdout.strip())
         sys.exit(1 if limit and len(unverified) > limit else 0)
     status, _ = verify.full(conf, args.revision)
+    if status == 0:
+        export_after_verify(conf, args.revision)
     sys.exit(status)
+
+
+def export_after_verify(conf, revision):
+    """After a passing verification, write the task export for the coordinator to commit with docs/project/."""
+    from . import gitutil, tasks as t
+    try:
+        with t.acting(coordinator_principal()):
+            print(t.export(t.Queue(conf), head=gitutil.out(conf.root, "rev-parse", revision)))
+    except t.TaskError as error:
+        print(f"task export skipped: {error}")
 
 
 def cmd_heavy(args):
@@ -1107,6 +1135,9 @@ def cmd_db(args):
                  "rerun with --yes (the current database is backed up first)")
     if action == "restore" and not args.file:
         sys.exit("usage: theseus db restore FILE --yes")
+    if action == "downgrade":
+        downgrade(args)
+        return
     if action == "restore":
         result = store.restore_file(args.file)
         print(f"saved the previous database as {result['saved']}")
@@ -1132,6 +1163,10 @@ def cmd_db(args):
                     if saved:
                         print(f"exported {row['name']}'s tasks to {saved} and deleted them from the store")
             names = store.prune_projects(conn, older_than=older, dry_run=not args.yes, with_tasks=args.with_tasks)
+            if not args.with_tasks:
+                for name in sorted(set(store.prune_projects(conn, older_than=older, dry_run=True, with_tasks=True))
+                                   - set(names)):
+                    print(f"kept {name}: it has tasks in the store (--with-tasks exports them, then removes it)")
             verb = "removed" if args.yes else "would remove"
             print(f"{verb} {', '.join(names)} and all their rows (events, agents, runs, deliveries, samples, gateway "
                   f"errors and retries, pool slots)" if names
@@ -1154,6 +1189,35 @@ def cmd_db(args):
                 print(f"last {job} error: {error}")
             if not ok:
                 sys.exit(1)
+
+
+def downgrade(args):
+    """`theseus db downgrade 6`: refuse unless every imported project's committed export is current."""
+    from types import SimpleNamespace
+    from . import store, taskrecords, taskservice
+    if args.file != "6":
+        sys.exit("usage: theseus db downgrade 6 [--yes]")
+    problems = []
+    with store.opened() as conn:
+        rows = [row for row in store.list_projects(conn) if row.get("tasks_imported")]
+    for row in rows:
+        root = Path(row["tasks_root"] or "")
+        if not root.is_dir():
+            problems.append(f"{row['name']}: its checkout {root} is gone, so its export cannot be checked")
+            continue
+        conf = SimpleNamespace(name=row["name"], root=root, data=Path(row["data"] or root))
+        state = taskservice.open(conf).export_state(taskservice.COORDINATOR, taskrecords.read(root))
+        if state["state"] != "current":
+            problems.append(f"{row['name']}: {state['detail']} (in {root})")
+    if problems:
+        sys.exit("theseus: not downgrading; export (and commit) first:\n  " + "\n  ".join(problems))
+    if not args.yes:
+        print(f"would remove the task store from {store.path()} ({len(rows)} project(s), all exported); rerun with --yes")
+        return
+    with store.opened() as conn:
+        saved = store.downgrade_to_6(conn)
+    print(f"schema 6 again; the previous database is saved as {saved}. Install the older theseus now: any command of "
+          f"this one migrates the store to 7 again.")
 
 
 def drop_project_tasks(row):
@@ -1195,6 +1259,8 @@ def build_parser():
 
     p = sub.add_parser("upgrade", help="refresh theseus-owned files (generic skills, hook, helpers) from this version's templates")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--import-tasks", action="store_true", help="also import the project's task files into the host "
+                                                               "store (pause the queue first) and export them")
     p.set_defaults(func=guarded(cmd_upgrade))
 
     p = sub.add_parser("config", help="show, query or validate the resolved configuration",
@@ -1559,12 +1625,14 @@ def build_parser():
                        description="The host database (~/.local/share/theseus/theseus.db, THESEUS_DB overrides) holds "
                                    "projects, agents, events, pool slots, deliveries and samples for every project on "
                                    "this machine. The queue runs maintain and backup at most once a day by itself.")
-    p.add_argument("action", nargs="?", default="check", choices=("check", "maintain", "backup", "restore", "prune"),
+    p.add_argument("action", nargs="?", default="check",
+                   choices=("check", "maintain", "backup", "restore", "prune", "downgrade"),
                    help="check: integrity, version, sizes, rows, last backup and maintenance; maintain: trim by "
                         "retention, ANALYZE, optimize, checkpoint, vacuum; backup: online copy, integrity check and "
                         "rotation; restore FILE --yes: back up the current database, then load FILE; prune: list (with "
-                        "--yes delete) projects whose root is gone")
-    p.add_argument("file", nargs="?", help="restore: the backup file to load")
+                        "--yes delete) projects whose root is gone; downgrade 6 --yes: remove the task store (schema 7) "
+                        "once every project's export is current, for an older theseus")
+    p.add_argument("file", nargs="?", help="restore: the backup file to load; downgrade: the version (6)")
     p.add_argument("--yes", action="store_true", help="restore, prune: really do it")
     p.add_argument("--older-than-days", type=float, help="prune: also projects nobody used for this many days")
     p.add_argument("--with-tasks", action="store_true", help="prune: also projects with tasks in the store, after "

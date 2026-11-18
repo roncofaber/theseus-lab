@@ -229,6 +229,14 @@ def posted_label(stamp):
     return moment.strftime("%H:%M") if moment.date() == datetime.now().astimezone().date() else moment.strftime("%b %d")
 
 
+def export_state(conf):
+    """{state, detail} of the committed task export against the store (current, stale or edited), or None."""
+    try:
+        return t.export_state(t.Queue(conf))
+    except (t.TaskError, OSError, ValueError):
+        return None
+
+
 def milestone_progress(conf):
     """(done, total) for the current milestone: merged or completed tasks over all tasks of that milestone."""
     queue = t.Queue(conf)
@@ -526,7 +534,7 @@ def snapshot(conf, sample=False, host=None):
         "tasks": {x["id"]: x for x in records},
         "paused": wq.paused(conf), "git": git_state(conf), "verification": verification_state(conf),
         "events": merge_resets(wq.events(conf, 200)),
-        "today": today_stats(wq.events(conf)), "progress": milestone_progress(conf),
+        "today": today_stats(wq.events(conf)), "progress": milestone_progress(conf), "export": export_state(conf),
         "coordinator": coordinator_state(conf), "watcher": watcher_state(conf), **supervision(conf),
     }
 
@@ -649,6 +657,8 @@ def issues(state):
     verification = state["verification"]
     if verification["limit"] and verification["unverified"] and verification["unverified"] > verification["limit"]:
         found.append(f"{YELLOW}●{R} {verification['unverified']} code commits since the last full verification")
+    if (state.get("export") or {}).get("state") == "edited":
+        found.append(f"{RED}●{R} {state['export']['detail']}")
     free = [a for a in state["agents"] if a["state"] == "free"]
     if free and not state["queue"]["ready"]:
         blocking_pool = next((p for p in state.get("pools", []) if p["claims"] and state["project"] not in p["claims"]), None)

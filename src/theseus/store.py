@@ -26,7 +26,7 @@ LEASE_TTL = 30 * 60
 DAY = 24 * 3600
 DEFAULTS = {"retention": {"samples_days": 14, "events_days": 365, "deliveries_days": 365, "runs_days": 90,
                           "gateway_days": 7, "credentials_days": 30},
-            "backups": {"directory": "", "daily": 7, "weekly": 4}}
+            "backups": {"directory": "", "daily": 7, "weekly": 4, "offsite": ""}}
 
 
 class StoreError(Exception):
@@ -1551,6 +1551,83 @@ def rotation(names, daily=7, weekly=4):
     return keep | {name for name in names if not BACKUP_NAME.match(name)}
 
 
+def daily_backup(conn, now=None):
+    """The daily backup, also copied off-site when [store.backups] offsite is set."""
+    result = backup(conn, now=now)
+    result["offsite"] = offsite_copy(result["path"])
+    return result
+
+
+def offsite_dir():
+    configured = settings()["backups"].get("offsite")
+    return Path(os.path.expanduser(configured)) if configured else None
+
+
+def offsite_copy(source):
+    """Copy a checked backup to the off-site directory under the same rotation (daily and weekly only); returns the
+    copy, or None when no off-site directory is set."""
+    directory = offsite_dir()
+    if directory is None:
+        return None
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / Path(source).name
+    temporary = target.with_name(target.name + ".tmp")
+    shutil.copy2(source, temporary)
+    os.replace(temporary, target)
+    rotate(directory)
+    return str(target)
+
+
+def hourly(conn, now=None):
+    """A backup at most hourly while task rows changed since the newest backup (tasks live only in this store between
+    committed exports); rotation keeps only the newest of a day. Returns lines like daily()."""
+    now = time.time() if now is None else now
+    newest = last_backup()
+    changed = conn.execute("SELECT MAX(updated_epoch) FROM tasks").fetchone()[0]
+    taken = Path(newest["path"]).stat().st_mtime if newest else None
+    if not changed or (taken and changed <= taken) or not due(conn, "backup-hourly", 3600, now):
+        return []
+    try:
+        return [f"hourly backup: {backup(conn, now=now)['path']}"]
+    except Exception as error:
+        set_meta(conn, "backup.error", f"{iso()} {type(error).__name__}: {error}")
+        return [f"hourly backup failed: {error}"]
+
+
+def filesystem_type(target):
+    """The filesystem type of a path as `stat -f` names it (ext2/ext3, nfs, cifs, fuseblk, ...), or None."""
+    import subprocess
+    found = subprocess.run(["stat", "-f", "-c", "%T", str(target)], capture_output=True, text=True)
+    return found.stdout.strip() or None if found.returncode == 0 else None
+
+
+V6_TASK_INDEX = MIGRATIONS[0][-1]
+
+
+def downgrade_to_6(conn):
+    """Remove what v7 added (task tables, project task columns, deliveries.source, agents.pane_pid) and restore
+    task_index, leaving the rest of the store as it is; the caller checks that every imported project's export is
+    current first. A labelled backup is taken before."""
+    if version(conn) != TASKS_VERSION:
+        raise StoreError(f"the store is at schema version {version(conn)}, not {TASKS_VERSION}")
+    saved = backup(conn, label="pre-downgrade")["path"]
+    conn.execute("PRAGMA foreign_keys = OFF")
+    with transaction(conn):
+        for table in ("task_events", "task_notes", "task_paths", "task_attempts", "task_deps", "tasks", "agent_credentials"):
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+        conn.execute("DROP INDEX IF EXISTS projects_id")
+        for table, columns in (("projects", [name for name, _ in PROJECT_TASK_COLUMNS]), ("deliveries", ["source"]),
+                               ("agents", ["pane_pid"])):
+            present = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+            for column in columns:
+                if column in present:
+                    conn.execute(f'ALTER TABLE "{table}" DROP COLUMN {column}')
+        conn.execute(V6_TASK_INDEX)
+        conn.execute("PRAGMA user_version = 6")
+    conn.execute("PRAGMA foreign_keys = ON")
+    return saved
+
+
 def rotate(directory=None):
     directory = Path(directory) if directory else backup_dir()
     spec = settings()["backups"]
@@ -1665,7 +1742,7 @@ def daily(conn, now=None):
     """Maintenance and a backup at most once a day across every process on the host; failures are recorded in meta
     (shown by `theseus db check`) and never raised. Returns one line per job that ran."""
     lines = []
-    for job, run in (("maintain", maintain), ("backup", backup)):
+    for job, run in (("maintain", maintain), ("backup", daily_backup)):
         if not due(conn, job, now=now):
             continue
         try:

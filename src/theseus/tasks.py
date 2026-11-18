@@ -503,7 +503,7 @@ def complete(queue, task_id, summary, commit=None, checks=(), log=None, limits=(
         if missing:
             raise TaskError(f"{task_id} delivered files that main never committed: {', '.join(missing)}; integrate them or pass --force")
     queue.service.complete(acting_principal(None), task_id, summary, commit, checks, log, limits, force=force)
-    return f"{task_id} -> completed; commit the record with `theseus tasks export`"
+    return f"{task_id} -> completed"
 
 
 def owned_pattern(pattern):
@@ -724,11 +724,23 @@ def export(queue, head=None):
     """Write the store's tasks into the working tree as tasks.json, tasks-archive.jsonl and tasks-history.jsonl. Never
     commits."""
     from . import taskrecords
-    snap = queue.service.export(acting_principal(None), head=head)
+    if head is None:
+        head = g.git(queue.root, "rev-parse", "HEAD", check=False).stdout.strip() or None
+    snap = queue.service.export(acting_principal(), record=True, head=head)
     taskrecords.write(snap, queue.root)
     doc, archived, history = snap.documents()
     return (f"exported {len(doc['tasks'])} open and {len(archived)} archived task(s) and {len(history)} history line(s) "
             f"to {cfg.TASKS}, {cfg.ARCHIVE} and {taskrecords.HISTORY}; commit them with the next change")
+
+
+def export_state(queue):
+    """{state, detail} of the task files in the checkout against the store (taskservice.export_state)."""
+    from . import taskrecords
+    try:
+        files = taskrecords.read(queue.root)
+    except FileNotFoundError:
+        files = taskrecords.Snapshot(tasks="")
+    return queue.service.export_state(acting_principal(), files)
 
 
 def import_(queue, replace=False, new_id=False):

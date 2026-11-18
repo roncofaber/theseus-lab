@@ -124,6 +124,7 @@ class TaskFlowTests(Sandbox):
         self.git("commit", "-q", "-am", "a later task edits the same file")
         verify = self.theseus("verify")
         log = next(line.split(": ", 1)[1] for line in verify.stdout.splitlines() if line.startswith("verify log: "))
+        self.assertIn("exported 1 open", verify.stdout, "a passing verify writes the task export")
         self.assertEqual("0 code commits", self.theseus("verify", "--debt").stdout.split(" since")[0])
         self.theseus("tasks", "complete", TASK, "--from-log", log, "--summary", "header reader merged and verified")
         self.assertEqual("completed", self.record()["status"])

@@ -316,6 +316,55 @@ class McpTests(TaskStoreCase):
         self.assertTrue(stale.is_error)
 
 
+class MaintenanceTests(TaskStoreCase):
+    def test_the_export_state_tells_current_stale_and_hand_edited_files(self):
+        from theseus import tasks as t
+        self.start()
+        self.svc.add(COORDINATOR, spec("one"))
+        queue = SimpleNamespace(service=self.svc, root=self.conf.root)
+        snapshot = self.svc.export(COORDINATOR, record=True, head="abc")
+        taskrecords.write(snapshot, self.conf.root)
+        self.assertEqual("current", t.export_state(queue)["state"])
+        self.svc.hold(COORDINATOR, "one", True)
+        self.assertEqual("stale", t.export_state(queue)["state"])
+        tasks_file = self.conf.root / "docs/project/tasks.json"
+        tasks_file.write_text(tasks_file.read_text().replace("Build one.", "Build one, edited by hand."))
+        self.assertEqual("edited", t.export_state(queue)["state"])
+
+    def test_hourly_and_off_site_backups(self):
+        from unittest import mock
+        self.start()
+        backups, offsite = self.tmp / "backups", self.tmp / "offsite"
+        self.svc.add(COORDINATOR, spec("one"))
+        settings = {"retention": dict(store.DEFAULTS["retention"]),
+                    "backups": {"directory": str(backups), "daily": 7, "weekly": 4, "offsite": str(offsite)}}
+        with mock.patch.object(store, "settings", return_value=settings), store.opened() as conn:
+            self.assertEqual(1, len(store.hourly(conn)), "tasks changed since the newest backup")
+            self.assertEqual([], store.hourly(conn), "at most hourly")
+            later = time.time() + 7200
+            self.assertEqual([], store.hourly(conn, now=later), "no task changed since that backup")
+            copy = store.daily_backup(conn)["offsite"]
+        self.assertTrue(Path(copy).is_file())
+        self.assertEqual(offsite, Path(copy).parent)
+
+    def test_a_downgrade_restores_the_version_6_shape(self):
+        saved = list(store.MIGRATIONS)
+        self.addCleanup(lambda: (setattr(store, "MIGRATIONS", saved), setattr(store, "SCHEMA_VERSION", len(saved))))
+        store.MIGRATIONS, store.SCHEMA_VERSION = saved[:6], 6
+        with store.opened() as old:
+            old.execute("INSERT INTO projects (name, root) VALUES ('demo', ?)", (str(self.conf.root),))
+            old.execute("INSERT INTO deliveries (project, task, result, time, epoch) VALUES ('demo', 't', 'x', 't', 1)")
+            before = MigrationTests.dump(old)
+        store.MIGRATIONS, store.SCHEMA_VERSION = saved, len(saved)
+        self.start()
+        self.svc.add(COORDINATOR, spec("one"))
+        with store.opened() as conn:
+            store.downgrade_to_6(conn)
+            self.assertEqual(6, store.version(conn))
+            after = MigrationTests.dump(conn)
+        self.assertEqual(before, after)
+
+
 class MigrationTests(TaskStoreCase):
     def test_version_6_gains_project_ids_and_task_tables_with_nothing_else_changed(self):
         saved = list(store.MIGRATIONS)
