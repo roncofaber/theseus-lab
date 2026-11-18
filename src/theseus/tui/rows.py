@@ -23,9 +23,9 @@ WIDTHS = {
                "note": 0.5},
     "waiting": {"status": 10, "task": 1.0, "room": 6, "for": 8, "posted": 12, "reason": 1.2},
     "events": {"time": 8, "kind": 11, "agent": 16, "task": 0.7, "detail": 1.6},
-    "host-events": {"time": 8, "project": 12, "kind": 11, "agent": 16, "task": 0.7, "detail": 1.6},
+    "host-events": {"time": 8, "project": 12, "kind": 11, "agent": 24, "task": 0.7, "detail": 1.6},
     "pools": {"pool": 12, "working": 1.0, "holders": 1.5, "claims": 1.0},
-    "gateway": {"time": 8, "project": 12, "agent": 16, "task": 0.8, "error": 1.0, "attempt": 8, "outcome": 0.8, "pool": 1.0},
+    "gateway": {"time": 8, "project": 12, "agent": 24, "task": 0.8, "error": 1.0, "attempt": 8, "outcome": 0.8, "pool": 1.0},
     "projects": {"project": 14, "milestone": 1.0, "coordinator": 13, "watcher": 9, "ready": 6, "working on": 10,
                  "review": 13, "attention": 1.0, "agents": 1.0, "pool": 10, "gateway": 9, "today": 11},
 }
@@ -152,7 +152,8 @@ def event_key(record, index):
 
 
 EVENT_SORT = {"time": lambda r: r.get("time") or "", "project": lambda r: (r.get("project") or "").lower(),
-              "kind": lambda r: r.get("kind") or "", "agent": lambda r: (r.get("agent") or "").lower(),
+              "kind": lambda r: r.get("kind") or "",
+              "agent": lambda r: (r.get("agentLabel") or r.get("agent") or "").lower(),
               "task": lambda r: (r.get("task") or "").lower(), "detail": lambda r: top.event_detail(r).lower()}
 
 
@@ -162,14 +163,14 @@ EVENT_CACHE = {}
 def event_row(record, number, project):
     """One event's row, cached by everything it shows, so a refresh rebuilds only new events."""
     token = (theme.GENERATION, project is not None, number, *(record.get(name) for name in
-                                                              ("project", "id", "time", "kind", "agent", "task",
-                                                               "detail", "reset", "room")))
+                                                              ("project", "id", "time", "kind", "agent", "agentLabel",
+                                                               "task", "detail", "reset", "room")))
     found = EVENT_CACHE.get(token)
     if found is None:
         strong = "bold " if record["kind"] in theme.STRONG_KINDS else ""
         cells = [cell(top.local_clock(record["time"]), "dim"),
                  cell(record["kind"], strong + theme.KIND.get(record["kind"], "")),
-                 record.get("agent") or "-", cell(record.get("task") or "-", strong.strip()),
+                 record.get("agentLabel") or record.get("agent") or "-", cell(record.get("task") or "-", strong.strip()),
                  cell(top.event_detail(record), "dim")]
         if project is not None:
             name = record.get("project") or "-"
@@ -193,7 +194,13 @@ def pool_rows(state_pools):
     for pool in state_pools:
         full = pool["max"] and pool["active"] >= pool["max"]
         holders = Text()
-        for name, count in sorted(pool["projects"].items()):
+        leases = sorted((pool.get("leases") or {}).values(), key=lambda lease: lease.get("agentLabel") or "")
+        for lease in leases:
+            if holders:
+                holders.append(", ")
+            holders.append(lease.get("agentLabel") or lease.get("agent") or "?",
+                           style=f"bold {theme.project_color(lease.get('project') or '')}")
+        for name, count in ([] if leases else sorted(pool["projects"].items())):
             if holders:
                 holders.append(", ")
             holders.append(name, style=f"bold {theme.project_color(name)}")
@@ -238,7 +245,7 @@ def gateway_rows(errors, now=None):
         state, style = pool_state(error)
         rows.append(row(f"gateway:{error['id']}", [
             cell(top.local_clock(error.get("time")), "dim"), cell(project, f"bold {theme.project_color(project)}"),
-            error.get("agent") or "-", cell(error.get("task") or "-", "bold"),
+            error.get("agentLabel") or error.get("agent") or "-", cell(error.get("task") or "-", "bold"),
             cell(error.get("label") or "?", theme.gateway_style(error)),
             cell(f"{error.get('attempt') or '-'}/{error.get('attempts') or '-'}", "dim"), outcome(error),
             Text.assemble((f"{error['pool']} ", "bold"), (state, style))], error.get("excerpt") or ""))

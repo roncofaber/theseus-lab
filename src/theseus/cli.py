@@ -634,8 +634,12 @@ def cmd_supervised(args):
             return
         if action == "down":
             if not names and not args.all:
-                sys.exit("usage: theseus agents down NAME... | --all [--force] [--now]")
+                sys.exit("usage: theseus agents down NAME... | --all [--force] [--now] [--replace]")
             print_actions(supervisor.down(conf, names or None, force=args.force, now=args.now))
+            if args.replace and supervisor.managed(conf):
+                from . import workqueue
+                with workqueue.locked(conf):
+                    print_actions(supervisor.reconcile(conf, wait=True))
             return
         if action == "restart":
             if args.drifted:
@@ -1142,8 +1146,8 @@ def build_parser():
     p = sub.add_parser("agents", help="persistent agents: list, add NAME PANE, remove, enable, disable; supervised agents: "
                                       "up, down, ls, restart, attach, logs, migrate, scale",
                        description="Registered persistent agents. With [agents] managed = true theseus starts and supervises "
-                                   "them itself on a private tmux server: `up` reconciles toward [agents.counts], `down` "
-                                   "stops, `restart` restarts (resuming the conversation unless --fresh), `attach` opens the "
+                                   "them itself on a private tmux server: `up` reconciles toward [agents.counts] live agents per "
+                                   "profile, `down` stops one and takes it out of the count, `restart` restarts (resuming the conversation unless --fresh), `attach` opens the "
                                    "pane (C-q detaches), `logs` prints its screen, `migrate` moves a hand-made pane's agent "
                                    "onto the private server, `scale PROFILE COUNT` sets [agents.counts] in "
                                    "theseus.local.toml and reconciles.")
@@ -1158,6 +1162,7 @@ def build_parser():
     p.add_argument("--all", action="store_true", help="down, migrate: every agent of the project")
     p.add_argument("--force", action="store_true", help="down: stop an agent that holds a task")
     p.add_argument("--now", action="store_true", help="down: skip the graceful exit")
+    p.add_argument("--replace", action="store_true", help="down: reconcile at once, starting replacements under free names")
     p.add_argument("--fresh", action="store_true", help="restart: start a new conversation")
     p.add_argument("--drifted", action="store_true", help="restart: every free agent whose launch configuration changed")
     p.add_argument("--read-only", action="store_true", help="attach: look without typing")

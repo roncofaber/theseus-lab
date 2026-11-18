@@ -111,6 +111,7 @@ class HostSnapshotTests(HostCase):
         self.assertTrue(all(p["available"] for p in state["projects"]))
         self.assertEqual(2, len(state["projects"][0]["snapshot"]["agents"]))
         self.assertEqual([("alpha", "assigned"), ("beta", "delivered")], [(e["project"], e["kind"]) for e in state["events"]])
+        self.assertEqual(["alpha/worker-a", "beta/worker-a"], [e["agentLabel"] for e in state["events"]])
         self.assertEqual(1, state["projects"][0]["activity"]["assigned"][-1])
         self.assertEqual(1, state["projects"][1]["activity"]["delivered"][-1])
         self.assertEqual([], state["pools"])
@@ -168,16 +169,16 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(["alpha", "beta"], self.app.active_view().project_names())
 
 GATEWAY_ERRORS = [
-    {"id": 7, "pool": "cborg", "project": "alpha", "agent": "worker-a", "task": "t1", "code": 429, "retryable": 1,
+    {"id": 7, "pool": "gw", "project": "alpha", "agent": "worker-a", "task": "t1", "code": 429, "retryable": 1,
      "time": "2026-11-17T17:57:43Z", "epoch": 1.0, "kind": "rate_limit", "subtype": "parallel cap",
      "label": "429 parallel cap", "excerpt": "API Error: Request rejected (429) · Rate limit exceeded for api_key: "
      "[redacted]. Limit type: max_parallel_requests.", "attempt": 1, "attempts": 3, "outcome": "retry",
      "next": 4102444800.0, "pausedUntil": None, "capCut": 1, "capUntil": 4102444800.0},
-    {"id": 6, "pool": "cborg", "project": "alpha", "agent": "worker-b", "task": "t2", "code": None, "retryable": 1,
+    {"id": 6, "pool": "gw", "project": "alpha", "agent": "worker-b", "task": "t2", "code": None, "retryable": 1,
      "time": "2026-11-17T17:50:00Z", "epoch": 0.5, "kind": "connection_lost", "subtype": "connection lost",
      "label": "conn lost", "excerpt": "API Error: Connection lost mid-response.", "attempt": 2, "attempts": 3,
      "outcome": "recovered", "next": None, "pausedUntil": None, "capCut": 1, "capUntil": 4102444800.0}]
-GATEWAY_HEALTH = [{"pool": "cborg", "codes": [429, None], "labels": ["429 parallel cap", "conn lost"], "errors": 2,
+GATEWAY_HEALTH = [{"pool": "gw", "codes": [429, None], "labels": ["429 parallel cap", "conn lost"], "errors": 2,
                    "lastError": 1.0, "lastSuccess": None, "pausedUntil": None, "reason": None, "capCut": 1,
                    "capUntil": 4102444800.0}]
 
@@ -557,7 +558,7 @@ class TranscriptTests(Sandbox):
     def test_the_context_limit_follows_the_transcript_model(self):
         from theseus import agents, profiles
         from types import SimpleNamespace
-        table = {"context": {"claude-*": 1000000, "claude-haiku-4-5*": 200000, "lbl/cborg-coder-ultra": 229376}}
+        table = {"context": {"claude-*": 1000000, "claude-haiku-4-5*": 200000, "lbl/gw-coder-ultra": 229376}}
         conf = SimpleNamespace(section=lambda name: table if name == "models" else {}, root=self.tmp)
         original = profiles.resolve
         profiles.resolve = lambda conf, name: {"context_limit": 123}
@@ -565,9 +566,30 @@ class TranscriptTests(Sandbox):
         limit = lambda model: agents.context_use(conf, "p", {"tokens": 5, "model": model}, None)["limit"]
         self.assertEqual(1000000, limit("claude-opus-5-5"))
         self.assertEqual(200000, limit("claude-haiku-4-5"))
-        self.assertEqual(229376, limit("lbl/cborg-coder-ultra"))
+        self.assertEqual(229376, limit("lbl/gw-coder-ultra"))
         self.assertEqual(123, limit("some-other-model"))
         self.assertEqual(123, agents.context_use(conf, "p", None, 9)["limit"])
+
+
+class HostLabelTests(unittest.TestCase):
+    def test_host_views_show_project_slash_short_and_project_tabs_the_bare_name(self):
+        from theseus.tui import rows as R
+        shorts = {"proj2": {"proj2-gw-4": "gw-4"}}
+        self.assertEqual("proj2/gw-4", host.agent_label("proj2", "proj2-gw-4", shorts))
+        self.assertEqual("proj2/gone-1", host.agent_label("proj2", "proj2-gone-1", shorts))
+        record = {"id": 1, "time": "2026-11-17T10:00:00+00:00", "kind": "assigned", "agent": "proj2-gw-4",
+                  "project": "proj2"}
+        [project_row] = R.event_rows([record])
+        [host_row] = R.event_rows([{**record, "agentLabel": "proj2/gw-4"}], project=True)
+        self.assertEqual("proj2-gw-4", project_row[1][2].plain)
+        self.assertEqual("proj2/gw-4", host_row[1][3].plain)
+        [gateway_row] = R.gateway_rows([{"id": 1, "project": "proj2", "agent": "proj2-gw-4",
+                                         "agentLabel": "proj2/gw-4", "pool": "gw"}])
+        self.assertEqual("proj2/gw-4", gateway_row[1][2].plain)
+        [pool_row] = R.pool_rows([{"pool": "gw", "max": 4, "active": 1, "projects": {"proj2": 1}, "claims": [],
+                                   "leases": {"proj2/proj2-gw-4": {"project": "proj2", "agent": "proj2-gw-4",
+                                                                          "agentLabel": "proj2/gw-4"}}}])
+        self.assertEqual("proj2/gw-4", pool_row[1][2].plain)
 
 
 class ColorFallbackTests(unittest.TestCase):

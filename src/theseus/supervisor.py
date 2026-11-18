@@ -1,8 +1,8 @@
 """Supervised persistent agents: theseus starts each one in a hidden pane of its own private tmux server, records every
 run in the host store, restarts crashed agents with backoff and stops them gracefully.
 
-There is no daemon. `theseus agents up` reconciles a project toward its [agents] configuration (one standing session per
-counted slot, plus [[agents.extra]]); every queue tick of a managed project runs the same reconcile without waiting
+There is no daemon. `theseus agents up` reconciles a project toward its [agents] configuration ([agents.counts] live
+agents per profile, plus [[agents.extra]]); every queue tick of a managed project runs the same reconcile without waiting
 for slow starts, so the first theseus command after a reboot brings the agents back. The pane runs
 `theseus agents _exec PROJECT AGENT GEN`, which applies the profile environment in its own process and execs the
 agent, so the pane's start command never carries a secret and the pane pid is the agent's. A pane-died hook runs
@@ -185,7 +185,8 @@ def counts(conf):
 
 
 def desired(conf):
-    """The standing agents of a project: [{name, profile, slot, rooms}] from [agents.counts] then [[agents.extra]]."""
+    """The configured names alone, [{name, profile, slot, rooms}]: slots 1..N of [agents.counts] then [[agents.extra]],
+    for validation and migration. What reconcile works toward is standing(), which also reads the records."""
     found = []
     pattern = template(conf)
     for profile, count in counts(conf).items():
@@ -196,6 +197,70 @@ def desired(conf):
         found.append({"name": extra["name"], "profile": extra.get("profile") or profiles.default_name(conf), "slot": None,
                       "rooms": extra.get("rooms")})
     return found
+
+
+def counted_live(rec):
+    return rec.get("desired") not in ("down", "retire") and rec.get("enabled", True)
+
+
+def name_free(rec, holds_task):
+    """Whether a counted name may go to a new agent: never used, removed, or taken down without a task."""
+    return rec is None or (rec.get("desired") == "down" and not holds_task)
+
+
+def plan(count, members, holds=lambda n: False, started=lambda n: None, taken=lambda n: False, keep=()):
+    """One profile's plan over members {n: record} of its counted names: (kept, starts, victims), lists of n. Live
+    members beyond count become victims, free ones before busy ones and the most recently started first (keep last);
+    below count, retiring members come back first, then the lowest free names."""
+    live = [n for n, rec in members.items() if counted_live(rec)]
+    if len(live) > count:
+        order = sorted(live, key=lambda n: (n in keep, bool(holds(n)), -(started(n) or 0), -n))
+        victims = order[:len(live) - count]
+        return sorted(set(live) - set(victims)), [], sorted(victims)
+    need = count - len(live)
+    starts = sorted(n for n, rec in members.items() if rec.get("desired") == "retire")[:need]
+    n = 0
+    while len(starts) < need:
+        n += 1
+        if n in starts or (n not in members and taken(n)):
+            continue
+        if name_free(members.get(n), n in members and holds(n)):
+            starts.append(n)
+    return sorted(live), sorted(starts), []
+
+
+def standing(conf, regs, keep=()):
+    """What reconcile keeps or starts, [{name, profile, slot, rooms, revive}]: per profile the live counted agents
+    within the count, the names to start or revive and the agents down or disabled (left as they are), then
+    [[agents.extra]]. Live agents beyond the count are left out, so reconcile retires them."""
+    pattern = template(conf)
+    extras = [{"name": e["name"], "profile": e.get("profile") or profiles.default_name(conf), "slot": None,
+               "rooms": e.get("rooms")} for e in section(conf).get("extra") or []]
+    used = {e["name"] for e in extras}
+    wanted = counts(conf)
+    names = list(wanted) + sorted({r["profile"] for r in regs.values()
+                                   if r.get("managed") and r.get("slot") and r.get("profile") and r["profile"] not in wanted})
+    found = []
+    for profile in names:
+        def name(n, profile=profile):
+            return pattern.format(project=conf.name, profile=profile, n=n)
+        members = {r["slot"]: r for r in regs.values() if r.get("managed") and r.get("slot") and
+                   r.get("profile") == profile and r["name"] == name(r["slot"]) and r["name"] not in used}
+        for n in range(1, wanted.get(profile, 0) + len(regs) + 1):
+            rec = regs.get(name(n))
+            if rec and not rec.get("managed") and name(n) not in used:
+                members.setdefault(n, rec)
+        kept, starts, _ = plan(wanted.get(profile, 0), members,
+                               holds=lambda n: bool(current_task(conf, name(n))),
+                               started=lambda n: (last_run(conf, name(n)) or {}).get("started_epoch"),
+                               taken=lambda n: name(n) in used or name(n) in regs,
+                               keep={n for n in members if name(n) in keep})
+        parked = [n for n, rec in members.items() if not counted_live(rec) and rec.get("desired") != "retire"]
+        for n in sorted({*kept, *starts, *parked}):
+            used.add(name(n))
+            found.append({"name": name(n), "profile": profile, "slot": n, "rooms": None,
+                          "revive": n in starts and n in members})
+    return found + extras
 
 
 def set_count(conf, profile, count):
@@ -721,13 +786,13 @@ def reconcile(conf, names=None, wait=False, dry_run=False, reset=False):
     if not managed(conf):
         return []
     srv = server()
-    wanted = desired(conf)
+    regs = records(conf)
+    wanted = standing(conf, regs, keep=names or ())
     if names:
-        unknown = set(names) - {w["name"] for w in wanted}
+        unknown = set(names) - {w["name"] for w in wanted} - {n for n, r in regs.items() if r.get("managed")}
         if unknown:
             raise SupervisorError(f"not a configured agent of {conf.name}: {', '.join(sorted(unknown))} "
                                   f"(see [agents] in {cfg.CONFIG_NAME} or {cfg.LOCAL_NAME})")
-    regs = records(conf)
     lost = close_lost(conf, srv, regs, dry_run)
     actions = []
     running = len([p for p in srv.list_panes(("@theseus_agent",)) if p.get("@theseus_agent")])
@@ -737,6 +802,11 @@ def reconcile(conf, names=None, wait=False, dry_run=False, reset=False):
         if names and name not in names:
             continue
         rec = regs.get(name)
+        if slot.get("revive") and rec and rec.get("desired") in ("down", "retire"):
+            fields = {"desired": "up", "enabled": True, **({"session_id": None} if rec["desired"] == "down" else {})}
+            if not dry_run:
+                update(conf, name, **fields)
+            rec = {**rec, **fields}
         try:
             action = reconcile_one(conf, srv, slot, rec, wait, dry_run, reset, names, lost, running, limit)
         except (SupervisorError, tm.TmuxError, profiles.ProfileError) as error:
@@ -745,8 +815,11 @@ def reconcile(conf, names=None, wait=False, dry_run=False, reset=False):
         if action[0] in ("started", "restarted", "would start", "would restart"):
             running += 1
         actions.append((name, *action))
-    if not names:
-        known = {w["name"] for w in wanted}
+    known = {w["name"] for w in wanted}
+    if names:
+        actions += [(name, "surplus", "beyond [agents.counts]; the next full reconcile stops it")
+                    for name in names if name not in known]
+    else:
         extra = [rec for name, rec in regs.items() if rec.get("managed") and name not in known]
         current = configured_now(conf) if extra else set()
         for rec in extra:
@@ -761,7 +834,7 @@ def configured_now(conf):
     """The agent names the project's files configure right now, or None when they cannot be read: a caller holding an
     older configuration (a long-running queue) must never retire an agent that another command has since added."""
     try:
-        return {w["name"] for w in desired(cfg.load(root=conf.root))}
+        return {w["name"] for w in standing(cfg.load(root=conf.root), records(conf))}
     except (cfg.ConfigError, SupervisorError):
         return None
 
@@ -792,7 +865,7 @@ def reconcile_one(conf, srv, slot, rec, wait, dry_run, reset, names, lost, runni
         if rec.get("pane") and agents.pane_alive(rec["pane"]):
             return "legacy", f"a hand-made pane {rec['pane']} runs it; `theseus agents migrate {name}`"
     if rec and rec.get("desired") == "down" and not names:
-        return "down", "stopped by `theseus agents down`; `theseus agents up NAME` starts it"
+        return "down", "stopped by `theseus agents down`, not counted; `theseus agents up NAME` starts it"
     if rec and rec.get("phase") == "failed" and not reset:
         return "failed", f"restart budget exhausted; `theseus agents restart {name}`"
     info = pane_info(srv, rec["target"]) if rec and rec.get("managed") and rec.get("target") else None
@@ -906,8 +979,8 @@ def retire(conf, srv, rec, dry_run):
     name = rec["name"]
     task = current_task(conf, name)
     if task:
-        if not dry_run and rec.get("enabled"):
-            update(conf, name, enabled=False)
+        if not dry_run and (rec.get("enabled") or rec.get("desired") != "retire"):
+            update(conf, name, enabled=False, desired="retire")
         return "deferred", f"task {task['id']} in progress; stopping it once free"
     if dry_run:
         return "would stop", "no longer configured"

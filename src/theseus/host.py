@@ -57,6 +57,18 @@ def pool_snapshots():
         return []
 
 
+def agent_label(project, agent, shorts):
+    """project/short for host-wide views, where short names repeat across projects; an agent no longer registered
+    loses the project prefix of its name."""
+    if not agent or not project:
+        return agent
+    short = shorts.get(project, {}).get(agent)
+    if short is None:
+        prefix = f"{project}-"
+        short = agent[len(prefix):] if agent.startswith(prefix) and len(agent) > len(prefix) else agent
+    return f"{project}/{short}"
+
+
 def snapshot(roots=None):
     """roots: extra project roots to include besides the registry (for example the current project)."""
     found = {entry["root"]: entry for entry in registry.entries()}
@@ -72,14 +84,23 @@ def snapshot(roots=None):
         projects.append(item)
     projects.sort(key=lambda item: (item["name"], item["root"]))
     events = []
+    shorts = {item["name"]: {a["name"]: a.get("display") or a["name"] for a in item["snapshot"].get("agents") or []}
+              for item in projects if item["available"]}
     for item in projects:
         if item["available"]:
-            events.extend({**record, "project": item["name"]} for record in item["snapshot"]["events"])
+            events.extend({**record, "project": item["name"],
+                           "agentLabel": agent_label(item["name"], record.get("agent"), shorts)}
+                          for record in item["snapshot"]["events"])
     events.sort(key=lambda record: record.get("time") or "")
+    errors = top.gateway_recent({item["name"]: item.get("gatewayAttempts") for item in projects})
+    for error in errors or []:
+        error["agentLabel"] = agent_label(error.get("project"), error.get("agent"), shorts)
+    found_pools = pool_snapshots()
+    for pool in found_pools:
+        for lease in (pool.get("leases") or {}).values():
+            lease["agentLabel"] = agent_label(lease.get("project"), lease.get("agent"), shorts)
     return {"time": datetime.now(timezone.utc).isoformat(), "host": host, "projects": projects,
-            "pools": pool_snapshots(), "gateway": top.gateway_health(),
-            "gatewayErrors": top.gateway_recent({item["name"]: item.get("gatewayAttempts") for item in projects}),
-            "events": events[-300:]}
+            "pools": found_pools, "gateway": top.gateway_health(), "gatewayErrors": errors, "events": events[-300:]}
 
 
 def summary_counts(item):

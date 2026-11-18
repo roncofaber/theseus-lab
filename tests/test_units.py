@@ -195,7 +195,7 @@ class TaskRuleTests(Sandbox):
 
     def test_evidence_levels_are_separate(self):
         self.add("e-task")
-        t.assign(self.queue, "e-task", "w", "cborg", "m", "/nowhere", "abc", "/nowhere/.theseus")
+        t.assign(self.queue, "e-task", "w", "gw", "m", "/nowhere", "abc", "/nowhere/.theseus")
         with self.assertRaises(t.TaskError):
             t.observe(self.queue, "e-task", "too early")
         t.mark_merged(self.queue, "e-task", "abc123")
@@ -315,3 +315,64 @@ class LongRunningQueueTests(Sandbox):
                 mock.patch.object(supervisor, "stop", return_value=(True, "killed")) as stop:
             self.assertEqual([("a1", "stopped", "killed")], supervisor.down(cfg.load(root=self.project), ["a1"], force=True))
         stop.assert_called_once_with(mock.ANY, rec, graceful=False, reason="down", grace=5)
+
+
+    def test_reconcile_after_down_and_scale_keeps_live_agents_and_stops_the_newest(self):
+        from unittest import mock
+        from theseus import supervisor
+        self.write("theseus.local.toml", "[agents]\nmanaged = true\n\n[agents.counts]\ngw = 2\n")
+        conf = cfg.load(root=self.project)
+        name = lambda n: supervisor.template(conf).format(project=conf.name, profile="gw", n=n)
+        regs = {name(n): {"name": name(n), "managed": True, "profile": "gw", "slot": n, "enabled": True,
+                          "desired": "down" if n == 2 else "up"} for n in range(1, 5)}
+        regs[name(5)] = {"name": name(5), "managed": True, "profile": "gw", "slot": 5, "enabled": False,
+                         "desired": "up"}
+        server = mock.Mock()
+        server.list_panes.return_value = []
+        one = lambda conf, srv, slot, rec, *rest: ("down", "") if rec["desired"] == "down" else ("kept", "")
+        with mock.patch.object(supervisor, "server", return_value=server), \
+                mock.patch.object(supervisor, "records", return_value=regs), \
+                mock.patch.object(supervisor, "close_lost", return_value=set()), \
+                mock.patch.object(supervisor, "current_task", return_value=None), \
+                mock.patch.object(supervisor, "last_run", side_effect=lambda c, n: {"started_epoch": int(n[-1])}), \
+                mock.patch.object(supervisor, "reconcile_one", side_effect=one), \
+                mock.patch.object(supervisor, "retire", return_value=("removed", "")) as retire:
+            actions = {n: a for n, a, _ in supervisor.reconcile(conf)}
+        self.assertEqual({name(1): "kept", name(2): "down", name(3): "kept", name(4): "removed", name(5): "kept"},
+                         actions, "a disabled agent runs on uncounted")
+        retire.assert_called_once_with(conf, server, regs[name(4)], False)
+
+class CountPlanTests(unittest.TestCase):
+    """[agents.counts] as live agents per profile: supervisor.plan over {slot: record}."""
+
+    @staticmethod
+    def members(*live, **others):
+        found = {n: {"desired": "up", "enabled": True} for n in live}
+        found.update({int(k[1:]): v for k, v in others.items()})
+        return found
+
+    def test_scale_down_picks_free_agents_before_busy_ones_then_the_newest(self):
+        from theseus import supervisor
+        kept, starts, victims = supervisor.plan(1, self.members(1, 2, 3), holds=lambda n: n == 3, started=lambda n: n)
+        self.assertEqual(([3], [], [1, 2]), (kept, starts, victims))
+
+    def test_scale_up_reuses_the_lowest_free_name_down_or_removed(self):
+        from theseus import supervisor
+        members = self.members(3, n2={"desired": "down"})
+        self.assertEqual([1, 2], supervisor.plan(3, members)[1])
+        self.assertEqual([4], supervisor.plan(2, {**members, 2: {"desired": "down"}}, holds=lambda n: n == 2,
+                                              taken=lambda n: n == 1)[1], "a name of an extra or a task holder is not free")
+
+    def test_a_deferred_victim_comes_back_before_a_new_name(self):
+        from theseus import supervisor
+        members = self.members(1, n2={"desired": "retire", "enabled": False})
+        self.assertEqual(([1], [2], []), supervisor.plan(2, members))
+        self.assertEqual(([1], [], []), supervisor.plan(1, members))
+
+    def test_the_field_case_with_or_without_a_reconcile_between_down_and_scale(self):
+        from theseus import supervisor
+        downed = self.members(1, 3, 4, n2={"desired": "down"})
+        self.assertEqual(([1, 3], [], [4]), supervisor.plan(2, downed, started=lambda n: n))
+        self.assertEqual([2], supervisor.plan(4, downed)[1])
+        refilled = self.members(1, 2, 3, 4)
+        self.assertEqual(([1, 3], [], [2, 4]), supervisor.plan(2, refilled, started=lambda n: 9 if n == 2 else n))

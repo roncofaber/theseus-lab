@@ -809,7 +809,8 @@ class TopApp(App):
                       "  next wake); ready, held, blocked, in progress, review and the oldest delivery waiting; agents by\n"
                       "  state, pool slots with a cap cut (-N) and the gateway; today's merges, completions, deliveries.\n"
                       "  PROJECTS (Host tab): the same figures, one row per project; Enter opens its tab.\n"
-                      "  Agents show short names (profile-slot for supervised agents; pane private: theseus's own tmux).\n"
+                      "  Agents show short names (profile-slot for supervised agents; pane private: theseus's own tmux);\n"
+                      "  the Host tab shows them as project/short.\n"
                       "  A cut cell ends in an ellipsis; its row's popup shows it whole. ~ marks an estimated context.\n")
         legend.append("\ntmux\n", style="bold underline")
         legend.append("  After a jump to a hand-made pane, the tmux key shown in the status line or `theseus top --back`\n"
