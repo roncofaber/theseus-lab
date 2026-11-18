@@ -441,6 +441,29 @@ def open_unchecked(db=None):
     return conn
 
 
+def connect_readonly(db=None):
+    """Open the host database read-only (mode=ro): no file is created or changed, nothing migrates. A database at an
+    older schema than this code is refused, since its tables are not the ones this code reads."""
+    target = Path(db) if db else path()
+    if not target.exists():
+        raise StoreError(f"no host database at {target}")
+    conn = sqlite3.connect(f"{target.resolve().as_uri()}?mode=ro", uri=True, timeout=BUSY_TIMEOUT, isolation_level=None)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT * 1000)}")
+        current = version(conn)
+        if current > SCHEMA_VERSION:
+            raise SchemaTooNew(f"{target} has schema version {current}, newer than the {SCHEMA_VERSION} this theseus "
+                               f"knows; upgrade theseus", current)
+        if current < SCHEMA_VERSION:
+            raise StoreError(f"{target} has schema version {current}; any writing theseus command migrates it to "
+                             f"{SCHEMA_VERSION}")
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
 def set_wal(conn):
     # Switching a fresh file to WAL takes an exclusive lock that does not always go through the busy handler.
     deadline = time.time() + BUSY_TIMEOUT
@@ -455,8 +478,8 @@ def set_wal(conn):
 
 
 @contextlib.contextmanager
-def opened(db=None):
-    conn = connect(db)
+def opened(db=None, readonly=False):
+    conn = connect_readonly(db) if readonly else connect(db)
     try:
         yield conn
     finally:

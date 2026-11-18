@@ -70,10 +70,14 @@ def _acyclic(by_id):
 
 
 def task_record_problems(conf):
-    """Problems in the committed task export under docs/project/: the reviewable record, which a snapshot of the
-    pushed commit can check without the host store (the service enforces the same rules when it writes)."""
-    from . import taskrecords
-    document, archived, _ = taskrecords.read(conf.root).documents()
+    """Problems in the task records: those in the host store when it is readable from the project's own checkout,
+    else the committed export under docs/project/ (a guard snapshot of the pushed commit, a worker's worktree)."""
+    from . import taskrecords, taskservice
+    live = taskservice.open(conf).live(taskservice.COORDINATOR)
+    if live:
+        document, archived = live
+    else:
+        document, archived, _ = taskrecords.read(conf.root).documents()
     open_tasks = document["tasks"]
     everything = open_tasks + archived
     by_id = {}

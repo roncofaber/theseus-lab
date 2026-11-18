@@ -290,6 +290,14 @@ Decisions on the phase 1 notes (coordinator review, 2026-11-18):
 - Export fidelity: each attempt's result and delivery source travel in the history lines, so a re-import restores them. Observed touches are transient and may be lost.
 - Phase 2 callers own the file-side steps: setting the handoff aside on reopen and unmerge, the unintegrated-files check, `complete --from-log`, and the backup before import.
 
+Decisions on the phase 2 notes (coordinator review, 2026-11-18):
+
+- Every rule that matters holds at write time in the service. `claim` refuses a task outside the current milestone or past its profile's capacity unless forced, and a forced claim records a warning event. Owned paths overlapping an in-progress task become a claim-time hold, by the same mechanism as touches. `complete --force` on a task that was never attempted records why. The `externalBlocker` and `researchRequired` shape is validated on edit. `theseus check` validates the store when it is reachable on the host, and the committed export otherwise (guard snapshots, workers without access).
+- `docs/index` stays on the committed files.
+- Abandoning a forced claim restores what it superseded, the pause record included.
+- The listing order of `tasks list --all` and the `edit --force` aliases are fine; the CHANGELOG notes them.
+- Read commands open the store read-only (`mode=ro`) and never create files in the data directory. A worker that can read but not write that directory either reads its task or gets a clear message.
+
 ## 17. Phase 0 findings (2026-11-18)
 
 ### MCP Python SDK

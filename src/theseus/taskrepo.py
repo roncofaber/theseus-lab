@@ -329,7 +329,14 @@ class SqliteRepo:
 
 
 @contextlib.contextmanager
-def opened(db=None):
-    """A SqliteRepo over a fresh store connection, closed on exit."""
-    with store.opened(db) as conn:
+def opened(db=None, readonly=False):
+    """A SqliteRepo over a fresh store connection (read-only with readonly), closed on exit."""
+    with store.opened(db, readonly=readonly) as conn:
+        yield SqliteRepo(conn)
+
+
+@contextlib.contextmanager
+def memory():
+    """A SqliteRepo over an empty in-memory store, for reading task files that are not in the host store."""
+    with store.opened(":memory:") as conn:
         yield SqliteRepo(conn)

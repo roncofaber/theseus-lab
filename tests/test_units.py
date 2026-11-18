@@ -135,12 +135,14 @@ class TaskRuleTests(Sandbox):
         return t.add(self.queue, task_id, **argv)
 
     def exported_problems(self, change=None):
-        """The rules' problems in a fresh export, after change(document) edits its tasks.json as a hand edit would."""
-        t.export(self.queue)
+        """The rules' problems after change(document) edits the exported tasks.json and the edit is imported (the
+        service would refuse such records, so they arrive the way a hand edit before the cutover would)."""
         if change:
+            t.export(self.queue)
             document = json.loads(self.conf.tasks_file.read_text())
             change(document)
             self.conf.tasks_file.write_text(json.dumps(document, indent=2) + "\n")
+            t.import_(self.queue, replace=True)
         return rules.task_record_problems(self.conf)
 
     def test_add_refuses_bad_records_and_leaves_the_queue_unchanged(self):

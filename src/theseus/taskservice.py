@@ -15,6 +15,7 @@ import hmac
 import json
 import os
 import secrets
+import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass
@@ -27,7 +28,7 @@ from . import tasks as t
 
 NOTE_LIMIT = 4096
 EDITABLE = {"role", "objective", "contract", "accept", "owned", "add_owned", "touches", "depends", "milestone", "room",
-            "profile", "priority", "min_capability", "note"}
+            "profile", "priority", "min_capability", "note", "externalBlocker", "researchRequired"}
 WORKER_COMMANDS = "`theseus task show|note|done|blocked TASK`"
 
 
@@ -112,6 +113,37 @@ class TaskService:
         except taskrepo.Conflict as error:
             raise TaskError("conflict", str(error)) from error
 
+    @contextlib.contextmanager
+    def reading(self):
+        """(repo, project) for a read: the store opened read-only, so a read never writes or creates anything in the
+        data directory. A project with no task yet reads its files through an in-memory store."""
+        with contextlib.ExitStack() as stack:
+            project = None
+            if store.path().exists():
+                try:
+                    repo = stack.enter_context(self.opener(readonly=True))
+                    project = repo.project(self.name)
+                except store.SchemaTooNew:
+                    raise
+                except (sqlite3.Error, store.StoreError) as error:
+                    raise TaskError("unreadable", f"cannot read the host store {store.path()} read-only ({error}). A "
+                                                  f"reader that may not write its directory can read only while its "
+                                                  f"-wal and -shm files exist (another theseus process has it open); "
+                                                  f"ask the coordinator for `theseus tasks show ID`") from error
+            if not (project and project["tasks_imported"]):
+                fresh = self.fresh()
+                if not fresh:
+                    raise TaskError("not-imported", f"{self.name}'s tasks are not in the host store yet; run "
+                                                    f"`theseus tasks import`")
+                repo = stack.enter_context(taskrepo.memory())
+                with repo.transaction():
+                    self.load_snapshot(repo, repo.ensure_project(self.name), *parsed(fresh))
+                project = repo.project(self.name)
+            elif project["tasks_root"] and not self.same_checkout(project["tasks_root"]):
+                raise TaskError("wrong-root", f"{self.name}'s tasks belong to {project['tasks_root']}; if the checkout "
+                                              f"moved, run `theseus tasks adopt` in the new one")
+            yield repo, project
+
     def fresh(self):
         """The task files of a project that has no task at all yet (a new one), which its first task call imports;
         None when they hold tasks, which `theseus tasks import` must load."""
@@ -188,7 +220,7 @@ class TaskService:
     # reads
 
     def get(self, p, task_id, *, history=False):
-        with self.unit(write=False) as (repo, project):
+        with self.reading() as (repo, project):
             task, attempts = self.load(repo, project, task_id)
             found = {"task": rec.render(task, attempts), "rev": task["rev"], "notes": repo.notes(task["pk"])}
             if history:
@@ -196,7 +228,7 @@ class TaskService:
             return found
 
     def list(self, p, *, status=None, milestone=None, include_completed=False):
-        with self.unit(write=False) as (repo, project):
+        with self.reading() as (repo, project):
             statuses = None if include_completed else t.OPEN
             found = self.records(repo, project, statuses)
         return [task for task in found if (status is None or task["status"] == status)
@@ -208,7 +240,7 @@ class TaskService:
     def ready(self, p, *, any_milestone=False, include_paused=False, reach=None):
         """Open task ids ready to assign; reach (tasks.merge_reach) also holds a task until its dependencies' merges
         are in the base a worktree would start from."""
-        with self.unit(write=False) as (repo, project):
+        with self.reading() as (repo, project):
             everything = self.records(repo, project)
             current = None if any_milestone else project["milestone"]
         index = {task["id"]: task for task in everything}
@@ -219,9 +251,23 @@ class TaskService:
                 found.append(task["id"])
         return found
 
+    def live(self, p):
+        """(tasks.json document, archived records) from the store when it is readable and this checkout is the one
+        the tasks belong to, else None: a guard snapshot or a worker's worktree checks the committed export."""
+        try:
+            with self.reading() as (repo, project):
+                recorded = project["tasks_root"]
+                if not recorded or Path(recorded).resolve() != self.root.resolve():
+                    return None
+                doc = self.header(project)
+                doc["tasks"] = self.records(repo, project, t.OPEN)
+                return doc, self.records(repo, project, ("completed",))
+        except (TaskError, store.StoreError):
+            return None
+
     def document(self, p):
         """The tasks.json document as an export would write it now: the header and the open tasks."""
-        with self.unit(write=False) as (repo, project):
+        with self.reading() as (repo, project):
             doc = self.header(project)
             doc["tasks"] = self.records(repo, project, t.OPEN)
             return doc
@@ -232,7 +278,7 @@ class TaskService:
 
     def questions(self, p, task_id=None):
         """Open worker questions, oldest first: [{task, text, author, time}]."""
-        with self.unit(write=False) as (repo, project):
+        with self.reading() as (repo, project):
             tasks = [self.load(repo, project, task_id)[0]] if task_id else repo.tasks(project["id"])
             return [{"task": task["id"], "text": note["text"], "author": note["author"], "time": note["time"]}
                     for task in tasks for note in repo.notes(task["pk"])
@@ -308,6 +354,13 @@ class TaskService:
                 raise TaskError("invalid", str(error)) from error
         if int(values["min_capability"] or 0) < 0:
             raise TaskError("invalid", "the minimum capability must be 0 or more")
+        for key in ("externalBlocker", "researchRequired"):
+            blocker = values.get(key)
+            if key in changed and blocker is not None and (
+                    not isinstance(blocker, dict) or not blocker.get("evidence") or not blocker.get("unblockCondition")):
+                raise TaskError("invalid", f"{key} needs evidence and unblockCondition")
+        if values.get("externalBlocker") and values.get("researchRequired"):
+            raise TaskError("invalid", "researchRequired is assignable work, not an external blocker; keep one")
         return {**values, "room": values["room"] or None, "profile": values["profile"] or None,
                 "priority": int(values["priority"] or 0), "min_capability": int(values["min_capability"] or 0)}
 
@@ -330,7 +383,12 @@ class TaskService:
                 raise TaskError("refused", f"{task_id} is in progress; pass --force to change it under its worker")
             if task["status"] not in ("pending", "in_progress"):
                 raise TaskError("refused", f"{task_id} is {task['status']}; reopen it before editing")
-            current = {"role": task["role"], "objective": task["objective"], "contract": task["contract"],
+            blockers = task["blockers"] or {}
+            if any(changes.get(key) for key in ("externalBlocker", "researchRequired")) and task["status"] != "pending":
+                raise TaskError("invalid", f"{task_id} is {task['status']}; only a pending, unowned task can be blocked")
+            current = {"externalBlocker": blockers.get("externalBlocker"),
+                       "researchRequired": blockers.get("researchRequired"),
+                       "role": task["role"], "objective": task["objective"], "contract": task["contract"],
                        "accept": task["acceptance"] or [], "owned": task["owned"], "depends": task["deps"],
                        "touches": task["touches"], "room": task["room"], "profile": task["profile"],
                        "priority": task["priority"] or 0, "min_capability": task["min_capability"] or 0}
@@ -353,6 +411,11 @@ class TaskService:
                     touched.add(record_key)
             if "milestone" in changes:
                 fields["milestone"], touched = changes["milestone"] or None, touched | {"milestone"}
+            if {"externalBlocker", "researchRequired"} & set(changes):
+                kept = {k: v for k, v in blockers.items() if k not in ("externalBlocker", "researchRequired")}
+                kept.update({k: values[k] for k in ("externalBlocker", "researchRequired") if values[k]})
+                fields["blockers"] = kept or None
+                touched |= {"externalBlocker", "researchRequired"}
             if "note" in changes:
                 fields["note"], touched = changes["note"] or None, touched | {"assignmentNote"}
             for key, record_key in (("owned", "ownedPaths"), ("depends", "dependencies"), ("touches", "touches")):
@@ -549,9 +612,14 @@ class TaskService:
                 raise TaskError("invalid", "complete needs a log and at least one check (the commit defaults to the "
                                            "merge commit)")
             current = rec.current_attempt(attempts)
+            forced = ([f"was {task['status']}"] if task["status"] not in ("verification", "merged") else []) + \
+                ([] if current else ["never attempted"])
             if current and current["phase"] != "merged":
                 repo.update_attempt(current["id"], {"phase": "merged"})
             repo.drop_observed(task["pk"])
+            if forced:
+                self.event(repo, p, task, "forced", {"bypassed": forced, "summary": summary},
+                           queue=f"completed by force: {', '.join(forced)}", attempt=current)
             result = {"integratedCommit": commit, "completedAt": now(), "summary": summary, "checks": list(checks),
                       "log": log, "limits": list(limits)}
             self.write(repo, task, {"status": "completed", "result": result, "seq": repo.next_seq(project["id"])},
@@ -614,11 +682,12 @@ class TaskService:
         and by the unique indexes (one active attempt per task and per agent). No worktree exists yet. reach (see
         ready) runs git, so it is checked before the transaction opens."""
         allow(p, "coordinator", "queue")
-        if reach and not force:
-            with self.unit(write=False) as (repo, project):
+        held = []
+        if reach:
+            with self.reading() as (repo, project):
                 index = {record["id"]: record for record in self.records(repo, project)}
             held = t.unreached(index[task_id], index, reach) if task_id in index else []
-            if held:
+            if held and not force:
                 raise TaskError("refused", f"{task_id} is not ready: {'; '.join(held)}")
         with self.unit() as (repo, project):
             task, attempts = self.load(repo, project, task_id)
@@ -628,42 +697,59 @@ class TaskService:
             if pause and not force:
                 raise TaskError("refused", f"{task_id} is paused with preserved work ({pause.get('state')}); pass "
                                            f"--force to start fresh")
+            if task["status"] == "completed" or (task["status"] != "pending" and not force):
+                raise TaskError("refused", f"{task_id} is {task['status']}; pass --force to reassign")
+            bypassed = held + self.claim_problems(repo, project, task, provider, capacity)
+            if bypassed and not force:
+                raise TaskError("refused", f"{task_id} is not ready: {', '.join(bypassed)}")
             current = rec.current_attempt(attempts)
-            if task["status"] != "pending":
-                if not force or task["status"] == "completed":
-                    raise TaskError("refused", f"{task_id} is {task['status']}; pass --force to reassign")
-            elif not force:
-                everything = self.records(repo, project)
-                index = {record["id"]: record for record in everything}
-                reasons = t.blocking(index[task_id], index, project["milestone"])
-                if task["hold"]:
-                    reasons.append("hold")
-                if reasons:
-                    raise TaskError("refused", f"{task_id} is not ready: {', '.join(reasons)}")
-                if capacity is not None:
-                    running = sum(1 for a in repo.active_attempts(project["id"])
-                                  if (a["execution"] or {}).get("provider") == provider)
-                    if running >= int(capacity):
-                        raise TaskError("refused", f"provider {provider} is at its capacity of {capacity} active tasks")
             at = now()
             n = max((a["n"] for a in attempts), default=0) + 1
+            superseded = None
             if current or pause:
                 if current:
                     repo.update_attempt(current["id"], {"phase": "superseded", "ended": at, "reason": "reassigned",
                                                         "record": rec.superseded_record(current, pause, at)})
+                    superseded = {"attempt": current["id"], "phase": current["phase"], "record": current["record"]}
                 else:
-                    repo.insert_attempt({"task_pk": task["pk"], "n": n, "phase": "superseded", "ended": at,
-                                         "reason": "reassigned", "record": rec.superseded_record(None, pause, at)})
+                    inserted = repo.insert_attempt({"task_pk": task["pk"], "n": n, "phase": "superseded", "ended": at,
+                                                    "reason": "reassigned",
+                                                    "record": rec.superseded_record(None, pause, at)})
+                    superseded = {"attempt": inserted, "inserted": True}
                     n += 1
+            # While the claim is current its record column is unused by the export: it remembers what the claim
+            # superseded, so abandoning it can put that back.
+            restore = {"status": task["status"], "pause": pause, "superseded": superseded} if force else None
             attempt_id = repo.insert_attempt({"task_pk": task["pk"], "n": n, "agent_id": agent_id, "owner": owner,
                                               "phase": "claimed", "execution": {"provider": provider, "model": model},
-                                              "started": at})
+                                              "started": at, "record": restore})
             blockers = {k: v for k, v in (task["blockers"] or {}).items() if k != "pause"} or None
             rev = self.write(repo, task, {"status": "in_progress", "blockers": blockers},
                              {"status", "pause", *rec.ATTEMPT_KEYS, "previousAttempts"})
             self.event(repo, p, task, "claimed", {"from": task["status"], "agent": agent_id},
                        attempt={"id": attempt_id})
+            if force and (bypassed or pause or task["status"] != "pending"):
+                reasons = bypassed + ([f"paused ({pause.get('state')})"] if pause else []) + \
+                    ([f"was {task['status']}"] if task["status"] != "pending" else [])
+                self.event(repo, p, task, "forced", {"bypassed": reasons},
+                           queue=f"forced claim despite: {', '.join(reasons)}", attempt={"id": attempt_id,
+                                                                                         "owner": owner,
+                                                                                         "execution": None,
+                                                                                         "agent_id": agent_id})
         return {"task": task_id, "attempt": attempt_id, "rev": rev}
+
+    def claim_problems(self, repo, project, task, provider, capacity):
+        """Why task may not be claimed now: blockers, milestone, unmet dependencies, the hold, the profile's capacity."""
+        index = {record["id"]: record for record in self.records(repo, project)}
+        problems = t.blocking(index[task["id"]], index, project["milestone"])
+        if task["hold"]:
+            problems.append("hold")
+        if capacity is not None:
+            running = sum(1 for a in repo.active_attempts(project["id"])
+                          if (a["execution"] or {}).get("provider") == provider and a["task_pk"] != task["pk"])
+            if running >= int(capacity):
+                problems.append(f"provider {provider} is at its capacity of {capacity} active tasks")
+        return problems
 
     def activate(self, p, attempt_id, *, worktree, base, log_dir, execution=None):
         allow(p, "coordinator", "queue")
@@ -694,6 +780,7 @@ class TaskService:
                 raise TaskError("conflict", f"attempt {attempt_id} is {attempt['phase']}, not claimed or active")
             task = repo.task_by_pk(attempt["task_pk"])
             at = now()
+            restore = attempt["record"] if isinstance(attempt["record"], dict) and "superseded" in attempt["record"] else None
             if attempt["phase"] == "claimed":
                 # Nothing reached a worker or the disk: the claim leaves no attempt in the record, only an event.
                 repo.delete_attempt(attempt_id)
@@ -703,14 +790,40 @@ class TaskService:
                                                  "record": rec.release_record(attempt, reason, at)})
                 self.event(repo, p, task, "released", {"from": task["status"], "reason": reason}, queue=reason,
                            attempt=attempt)
-            self.write(repo, task, {"status": "pending"}, {"status", *rec.ATTEMPT_KEYS, "previousAttempts"})
-        return {"task": task["id"], "status": "pending"}
+            status = self.restore_superseded(repo, p, task, attempt, restore) if restore else "pending"
+            blockers = {**(task["blockers"] or {}), **({"pause": restore["pause"]} if restore and restore["pause"] else {})}
+            self.write(repo, task, {"status": status, "blockers": blockers or None},
+                       {"status", "pause", *rec.ATTEMPT_KEYS, "previousAttempts"})
+        return {"task": task["id"], "status": status}
+
+    def restore_superseded(self, repo, p, task, attempt, restore):
+        """Put back the attempt a forced claim superseded; returns the task status to restore (pending when there
+        was no attempt, or its agent has taken another task since)."""
+        superseded = restore["superseded"]
+        if not superseded:
+            return restore["status"]
+        if superseded.get("inserted"):
+            repo.delete_attempt(superseded["attempt"])
+            return restore["status"]
+        try:
+            repo.update_attempt(superseded["attempt"], {"phase": superseded["phase"], "ended": None, "reason": None,
+                                                        "record": superseded["record"]})
+        except taskrepo.Conflict:
+            self.event(repo, p, task, "not-restored", {"reason": "the superseded attempt's agent holds another task"})
+            return "pending"
+        if repo.attempt(attempt["id"]):
+            # The restored attempt is current again, so it takes the higher number (the export lists closed ones first).
+            old, new = repo.attempt(superseded["attempt"])["n"], attempt["n"]
+            repo.update_attempt(attempt["id"], {"n": -1})
+            repo.update_attempt(superseded["attempt"], {"n": new})
+            repo.update_attempt(attempt["id"], {"n": old})
+        return restore["status"]
 
     def abandon_orphans(self, p):
         """Abandon every claimed attempt of the project: claims are made under the queue lock, so at the start of a
         tick a claimed attempt belongs to a tick or dispatch that crashed between claim and activate."""
         allow(p, "coordinator", "queue")
-        with self.unit(write=False) as (repo, project):
+        with self.reading() as (repo, project):
             orphans = [a["id"] for a in repo.active_attempts(project["id"]) if a["phase"] == "claimed"]
         return [self.abandon(p, attempt_id, "orphaned claim") for attempt_id in orphans]
 
@@ -733,7 +846,7 @@ class TaskService:
 
     def show(self, p, task_id):
         allow(p, "coordinator", "worker", "queue")
-        with self.unit(write=False) as (repo, project):
+        with self.reading() as (repo, project):
             task, attempts = self.load(repo, project, task_id)
             active = self.own(p, task, attempts)
             current = rec.current_attempt(attempts)
@@ -790,7 +903,7 @@ class TaskService:
         also records it as projects.last_export."""
         allow(p, "coordinator")
         if head is None:
-            with self.unit(write=False) as (repo, project):
+            with self.reading() as (repo, project):
                 return self.snapshot(repo, project)
         with self.unit() as (repo, project):
             snap = self.snapshot(repo, project)
@@ -813,23 +926,7 @@ class TaskService:
         fresh id, for another project reusing the name once the old one's tasks are pruned."""
         allow(p, "coordinator")
         started = time.monotonic()
-        try:
-            doc, archived, history = snap.documents()
-        except ValueError as error:
-            raise TaskError("invalid", f"the snapshot is not valid JSON: {error}") from error
-        if not isinstance(doc, dict) or not isinstance(doc.get("tasks"), list):
-            raise TaskError("invalid", "tasks.json has no tasks list")
-        everything = archived + doc["tasks"]
-        problems = [f"record {n}: no id or an unknown status" for n, record in enumerate(everything)
-                    if not isinstance(record, dict) or not isinstance(record.get("id"), str)
-                    or record.get("status") not in t.STATUSES]
-        seen, duplicates = set(), set()
-        for record in everything:
-            if isinstance(record, dict):
-                (duplicates if record.get("id") in seen else seen).add(record.get("id"))
-        problems += [f"{task_id}: duplicate id" for task_id in sorted(duplicates, key=str)]
-        if problems:
-            raise TaskError("invalid", "; ".join(problems[:10]))
+        doc, archived, history = parsed(snap)
         with self.unit(imported=False, root=False) as (repo, project):
             saved = None
             if repo.tasks(project["id"]):
@@ -841,26 +938,7 @@ class TaskService:
                                                f"over them")
                 saved = self.save_export(repo, project, "replaced")
                 repo.delete_tasks(project["id"])
-            ident = self.import_identity(repo, project, doc, new_id)
-            project = {**project, "id": ident}
-            warnings = self.import_tasks(repo, project, everything)
-            repo.update_project(self.name, **rec.header_columns(doc))
-            project = repo.project(self.name)
-            expected_doc = rec.normalized_header(doc, project)
-            extra, legacy = rec.shape({**rec.header(project), "tasks": []}, {**expected_doc, "tasks": []})
-            repo.update_project(self.name, tasks_root=str(self.root), tasks_imported=now(),
-                                tasks_legacy={**(legacy or {}), **({"extra": extra} if extra else {})} or None)
-            events, notes = self.import_history(repo, project, history)
-            project = repo.project(self.name)
-            exported = self.snapshot(repo, project)
-            expected_doc["tasks"] = [r for r in everything if r["status"] != "completed"]
-            expected = rec.snapshot(expected_doc, [r for r in everything if r["status"] == "completed"], history)
-            for label, want, got in (("tasks.json", expected.tasks, exported.tasks),
-                                     ("tasks-archive.jsonl", expected.archive, exported.archive),
-                                     ("tasks-history.jsonl", expected.history, exported.history)):
-                difference = rec.diff(want, got, label)
-                if difference:
-                    raise TaskError("lossy", f"the export differs from the input, nothing imported:\n{difference}")
+            ident, warnings, events, notes = self.load_snapshot(repo, project, doc, archived, history, new_id)
         canonical = rec.snapshot(doc, archived, history)
         return {"project": self.name, "id": ident, "open": len(doc["tasks"]), "archived": len(archived),
                 "events": events, "notes": notes, "warnings": warnings, "saved": saved,
@@ -868,6 +946,32 @@ class TaskService:
                                     "tasks-archive.jsonl": canonical.archive == snap.archive,
                                     "tasks-history.jsonl": canonical.history == snap.history},
                 "seconds": round(time.monotonic() - started, 3)}
+
+    def load_snapshot(self, repo, project, doc, archived, history, new_id=False):
+        """Load parsed export files into repo (inside the caller's transaction) and check that exporting them again
+        gives the input back; returns (project id, warnings, events, notes)."""
+        everything = archived + doc["tasks"]
+        ident = self.import_identity(repo, project, doc, new_id)
+        project = {**project, "id": ident}
+        warnings = self.import_tasks(repo, project, everything)
+        repo.update_project(self.name, **rec.header_columns(doc))
+        project = repo.project(self.name)
+        expected_doc = rec.normalized_header(doc, project)
+        extra, legacy = rec.shape({**rec.header(project), "tasks": []}, {**expected_doc, "tasks": []})
+        repo.update_project(self.name, tasks_root=str(self.root), tasks_imported=now(),
+                            tasks_legacy={**(legacy or {}), **({"extra": extra} if extra else {})} or None)
+        events, notes = self.import_history(repo, project, history)
+        project = repo.project(self.name)
+        exported = self.snapshot(repo, project)
+        expected_doc["tasks"] = [r for r in everything if r["status"] != "completed"]
+        expected = rec.snapshot(expected_doc, [r for r in everything if r["status"] == "completed"], history)
+        for label, want, got in (("tasks.json", expected.tasks, exported.tasks),
+                                 ("tasks-archive.jsonl", expected.archive, exported.archive),
+                                 ("tasks-history.jsonl", expected.history, exported.history)):
+            difference = rec.diff(want, got, label)
+            if difference:
+                raise TaskError("lossy", f"the export differs from the input, nothing imported:\n{difference}")
+        return ident, warnings, events, notes
 
     def save_export(self, repo, project, label):
         """Write the current export to <data>/exports/<project>-<time>-<label>/ before tasks are deleted."""
@@ -955,6 +1059,28 @@ class TaskService:
                 repo.add_note(pk, line["author"], line["kind"], line["note"], line["time"], answered=line.get("answered"))
                 notes += 1
         return events, notes
+
+
+def parsed(snap):
+    """(tasks.json document, archived records, history lines) of a snapshot, checked for ids and statuses."""
+    try:
+        doc, archived, history = snap.documents()
+    except ValueError as error:
+        raise TaskError("invalid", f"the snapshot is not valid JSON: {error}") from error
+    if not isinstance(doc, dict) or not isinstance(doc.get("tasks"), list):
+        raise TaskError("invalid", "tasks.json has no tasks list")
+    everything = archived + doc["tasks"]
+    problems = [f"record {n}: no id or an unknown status" for n, record in enumerate(everything)
+                if not isinstance(record, dict) or not isinstance(record.get("id"), str)
+                or record.get("status") not in t.STATUSES]
+    seen, duplicates = set(), set()
+    for record in everything:
+        if isinstance(record, dict):
+            (duplicates if record.get("id") in seen else seen).add(record.get("id"))
+    problems += [f"{task_id}: duplicate id" for task_id in sorted(duplicates, key=str)]
+    if problems:
+        raise TaskError("invalid", "; ".join(problems[:10]))
+    return doc, archived, history
 
 
 def same_agent(a, b):

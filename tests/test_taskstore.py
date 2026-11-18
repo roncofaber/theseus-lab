@@ -168,6 +168,73 @@ class ImportTests(TaskStoreCase):
         self.assertNotEqual(first["id"], self.svc.import_(COORDINATOR, taskrecords.read(self.conf.root), new_id=True)["id"])
 
 
+class WriteRuleTests(TaskStoreCase):
+    def test_forced_claims_record_what_they_bypass_and_abandoning_one_restores_it(self):
+        self.start(taskrecords.Snapshot(tasks=json.dumps({"schema": 2, "currentMilestone": "M1", "tasks": [
+            {"id": "paused", "status": "pending", "pause": {"state": "kept"}}]})))
+        self.svc.add(COORDINATOR, spec("later", milestone="M2"))
+        self.svc.add(COORDINATOR, spec("busy"))
+        claim = lambda task_id, agent, **kw: self.svc.claim(QUEUE, task_id, agent, owner=f"p:{agent}:{agent}-x",
+                                                            provider="p", **kw)
+        self.assertIn("milestone:M2", str(self.assert_refused(claim, "later", "agent-1")))
+        self.assertIn("capacity", str(self.assert_refused(claim, "busy", "agent-1", capacity=0)))
+        forced = claim("later", "agent-1", force=True)
+        events = {e["kind"]: e["detail"] for e in self.svc.get(COORDINATOR, "later", history=True)["history"]}
+        self.assertEqual(["milestone:M2"], events["forced"]["bypassed"])
+        self.svc.abandon(QUEUE, forced["attempt"], "test")
+
+        self.svc.assign(QUEUE, "busy", "agent-1", lambda c: (self.tmp / "wt1", "b", self.tmp / "log1"), owner="p:a:a-1",
+                        provider="p")
+        taken = claim("busy", "agent-2", force=True)
+        self.assertEqual("p:agent-2:agent-2-x", self.svc.get(COORDINATOR, "busy")["task"]["owner"])
+        self.svc.abandon(QUEUE, taken["attempt"], "worktree failed")
+        record = self.svc.get(COORDINATOR, "busy")["task"]
+        self.assertEqual(("in_progress", "p:a:a-1", str(self.tmp / "wt1")), (record["status"], record["owner"],
+                                                                            record["worktree"]))
+        self.assertNotIn("previousAttempts", record)
+
+        resumed = claim("paused", "agent-2", force=True)
+        self.assertNotIn("pause", self.svc.get(COORDINATOR, "paused")["task"])
+        self.svc.abandon(QUEUE, resumed["attempt"], "send failed")
+        record = self.svc.get(COORDINATOR, "paused")["task"]
+        self.assertEqual(("pending", {"state": "kept"}), (record["status"], record["pause"]))
+        self.assertNotIn("previousAttempts", record)
+
+        self.svc.complete(COORDINATOR, "later", "Done by hand.", "abc", ["looked"], "/log", force=True)
+        forced = [e for e in self.svc.get(COORDINATOR, "later", history=True)["history"] if e["kind"] == "forced"]
+        self.assertIn("never attempted", forced[-1]["detail"]["bypassed"])
+
+    def test_blockers_are_validated_on_edit(self):
+        self.start()
+        self.svc.add(COORDINATOR, spec("one"))
+        half = {"evidence": "the capture is missing"}
+        self.assertEqual("invalid", self.code(self.svc.edit, COORDINATOR, "one", {"researchRequired": half}))
+        both = {**half, "unblockCondition": "a capture exists"}
+        self.assertEqual("invalid", self.code(self.svc.edit, COORDINATOR, "one",
+                                              {"researchRequired": both, "externalBlocker": both}))
+        self.svc.edit(COORDINATOR, "one", {"externalBlocker": both})
+        self.assertEqual(both, self.svc.get(COORDINATOR, "one")["task"]["externalBlocker"])
+        self.assertEqual([], self.svc.ready(COORDINATOR))
+
+    def test_a_read_writes_nothing_and_a_read_only_store_says_why_it_cannot_be_read(self):
+        fresh = ts.open(SimpleNamespace(name="new-project", root=self.tmp / "empty", data=self.tmp / "data"))
+        self.assertEqual([], fresh.list(COORDINATOR))
+        self.assertFalse(self.db.exists(), "a read never creates the store")
+        self.start()
+        self.svc.add(COORDINATOR, spec("one"))
+        before = sorted(self.db.parent.iterdir())
+        self.addCleanup(os.chmod, self.db.parent, 0o755)
+        os.chmod(self.db.parent, 0o555)
+        self.assertEqual("unreadable", self.code(self.svc.get, COORDINATOR, "one"))
+        self.assertEqual(before, sorted(self.db.parent.iterdir()))
+
+    def assert_refused(self, call, *args, **kwargs):
+        with self.assertRaises(ts.TaskError) as caught:
+            call(*args, **kwargs)
+        self.assertEqual("refused", caught.exception.code)
+        return caught.exception
+
+
 class MigrationTests(TaskStoreCase):
     def test_version_6_gains_project_ids_and_task_tables_with_nothing_else_changed(self):
         saved = list(store.MIGRATIONS)

@@ -237,6 +237,11 @@ def tasks_action(conf, queue, args):
             ("owned", args.owned), ("add_owned", args.add_owned), ("touches", args.touches), ("depends", args.depends),
             ("milestone", args.milestone), ("room", args.room), ("profile", args.profile), ("priority", args.priority),
             ("min_capability", args.min_capability), ("note", args.note)) if value is not None}
+        if args.clear_blockers:
+            changes.update(externalBlocker=None, researchRequired=None)
+        for flag, key in ((args.external_blocker, "externalBlocker"), (args.research_required, "researchRequired")):
+            if flag is not None:
+                changes[key] = {"evidence": flag, "unblockCondition": args.unblock or ""}
         if not changes:
             sys.exit("theseus: nothing to change; see theseus tasks edit --help")
         emit(t.edit(queue, args.id, changes, args.force))
@@ -1106,6 +1111,11 @@ def build_parser():
     p.add_argument("--priority", type=int)
     p.add_argument("--min-capability", type=int, metavar="N")
     p.add_argument("--note", help="the coordinator note carried in the task message")
+    p.add_argument("--external-blocker", metavar="EVIDENCE", help="an input the team cannot obtain itself (with --unblock)")
+    p.add_argument("--research-required", metavar="EVIDENCE",
+                   help="unrecovered behavior that needs a bounded research task first (with --unblock)")
+    p.add_argument("--unblock", metavar="CONDITION", help="what lifts the blocker")
+    p.add_argument("--clear-blockers", action="store_true", help="drop externalBlocker and researchRequired")
     p.add_argument("--force", action="store_true", help="edit an in-progress task")
     p = ts.add_parser("import", help="load docs/project/tasks.json and tasks-archive.jsonl into the host store (once "
                                      "per project; the store is backed up first and the import checked lossless)")
