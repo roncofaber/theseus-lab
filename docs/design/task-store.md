@@ -304,3 +304,24 @@ Consequences:
 
 - Writing `env = {"THESEUS_CREDENTIALS": <path>}` into each per-agent entry (section 5) is required, not a precaution. It is the only path that works for Codex and SDK-based clients. For Codex, `env_vars = ["THESEUS_AGENT_ID"]` could forward the agent id as well, but the credentials file already names the agent.
 - The Q5 caveat is real for Claude Code. A worker that loads the coordinator's local-scope entry starts that server with the worker's own environment, `THESEUS_AGENT_ID` included. Under the deny-by-default rule (section 16), that server refuses to act as coordinator. It does not quietly become one, which is the outcome the decision wanted.
+
+### Import and export on the real files
+
+Measured with the phase 1 importer on copies of laserlab's and opends2's `tasks.json` and `tasks-archive.jsonl`, against a throwaway `THESEUS_DB`. Each run imported, ran the lossless check, exported, then imported that export into a second fresh store and exported again. Three runs on a shared, loaded workstation:
+
+| Project | Records | Import with lossless check | Export | Re-import and export |
+| --- | --- | --- | --- | --- |
+| laserlab | 0 open, 116 archived (0.3 MB) | 0.03 to 0.28 s | under 0.06 s | 0.03 to 0.44 s |
+| opends2 | 23 open (20 pending, 3 in progress), 1088 archived (2.8 MB) | 0.2 to 1.1 s | 0.03 to 0.26 s | 0.2 to 1.2 s |
+
+- Both archives export byte for byte as imported. Each `tasks.json` differs only in the six header lines (`"schema": 2` and the `project` object). The second export is identical to the first. Import reported no warnings: the three in-progress opends2 tasks belong to three different agents.
+- No normalization beyond the header was needed, not even key order. The records come in 22 (laserlab) and 51 (opends2) distinct key orders. The store keeps each imported record's order and the keys it lacks (section 18), so the first committed export is a six-line diff.
+- Records needing a stored legacy shape: 9 of 116 in laserlab, 205 of 1111 in opends2 (mostly an absent `dependencies` or `sharedFilesReadOnly`). Records with values outside the columns: 0 and 59, which are the ad hoc keys plus twelve priorities written as strings (`"P1"` to `"P3"`).
+- Both projects in one store file take 5.5 MB, against 3.1 MB of JSON text.
+
+The real files also correct some figures in sections 9, 10 and 13:
+
+- opends2 has 23 open tasks, 3 of them in progress, not 15 and 4. It has 1088 archived records, not 1086.
+- There are no object contracts: `generalContract` is a string or absent (97 records). `dependencies` is absent (48 records), never null.
+- `previousAttempts` comes in four kinds (released, superseded, unmerged, and reopened in laserlab) plus one ad hoc entry, `{owner, outcome, evidence}`.
+- opends2's header has `updated` and no `currentMilestone` or `policy`.
