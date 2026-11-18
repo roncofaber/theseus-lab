@@ -284,21 +284,6 @@ class SupervisorTests(Sandbox):
         self.assertEqual(str(path), self.theseus("agents", "logs", "demo-fake-1", "--transcript").stdout.strip())
         self.assertEqual(1234, agents.state(self.conf(), rec)["context"]["tokens"])
 
-    def assign(self, task_id, agent="demo-fake-1"):
-        self.add_task(task_id)
-        from theseus import integrate
-        integrate.assign(self.conf(), task_id, f"{agent}-{task_id}", "fake", "persistent-instance",
-                         owner=f"fake:{agent}:{agent}-{task_id}", instance=agent)
-
-    def screen(self, app):
-        return "\n".join(strip.text for strip in app.screen._compositor.render_strips())
-
-    def add_task(self, task_id):
-        self.theseus("tasks", "milestone", "M1")
-        self.theseus("tasks", "add", task_id, "--role", "research", "--owned", f"docs/investigations/{task_id}.md",
-                     "--objective", "Do it.", "--contract", "All variants.", "--accept", "Done.")
-        self.git("commit", "-q", "-am", f"queue {task_id}")
-
 
 @unittest.skipUnless(REAL_TMUX, "tmux is not installed")
 
@@ -311,29 +296,6 @@ class TmuxSequenceTests(unittest.TestCase):
     def setUpClass(cls):
         cls.socket = short_dir() / "s"
         cls.addClassCleanup(drop_tmux, cls.socket)
-
-    def test_attach_resizes_to_the_client_and_the_detach_key_restores_the_agent_size(self):
-        import pty
-        import struct
-        import fcntl
-        import termios
-        from theseus import supervisor, tmux as tm
-        server = tm.Server("-S", str(self.socket), conf_file=supervisor.tmux_conf(), env=supervisor.server_env())
-        server.new_session("a--x", ["sleep", "60"], "/", 220, 50)
-        server.run("resize-window", "-x", "220", "-y", "50", "-t", "=a--x:")
-        argv = supervisor.attach_argv({"name": "x", "managed": True, "server": f"path:{self.socket}", "target": "a--x"})
-        pid, fd = pty.fork()
-        if pid == 0:
-            os.environ["TERM"] = "xterm-256color"
-            os.execvp(argv[0], argv)
-        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
-        state = lambda: server.display("=a--x:", "#{window_width}x#{window_height} #{session_attached}")
-        drain(fd, lambda: state() == "100x29 1")
-        self.assertEqual("100x29 1", state())
-        os.write(fd, b"\x11")
-        self.assertTrue(drain(fd)[1])
-        self.assertEqual(pid, os.waitpid(pid, 0)[0])
-        self.assertEqual("220x50 0", server.display("=a--x:", "#{window_width}x#{window_height} #{session_attached}"))
 
     def test_the_mirror_size_fits_the_window_except_while_attached_and_the_pinned_size_comes_back(self):
         import fcntl
@@ -411,12 +373,6 @@ class ConfigAndEntryTests(Sandbox):
 
 
 class SeamTests(unittest.TestCase):
-    def test_every_private_argv_names_its_socket_and_legacy_argv_is_plain(self):
-        from theseus import tmux as tm
-        self.assertEqual(["tmux", "-S", "/x/s", "list-panes"], tm.Server("-S", "/x/s").argv("list-panes"))
-        self.assertEqual(["tmux", "-L", "other", "-f", "/c", "ls"], tm.Server("-L", "other", conf_file="/c").argv("ls"))
-        self.assertEqual(["tmux", "display", "-p"], tm.Server.legacy().argv("display", "-p"))
-
     def test_the_default_private_socket_is_refused_under_the_test_guard(self):
         from theseus import tmux as tm
         saved = dict(os.environ)

@@ -73,10 +73,14 @@ class PrecedenceTests(HostCase):
         self.assertIn("theseus.toml: unknown configuration sections: pools", result.stderr)
         self.assertNotIn("warning", result.stderr)
 
-    def test_a_malformed_host_file_names_itself(self):
-        self.host_file("[workers\n")
+    def test_a_malformed_host_file_names_itself_and_commands_fail_cleanly(self):
+        self.host_file("[pools.gw\n")
         with self.assertRaisesRegex(cfg.ConfigError, str(self.host)):
             self.conf()
+        result = self.theseus("pool", check=False)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(f"theseus: {self.host}", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_an_unknown_section_from_a_newer_release_is_a_warning_once_except_in_config_check(self):
         self.addCleanup(hostconfig._warned.clear)
@@ -184,12 +188,3 @@ class ConfigCommandTests(HostCase):
         self.assertEqual(1, result.returncode)
         self.assertEqual(1, result.stderr.count("bogus"), result.stderr)
         self.assertIn(str(self.host), result.stderr)
-
-    def test_a_malformed_host_file_gives_pool_a_clean_error(self):
-        self.host_file("[pools.gw\n")
-        result = self.theseus("pool", check=False)
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn(f"theseus: {self.host}", result.stderr)
-        self.assertNotIn("Traceback", result.stderr)
-
-

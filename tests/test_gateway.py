@@ -3,7 +3,7 @@ the verified send with a stuck input box, fresh-context recovery and the host-wi
 an in-process stand-in for tmux, or the fake tmux executable of test_queue for the command-line checks."""
 import os
 import subprocess
-import time
+import unittest
 from pathlib import Path
 
 from helpers import Sandbox, fake_clock
@@ -208,36 +208,6 @@ class RetryTests(FakeSend):
         self.assertIn("slow-task", Path(prompt).read_text())
 
 
-class GuardTests(GatewayCase):
-    def test_the_host_store_guard(self):
-        import pwd
-        from theseus import store
-        home = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".local/share/theseus")
-        self.assertIn(home, os.environ["THESEUS_DB_GUARD"].split(os.pathsep))
-        self.assertIn(home, self.env["THESEUS_DB_GUARD"].split(os.pathsep))
-        os.environ["THESEUS_DB_GUARD"] = os.pathsep.join([str(self.tmp / "elsewhere"), str(self.tmp / "fenced")])
-        os.environ["THESEUS_DB"] = str(self.tmp / "fenced/theseus.db")
-        with self.assertRaisesRegex(store.StoreError, "refusing to open"):
-            store.path()
-        os.environ["THESEUS_DB"] = str(self.tmp / "open/theseus.db")
-        self.assertEqual(self.tmp / "open/theseus.db", store.path())
-        import sqlite3
-        db = self.tmp / "v2.db"
-        raw = sqlite3.connect(db)
-        for statement in store.MIGRATIONS[0] + store.MIGRATIONS[1]:
-            raw.execute(statement)
-        raw.execute(store.MIGRATIONS[2][-1])
-        raw.execute("PRAGMA user_version = 2")
-        raw.commit()
-        raw.close()
-        conn = store.connect(db)
-        try:
-            self.assertEqual(store.SCHEMA_VERSION, store.version(conn))
-            self.assertEqual([], store.gateway_pools(conn))
-        finally:
-            conn.close()
-
-
 PARALLEL_429 = ("API Error: Request rejected (429) · Rate limit exceeded for api_key: "
                 "3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a. Limit type: max_parallel_requests. "
                 "Current limit: 5, Remaining: 0. Limit resets at: 2026-11-17 18:00:00")
@@ -247,9 +217,8 @@ CONN_LOST = "API Error: Connection lost mid-response. The response above may be 
 BUDGET_422 = "API Error: 422 ExceededBudget: User=someone@example.org over budget. Spend=500.03, Budget=500.0"
 
 
-class TypedErrorTests(FakeSend):
-    """Typed classification from the exact error texts, redaction, the transcript as the first source, the stored
-    columns, the host-wide cap cut on a parallel cap and the recent-error rows the dashboard shows."""
+class TypedErrorTests(unittest.TestCase):
+    """Typed labels and redacted excerpts from the exact error texts."""
 
     def test_each_error_text_gets_a_typed_label_and_a_redacted_excerpt(self):
         from theseus import gateway
@@ -266,7 +235,6 @@ class TypedErrorTests(FakeSend):
                          (found["parallel"]["status"], found["parallel"]["kind"], found["parallel"]["subtype"]))
         self.assertFalse(found["budget"]["retryable"])
         self.assertTrue(all(found[name]["retryable"] for name in ("parallel", "capacity", "524", "530", "lost", "529")))
-        from theseus import gateway
         parallel = gateway.classify(PARALLEL_429)["excerpt"]
         self.assertIn("api_key: [redacted]", parallel)
         self.assertNotIn("3f9a8b7c6d5e", parallel)

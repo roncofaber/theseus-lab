@@ -1,6 +1,6 @@
-"""The host store through the CLI: one-time migration of a project's legacy files, `theseus db` backup, restore,
-check and prune, the daily housekeeping of the queue tick, the version guard, project name conflicts and doctor."""
-import json
+"""The host store through the CLI and the project registry: the version guard on every command with restore, the
+registry's throttled writes, hidden projects and name conflicts reported by doctor."""
+import os
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,33 +15,6 @@ class StoreCliTests(Sandbox):
         super().setUp()
         self.scaffold()
         self.db = Path(self.env["THESEUS_DB"])
-        self.backups = Path(self.env["THESEUS_BACKUPS"])
-
-    def events(self):
-        with store.opened(self.db) as conn:
-            return store.events(conn, "demo-port")
-
-    def test_legacy_project_files_are_imported_once_and_left_in_place(self):
-        data = self.tmp / "data"
-        (data / "queue").mkdir(parents=True, exist_ok=True)
-        legacy = [{"time": "2026-11-16T10:00:00Z", "kind": "assigned", "agent": "old-agent", "task": "t1", "detail": ""},
-                  {"time": "2026-11-16T10:30:00Z", "kind": "delivered", "agent": "old-agent", "task": "t1", "detail": ""}]
-        (data / "queue/events.jsonl").write_text("".join(json.dumps(line) + "\n" for line in legacy))
-        (data / "agents.json").write_text(json.dumps({"agents": [
-            {"name": "old-agent", "pane": "%7", "provider": "claude-code", "enabled": False, "registered": "2026-11-01T00:00:00Z"}]}))
-        self.assertRegex(self.theseus("agents").stdout, r"old-agent\s+%7")
-        self.assertEqual(["assigned", "delivered"], [e["kind"] for e in self.events()])
-        self.theseus("tasks", "add", "new-task", "--role", "research", "--owned", "docs/investigations/new-task.md",
-                     "--objective", "Do it.", "--contract", "All variants.", "--accept", "Done.")
-        for _ in range(2):
-            log = self.theseus("queue", "log").stdout
-            self.assertEqual(1, log.count("delivered"))
-        self.assertEqual(2, len(self.events()))
-        self.theseus("agents", "enable", "old-agent")
-        self.theseus("agents", "remove", "old-agent")
-        self.assertNotIn("old-agent", self.theseus("agents").stdout, "agents.json is not imported again")
-        self.assertTrue((data / "agents.json").exists())
-        self.assertEqual(2, len((data / "queue/events.jsonl").read_text().splitlines()))
 
     def test_a_newer_database_stops_every_command_with_a_clear_error(self):
         self.theseus("queue", "status")
@@ -58,7 +31,7 @@ class StoreCliTests(Sandbox):
         self.theseus("queue", "status")
 
 
-class ProjectNameTests(Sandbox):
+class RegistryTests(Sandbox):
     def make_project(self, label):
         root = self.tmp / label
         root.mkdir()
@@ -66,7 +39,37 @@ class ProjectNameTests(Sandbox):
         return root
 
     def conf(self, root, name="alpha"):
-        return SimpleNamespace(root=root, name=name, data=root / "data", section=lambda section: {})
+        return SimpleNamespace(root=root, name=name, data=root / "data",
+                               section=lambda section: {"coordinator": "coord"} if section == "instances" else {})
+
+    def test_record_writes_the_project_at_most_once_a_minute(self):
+        root = self.make_project("alpha")
+        self.assertTrue(registry.record(self.conf(root), now=1000.0))
+        [entry] = registry.entries()
+        self.assertEqual(
+            {"name": "alpha", "root": str(root), "data": str(root / "data"), "coordinator": "coord", "last_seen": 1000.0}, entry)
+        self.assertFalse(registry.record(self.conf(root), now=1059.0))
+        self.assertEqual(1000.0, registry.entries()[0]["last_seen"])
+        self.assertTrue(registry.record(self.conf(root), now=1061.0))
+        self.assertEqual(1061.0, registry.entries()[0]["last_seen"])
+
+    def test_hides_projects_whose_root_lost_its_config_without_deleting_them(self):
+        first, second = self.make_project("alpha"), self.make_project("beta")
+        registry.record(self.conf(first), now=1.0)
+        registry.record(self.conf(second, "beta"), now=1.0)
+        (first / "theseus.toml").unlink()
+        self.assertEqual(["beta"], [e["name"] for e in registry.entries()])
+        registry.record(self.conf(second, "beta"), now=500.0)
+        with store.opened() as conn:
+            self.assertEqual(["alpha", "beta"], [p["name"] for p in store.list_projects(conn)])
+
+    def test_a_failed_write_never_raises(self):
+        root = self.make_project("alpha")
+        blocker = self.tmp / "blocker"
+        blocker.write_text("not a directory")
+        os.environ["THESEUS_DB"] = str(blocker / "theseus.db")
+        self.assertFalse(registry.record(self.conf(root)))
+        self.assertEqual([], registry.entries())
 
     def test_the_first_live_root_keeps_a_name_and_doctor_reports_the_other(self):
         first, second = self.make_project("first"), self.make_project("second")

@@ -1,5 +1,6 @@
 """End to end on a fresh scaffold: the scaffold's own Supervisor suite passes, then a task goes through add, assign,
 a simulated worker handoff, merge, observation, full verification, complete, archive and retire."""
+import hashlib
 import json
 import unittest
 
@@ -160,6 +161,29 @@ class TaskFlowTests(Sandbox):
         self.assertEqual("MAIN = 1\n", (self.project / "src/capture/header.py").read_text())
         self.assertFalse((self.project / "README.md").exists())
         self.assertEqual("in_progress", self.record()["status"])
+
+    def test_a_deleted_file_is_in_the_merge_commit_and_completes(self):
+        self.write("src/capture/old.py", "OLD = 1\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "old module")
+        self.add_task(owned=("src/capture/", f"docs/investigations/{TASK}.md"))
+        self.git("commit", "-q", "-am", "queue")
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        worktree = self.tmp / "worktrees/worker-1-a"
+        (worktree / "src/capture/old.py").unlink()
+        self.write("src/capture/new.py", "def parse(data):\n    return data[:4]\n", root=worktree)
+        self.write(f"docs/investigations/{TASK}.md", f"# Replace\n\nTask `{TASK}` on base x. Topic: `new`.\n",
+                   root=worktree)
+        self.write(".theseus/handoff.md", f"Task: {TASK}\nResult: delivered\n", root=worktree)
+        digest = hashlib.sha256((worktree / "src/capture/new.py").read_bytes()).hexdigest()
+        self.write(".theseus/changed.sha256", f"{digest}  src/capture/new.py\nD src/capture/old.py\n", root=worktree)
+        self.theseus("merge", TASK)
+        self.assertEqual("", self.git("status", "--porcelain").stdout)
+        merge = self.record()["merge"]["commit"]
+        self.assertNotEqual(0, self.git("cat-file", "-e", f"{merge}:src/capture/old.py", check=False).returncode,
+                            "the deletion must be in the merge commit itself")
+        self.theseus("tasks", "complete", TASK, "--summary", "replaced", "--check", "manual", "--log",
+                     str(worktree / ".theseus/handoff.md"))
 
     def test_merge_adopts_a_rebase_onto_main_but_refuses_worker_commits(self):
         self.add_task()

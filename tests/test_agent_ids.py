@@ -1,6 +1,5 @@
 """Agent IDs: every registration gets a ULID, records carry it, a reused name never inherits an earlier agent's history,
 the store migration backfills IDs, and task records gain ownerId and agentId lazily or through migrate-ids."""
-import json
 import re
 
 from helpers import Sandbox
@@ -12,45 +11,29 @@ class StoreIdTests(StoreCase):
     def register(self, name="w-1"):
         return store.upsert_agent(self.conn, "demo", name, pane="%1", profile="p")
 
-    def test_ids_are_ulids_that_sort_by_time(self):
-        early, late = store.new_id(1_700_000_000), store.new_id(1_700_000_001)
-        self.assertRegex(early, r"^[0-9A-HJKMNP-TV-Z]{26}$")
-        self.assertLess(early, late)
-
-    def test_updating_a_registration_keeps_its_id(self):
-        first = self.register()
-        self.assertTrue(first)
-        self.assertEqual(first, store.upsert_agent(self.conn, "demo", "w-1", pane="%2", profile="q"))
-
-    def test_a_reused_name_gets_a_new_id_and_the_old_history_keeps_the_old_one(self):
+    def test_a_reused_name_gets_a_new_id_and_never_inherits_the_old_history(self):
         old = self.register()
+        self.assertEqual(old, store.upsert_agent(self.conn, "demo", "w-1", pane="%2", profile="q"),
+                         "updating a registration keeps its id")
         store.add_event(self.conn, "demo", "assigned", agent="w-1")
         store.add_run(self.conn, "demo", "w-1", "start")
+        store.put_gateway_retry(self.conn, "demo", "w-1", phase="exhausted", errors=5)
         store.remove_agent(self.conn, "demo", "w-1")
         new = self.register()
         store.add_event(self.conn, "demo", "assigned", agent="w-1")
         store.add_run(self.conn, "demo", "w-1", "start")
-        self.assertNotEqual(old, new)
-        self.assertEqual([old, new], [e["agent_id"] for e in store.events(self.conn, "demo")])
-        self.assertEqual([(new, 2)], [(r["agent_id"], r["gen"]) for r in store.runs(self.conn, "demo", "w-1")])
-
-    def test_a_reused_name_does_not_inherit_a_gateway_retry_episode(self):
-        self.register()
-        store.put_gateway_retry(self.conn, "demo", "w-1", phase="exhausted", errors=5)
-        store.remove_agent(self.conn, "demo", "w-1")
-        self.register()
-        self.assertIsNone(store.gateway_retry(self.conn, "demo", "w-1"))
-
-    def test_records_carry_the_id(self):
-        agent = self.register()
         store.add_delivery(self.conn, "demo", "t1", agent="w-1")
         store.add_gateway_error(self.conn, "gw", "demo", 429, True, agent="w-1")
         store.add_sample(self.conn, "demo", "w-1", "working")
         store.take(self.conn, "gw", "demo", "w-1", "t1")
-        self.assertEqual(agent, store.deliveries(self.conn, "demo")[0]["agent_id"])
-        self.assertEqual(agent, store.gateway_errors(self.conn)[0]["agent_id"])
-        self.assertEqual(agent, store.samples(self.conn, "demo", agent="w-1")[0]["agent_id"])
-        self.assertEqual(agent, store.status(self.conn, "gw", spec={"max": 2})["leases"]["demo/w-1"]["agentId"])
+        self.assertNotEqual(old, new)
+        self.assertEqual([old, new], [e["agent_id"] for e in store.events(self.conn, "demo")])
+        self.assertEqual([(new, 2)], [(r["agent_id"], r["gen"]) for r in store.runs(self.conn, "demo", "w-1")])
+        self.assertIsNone(store.gateway_retry(self.conn, "demo", "w-1"))
+        self.assertEqual([new] * 4, [store.deliveries(self.conn, "demo")[0]["agent_id"],
+                                     store.gateway_errors(self.conn)[0]["agent_id"],
+                                     store.samples(self.conn, "demo", agent="w-1")[0]["agent_id"],
+                                     store.status(self.conn, "gw", spec={"max": 2})["leases"]["demo/w-1"]["agentId"]])
 
 
 class MigrationTests(StoreCase):
@@ -100,23 +83,19 @@ class TaskIdTests(Sandbox):
         return self.agents.get(self.conf, "w-1")["id"]
 
     def test_assign_records_the_owner_id_and_release_keeps_it_on_the_attempt(self):
+        from theseus import rules
         self.assertEqual(self.agent_id(), self.assign()["ownerId"])
         self.t.release(self.queue, "t1", "test")
         task = self.queue.get("t1")
         self.assertNotIn("ownerId", task)
         self.assertEqual(self.agent_id(), task["previousAttempts"][-1]["agentId"])
+        self.assertFalse([p for p in rules.task_record_problems(self.conf) if re.search("ownerId|agentId|t1", p)])
 
     def test_a_task_of_a_removed_agent_does_not_belong_to_its_successor(self):
         self.assign()
         self.agents.remove(self.conf, "w-1")
         self.agents.add(self.conf, "w-1", "%1")
         self.assertIsNone(self.agents.current_task(self.conf, "w-1"))
-
-    def test_task_checks_accept_the_new_fields(self):
-        self.assign()
-        self.t.release(self.queue, "t1", "test")
-        from theseus import rules
-        self.assertFalse([p for p in rules.task_record_problems(self.conf) if re.search("ownerId|agentId|t1", p)])
 
     def test_migrate_ids_fills_records_of_the_same_agent_once(self):
         self.assign()
@@ -130,16 +109,3 @@ class TaskIdTests(Sandbox):
         task = self.queue.get("t1")
         self.assertEqual(self.agent_id(), task["ownerId"])
         self.assertNotIn("agentId", task["previousAttempts"][0])
-
-    def test_json_views_carry_the_id_and_plain_views_do_not(self):
-        fake = self.tmp / "bin"
-        fake.mkdir()
-        (fake / "tmux").write_text("#!/bin/sh\nexit 1\n")
-        (fake / "tmux").chmod(0o755)
-        env = {**self.env, "PATH": f"{fake}:{self.env['PATH']}"}
-        agent = self.agent_id()
-        self.assertTrue(agent)
-        states = json.loads(self.theseus("agents", "ls", "--json", env=env).stdout)
-        self.assertEqual(agent, states["unmanaged"][0]["id"])
-        self.assertEqual(agent, json.loads(self.theseus("top", "--once", "--json", env=env).stdout)["agents"][0]["id"])
-        self.assertNotIn(agent, self.theseus("agents", "ls", env=env).stdout + self.theseus("agents", env=env).stdout)

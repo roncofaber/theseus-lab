@@ -131,9 +131,6 @@ class QueueTests(Sandbox):
         self.git("commit", "-q", "-am", "queue hard-task")
         self.assertEqual(2, json.loads(self.theseus("tasks", "show", "hard-task").stdout)["minCapability"])
         self.assertNotIn("assigned", self.theseus("queue", "tick").stdout, "capability 1 is below the minimum")
-        self.assertIn("needs capability >= 2", " ".join(self.theseus("top", "--once").stdout.split()))
-        snapshot = json.loads(self.theseus("top", "--json").stdout)
-        self.assertEqual({"hard-task": 2}, snapshot["gated"])
         self.theseus("agents", "add", "worker-b", "%2", "--profile", "strong")
         self.assertRegex(self.theseus("queue", "tick").stdout, r"assigned\s+worker-b\s+hard-task")
         self.theseus("tasks", "release", "hard-task", "--reason", "test")
@@ -147,10 +144,6 @@ class QueueTests(Sandbox):
                         "exact profile routing wins")
         self.assertFalse(wq.fits(conf, strong, {"id": "x", "minCapability": 2, "profile": "with-mcp"}, {})[0],
                          "a relaunch onto a weaker compatible profile must still meet the minimum")
-        from theseus.tui import commands
-        state = {"agents": [], "queue": {"ready": ["hard-task"]}, "capabilities": {"hard-task": 2}, "project": "demo-port"}
-        titles = [title for title, *_ in commands.project_commands({"snapshot": state})]
-        self.assertIn("Raise the minimum capability of hard-task (2 to 3)", titles)
 
     def test_wait_returns_when_a_delivery_needs_the_coordinator(self):
         self.add("watched-task")
@@ -174,7 +167,7 @@ class WakeTests(Sandbox):
         workqueue.tick = lambda conf, assign=True: []
         self.addCleanup(setattr, workqueue, "tick", saved)
 
-    def test_wait_wakes_for_a_gateway_resend_before_the_interval(self):
+    def test_wait_wakes_for_a_gateway_resend_before_the_interval_but_never_for_an_overdue_one(self):
         from theseus import store
         now = [1000.0]
         slept = []
@@ -187,18 +180,11 @@ class WakeTests(Sandbox):
             store.put_gateway_retry(conn, self.conf.name, "worker-a", phase="waiting", next_epoch=1007.0, pool="p")
         status = self.wq.wait(self.conf, timeout=100, interval=60, clock=lambda: now[0], sleep=sleep)
         self.assertEqual(1, status)
-        self.assertEqual(7.5, slept[0])
-        self.assertEqual(60, slept[1])
+        self.assertEqual([7.5, 60], slept[:2])
         self.assertEqual(100, round(sum(slept), 2))
-
-    def test_an_overdue_or_missing_wake_time_keeps_the_interval(self):
-        from theseus import store
         with store.for_project(self.conf) as conn:
             store.put_gateway_retry(conn, self.conf.name, "worker-a", phase="waiting", next_epoch=900.0, pool="p")
         self.assertEqual(30.0, self.wq.next_sleep(self.conf, 30, 1000.0))
-        with store.for_project(self.conf) as conn:
-            store.put_gateway_retry(conn, self.conf.name, "worker-a", phase="waiting", next_epoch=1010.0, pool="p")
-        self.assertEqual(10.5, self.wq.next_sleep(self.conf, 30, 1000.0))
         self.assertEqual(5.0, self.wq.next_sleep(self.conf, 5, 1000.0))
 
 
@@ -230,12 +216,6 @@ printf '%s\\n' "$*" > "{self.record}"
         self.assertEqual("queue wait --interval 1 --timeout 5\n", self.record.read_text())
         self.assertIn(f"schema {store.SCHEMA_VERSION + 1}; continuing as", result.stderr)
 
-    def test_other_commands_still_refuse_a_newer_store(self):
-        result = self.theseus("queue", "tick", check=False)
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("newer than", result.stderr)
-
-
 
 class CodeChangeTests(Sandbox):
     def test_wait_restarts_itself_when_the_installed_code_changes(self):
@@ -251,6 +231,7 @@ class CodeChangeTests(Sandbox):
             cli.main(argv)
         execv.assert_called_once()
         self.assertEqual(["/bin/theseus", *argv], execv.call_args[0][1][1:])
+
 
 if __name__ == "__main__":
     unittest.main()

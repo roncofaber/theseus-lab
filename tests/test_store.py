@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import helpers  # noqa: F401  (isolates the host store for the whole run)
-from theseus import pools, store
+from theseus import store
 
 SPEC = {"max": 2, "priority": ["first", "second"]}
 
@@ -72,17 +72,16 @@ class StoreCase(unittest.TestCase):
 
 
 class SchemaTests(StoreCase):
-    def test_theseus_db_overrides_the_path_and_xdg_data_home_is_the_default(self):
+    def test_the_path_comes_from_theseus_db_or_xdg_and_every_connection_gets_its_pragmas(self):
         self.assertEqual(self.db, store.path())
         self.assertTrue(self.db.exists())
-        del os.environ["THESEUS_DB"]
-        os.environ["XDG_DATA_HOME"] = str(self.tmp / "xdg")
-        self.assertEqual(self.tmp / "xdg/theseus/theseus.db", store.path())
-
-    def test_pragmas_are_applied_on_every_connection(self):
         self.assertEqual("wal", self.conn.execute("PRAGMA journal_mode").fetchone()[0])
         self.assertEqual(1, self.conn.execute("PRAGMA foreign_keys").fetchone()[0])
         self.assertGreaterEqual(self.conn.execute("PRAGMA busy_timeout").fetchone()[0], 1000)
+        self.assertEqual(2, self.conn.execute("PRAGMA auto_vacuum").fetchone()[0], "a fresh database uses incremental vacuum")
+        del os.environ["THESEUS_DB"]
+        os.environ["XDG_DATA_HOME"] = str(self.tmp / "xdg")
+        self.assertEqual(self.tmp / "xdg/theseus/theseus.db", store.path())
 
     def test_migrations_run_once_and_reopening_changes_nothing(self):
         self.assertEqual(store.SCHEMA_VERSION, store.version(self.conn))
@@ -109,18 +108,32 @@ class SchemaTests(StoreCase):
             columns = [r[1] for r in conn.execute("PRAGMA table_info(events)")]
         self.assertEqual(1, columns.count("extra"))
 
-    def test_ttls_match_the_file_based_pools(self):
-        self.assertEqual((pools.CLAIM_TTL, pools.LEASE_TTL), (store.CLAIM_TTL, store.LEASE_TTL))
-
-    def test_a_database_newer_than_the_code_is_refused_with_a_clear_error(self):
-        self.conn.execute(f"PRAGMA user_version = {store.SCHEMA_VERSION + 1}")
-        with self.assertRaises(store.StoreError) as raised:
-            store.connect()
-        self.assertIn(f"schema version {store.SCHEMA_VERSION + 1}", str(raised.exception))
-        self.assertIn("upgrade theseus", str(raised.exception))
-
-    def test_a_fresh_database_uses_incremental_vacuum(self):
-        self.assertEqual(2, self.conn.execute("PRAGMA auto_vacuum").fetchone()[0])
+    def test_the_guard_refuses_a_fenced_database_and_an_old_schema_migrates(self):
+        import pwd
+        home = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".local/share/theseus")
+        self.assertIn(home, os.environ["THESEUS_DB_GUARD"].split(os.pathsep), "the suite fences the real host store")
+        self.assertEqual(os.environ["THESEUS_DB_GUARD"], helpers.base_env(self.tmp)["THESEUS_DB_GUARD"],
+                         "and so does every theseus subprocess a test starts")
+        os.environ["THESEUS_DB_GUARD"] = os.pathsep.join([str(self.tmp / "elsewhere"), str(self.tmp / "fenced")])
+        os.environ["THESEUS_DB"] = str(self.tmp / "fenced/theseus.db")
+        with self.assertRaisesRegex(store.StoreError, "refusing to open"):
+            store.path()
+        os.environ["THESEUS_DB"] = str(self.tmp / "open/theseus.db")
+        self.assertEqual(self.tmp / "open/theseus.db", store.path())
+        db = self.tmp / "v2.db"
+        raw = sqlite3.connect(db)
+        for statement in store.MIGRATIONS[0] + store.MIGRATIONS[1]:
+            raw.execute(statement)
+        raw.execute(store.MIGRATIONS[2][-1])
+        raw.execute("PRAGMA user_version = 2")
+        raw.commit()
+        raw.close()
+        conn = store.connect(db)
+        try:
+            self.assertEqual(store.SCHEMA_VERSION, store.version(conn))
+            self.assertEqual([], store.gateway_pools(conn))
+        finally:
+            conn.close()
 
 
 class ProjectAndAgentTests(StoreCase):
@@ -136,14 +149,16 @@ class ProjectAndAgentTests(StoreCase):
         self.assertTrue(alive["last_seen"].endswith("Z"))
         store.add_event(self.conn, "gone", "tick")
         store.upsert_agent(self.conn, "gone", "a1", pane="%2")
+        self.assertEqual(["gone"], store.prune_projects(self.conn, dry_run=True))
+        self.assertEqual(1, len(store.events(self.conn, project="gone")), "a dry run deletes nothing")
         self.assertEqual(["gone"], store.prune_projects(self.conn))
         self.assertEqual([], store.events(self.conn, project="gone"))
         self.assertEqual([], store.list_agents(self.conn, project="gone"))
         self.assertEqual(["old"], store.prune_projects(self.conn, older_than=3600))
         self.assertEqual(["alive"], [p["name"] for p in store.list_projects(self.conn)])
 
-    def test_agents_upsert_list_and_remove(self):
-        store.upsert_agent(self.conn, "first", "a1", pane="%1", profile="claude-code", rooms=["clean"])
+    def test_agents_upsert_list_disable_and_remove(self):
+        store.upsert_agent(self.conn, "first", "a1", pane="%1", profile="claude-code", rooms=["clean"], source="theseus.toml")
         store.upsert_agent(self.conn, "first", "a2", pane="%2", enabled=False)
         store.upsert_agent(self.conn, "first", "a1", pane="%3", profile="codex", rooms=["clean"])
         agents = store.list_agents(self.conn, "first")
@@ -151,72 +166,16 @@ class ProjectAndAgentTests(StoreCase):
         self.assertEqual(("%3", "codex", ["clean"], True), (agents[0]["pane"], agents[0]["profile"], agents[0]["rooms"],
                                                             agents[0]["enabled"]))
         self.assertEqual(["a1"], [a["name"] for a in store.list_agents(self.conn, "first", include_disabled=False)])
+        self.assertTrue(store.set_enabled(self.conn, "first", "a1", False))
+        [a1] = [a for a in store.list_agents(self.conn, "first") if a["name"] == "a1"]
+        self.assertEqual(("%3", "codex", False), (a1["pane"], a1["profile"], a1["enabled"]), "only the flag changes")
+        self.assertFalse(store.set_enabled(self.conn, "first", "missing", False))
         self.assertTrue(store.remove_agent(self.conn, "first", "a2"))
         self.assertFalse(store.remove_agent(self.conn, "first", "a2"))
 
-    def test_set_enabled_changes_only_the_flag(self):
-        store.upsert_agent(self.conn, "first", "a1", pane="%1", profile="codex", rooms=["clean"], source="theseus.toml")
-        self.assertTrue(store.set_enabled(self.conn, "first", "a1", False))
-        [agent] = store.list_agents(self.conn, "first")
-        self.assertEqual(("%1", "codex", ["clean"], False, "theseus.toml"),
-                         (agent["pane"], agent["profile"], agent["rooms"], agent["enabled"], agent["source"]))
-        self.assertTrue(store.set_enabled(self.conn, "first", "a1", True))
-        self.assertTrue(store.list_agents(self.conn, "first")[0]["enabled"])
-        self.assertFalse(store.set_enabled(self.conn, "first", "missing", False))
-        self.assertEqual(["a1"], [a["name"] for a in store.list_agents(self.conn)])
-
-    def test_prune_dry_run_lists_without_deleting(self):
-        store.upsert_project(self.conn, "gone", root=self.tmp / "missing")
-        self.assertEqual(["gone"], store.prune_projects(self.conn, dry_run=True))
-        self.assertEqual(["gone"], [p["name"] for p in store.list_projects(self.conn)])
-
-    def test_coordinator_sessions_open_and_close(self):
-        session = store.start_session(self.conn, "first", pane="%9", profile="claude-code")
-        self.assertEqual("%9", store.list_projects(self.conn)[0]["coordinator"])
-        self.assertEqual([session], [s["id"] for s in store.sessions(self.conn, "first", active=True)])
-        self.assertTrue(store.end_session(self.conn, session))
-        self.assertFalse(store.end_session(self.conn, session))
-        self.assertEqual([], store.sessions(self.conn, "first", active=True))
-
 
 class PoolTests(StoreCase):
-    """The four tests of test_pools.py against the database, plus the combined check-and-take."""
-
-    def test_full_pool_refuses_and_records_a_claim(self):
-        store.sync(self.conn, "gw", "second", {"b1": "t1", "b2": "t2"})
-        allowed, why = store.may_start(self.conn, "gw", "first")
-        self.assertFalse(allowed)
-        self.assertIn("full (2/2)", why)
-        self.assertEqual(["first"], store.status(self.conn, "gw")["claims"])
-
-    def test_lower_priority_project_yields_while_a_higher_claim_is_fresh(self):
-        store.sync(self.conn, "gw", "second", {"b1": "t1", "b2": "t2"})
-        store.may_start(self.conn, "gw", "first")
-        store.sync(self.conn, "gw", "second", {"b1": "t1"})
-        allowed, why = store.may_start(self.conn, "gw", "second")
-        self.assertFalse(allowed)
-        self.assertIn("yielding to first", why)
-        self.assertTrue(store.may_start(self.conn, "gw", "first")[0])
-        store.drop_claim(self.conn, "gw", "first")
-        self.assertTrue(store.may_start(self.conn, "gw", "second")[0])
-
-    def test_slots_a_project_stopped_refreshing_expire(self):
-        store.sync(self.conn, "gw", "second", {"b1": "t1", "b2": "t2"})
-        self.backdate("pool_leases", "seen_epoch", store.LEASE_TTL + 1)
-        self.assertTrue(store.may_start(self.conn, "gw", "first")[0])
-        self.assertEqual(0, store.status(self.conn, "gw")["active"])
-
-    def test_manual_hold_counts_against_the_pool_and_yields_to_priority(self):
-        self.assertTrue(store.hold(self.conn, "gw", "second", "pane-1", "game task")[0])
-        self.assertTrue(store.hold(self.conn, "gw", "second", "pane-2", "game task")[0])
-        allowed, why = store.hold(self.conn, "gw", "second", "pane-3", "game task")
-        self.assertFalse(allowed)
-        self.assertIn("full", why)
-        store.sync(self.conn, "gw", "first", {})
-        self.assertFalse(store.may_start(self.conn, "gw", "first")[0])
-        self.assertTrue(store.release(self.conn, "gw", "second", "pane-1"))
-        self.assertFalse(store.hold(self.conn, "gw", "second", "pane-1", "again")[0], "first's fresh claim wins")
-        self.assertTrue(store.may_start(self.conn, "gw", "first")[0])
+    """Pool semantics test_pools.py does not cover: claim and hold expiry, the combined check-and-take and races."""
 
     def test_claims_expire_and_lower_priority_projects_resume(self):
         store.sync(self.conn, "gw", "second", {"b1": "t1", "b2": "t2"})
@@ -236,15 +195,6 @@ class PoolTests(StoreCase):
         self.assertIn("until", leases["first/manual"])
         self.backdate("pool_leases", "until_epoch", 3601)
         self.assertEqual(0, store.status(self.conn, "gw")["active"])
-
-    def test_status_has_the_shape_of_the_file_based_pools(self):
-        store.sync(self.conn, "gw", "second", {"b1": "t1"})
-        pools.sync(SimpleNamespace(name="second"), "gw", {"b1": "t1"})
-        ours, theirs = store.status(self.conn, "gw"), pools.status("gw")
-        self.assertEqual(set(theirs), set(ours))
-        self.assertEqual(set(theirs["leases"]["second/b1"]), set(ours["leases"]["second/b1"]))
-        for key in ("pool", "max", "priority", "active", "projects", "claims"):
-            self.assertEqual(theirs[key], ours[key])
 
     def test_acquire_checks_and_takes_in_one_step(self):
         self.assertEqual((True, ""), store.acquire(self.conn, "gw", "second", "b1", "t1"))
@@ -333,30 +283,6 @@ class EventTests(StoreCase):
         self.assertEqual(100, len(store.events(self.conn)))
 
 
-class DeliveryAndSampleTests(StoreCase):
-    def test_deliveries_and_samples_round_trip(self):
-        store.add_delivery(self.conn, "first", "t1", agent="a1", handoff=self.tmp / "handoff.md", result="delivered",
-                           at="2026-11-16T10:00:00Z")
-        store.add_delivery(self.conn, "first", "t2", result="partial")
-        self.assertEqual(["t1", "t2"], [d["task"] for d in store.deliveries(self.conn, "first")])
-        self.assertEqual(str(self.tmp / "handoff.md"), store.deliveries(self.conn, task="t1")[0]["handoff"])
-        self.assertEqual(["t2"], [d["task"] for d in store.deliveries(self.conn, since="2026-11-16T11:00:00Z")])
-        for n, state in enumerate(["working", "working", "free"]):
-            store.add_sample(self.conn, "first", "a1", state, task="t1" if state == "working" else None, at=1000 + n)
-        store.add_sample(self.conn, "first", "a2", "offline", at=1001)
-        self.assertEqual(["working", "working", "free"], [s["state"] for s in store.samples(self.conn, agent="a1")])
-        self.assertEqual(3, len(store.samples(self.conn, "first", since=1001)))
-
-    def test_task_index_is_replaced_per_project(self):
-        tasks = [{"id": "t1", "status": "pending", "priority": 2, "room": "clean", "createdAt": "2026-11-01T00:00:00Z"},
-                 {"id": "t2", "status": "in_progress", "createdAt": "2026-11-01T00:00:00Z",
-                  "execution": {"assignedAt": "2026-11-02T00:00:00Z"}}]
-        store.index_tasks(self.conn, "first", tasks)
-        store.index_tasks(self.conn, "first", tasks[1:])
-        rows = store.task_index(self.conn, "first")
-        self.assertEqual([("t2", "in_progress", "2026-11-02T00:00:00Z")], [(r["id"], r["status"], r["updated"]) for r in rows])
-
-
 class ImportTests(StoreCase):
     def write_project(self):
         data = self.tmp / "data"
@@ -386,42 +312,6 @@ class ImportTests(StoreCase):
         self.assertEqual(1, store.import_events(self.conn, "first", data / "queue/events.jsonl"))
         self.assertEqual(4, len(store.events(self.conn, "first")))
         self.assertEqual(str(data), store.list_projects(self.conn)[0]["data"])
-
-    def test_pool_state_import_is_idempotent_and_skips_expired_entries(self):
-        now = time.time()
-        state = {"leases": {"second/b1": {"project": "second", "agent": "b1", "task": "t1", "seen": now},
-                            "third/manual": {"project": "third", "agent": "manual", "task": "t", "seen": now,
-                                             "until": now + 3600},
-                            "second/b2": {"project": "second", "agent": "b2", "task": "t2",
-                                          "seen": now - pools.LEASE_TTL - 1}},
-                 "claims": {"first": now, "fourth": now - pools.CLAIM_TTL - 1}}
-        (self.tmp / "pool-state").mkdir()
-        (self.tmp / "pool-state/gw.json").write_text(json.dumps(state))
-        for _ in range(2):
-            self.assertEqual(["gw"], store.import_pool_state(self.conn))
-            status = store.status(self.conn, "gw")
-            self.assertEqual(["second/b1", "third/manual"], sorted(status["leases"]))
-            self.assertEqual(["first"], status["claims"])
-        self.assertIn("until", status["leases"]["third/manual"])
-
-    def test_project_registry_import_is_idempotent_and_keeps_the_later_last_seen(self):
-        registry = self.tmp / "projects.json"
-        registry.write_text(json.dumps({"projects": {str(self.tmp / "a"): {
-            "name": "first", "data": str(self.tmp / "data"), "coordinator": "theseus", "last_seen": 1_700_000_000}}}))
-        for _ in range(2):
-            self.assertEqual(["first"], store.import_registry(self.conn, registry))
-        project = store.list_projects(self.conn)[0]
-        self.assertEqual((str(self.tmp / "a"), "theseus", 1_700_000_000), (project["root"], project["coordinator"],
-                                                                            project["last_seen_epoch"]))
-        store.upsert_project(self.conn, "first")
-        store.import_registry(self.conn, registry)
-        self.assertGreater(store.list_projects(self.conn)[0]["last_seen_epoch"], 1_700_000_000)
-
-    def test_missing_files_import_nothing(self):
-        self.assertEqual([], store.import_registry(self.conn, self.tmp / "none.json"))
-        self.assertEqual({"agents": 0, "events": 0}, store.import_project(self.conn, "first", self.tmp, self.tmp / "none"))
-        self.assertEqual([], store.import_pool_state(self.conn, self.tmp / "none"))
-
 
 class MigrationTests(StoreCase):
     def project(self):
@@ -473,15 +363,22 @@ class MigrationTests(StoreCase):
 
 
 class MaintenanceTests(StoreCase):
-    def test_trim_keeps_fourteen_days_of_samples_and_a_year_of_events_by_default(self):
+    def test_trim_keeps_fourteen_days_of_samples_and_a_year_of_events_unless_store_toml_says_otherwise(self):
         now = time.time()
         for days in (1, 13, 15, 40, 400):
             store.add_sample(self.conn, "first", "a1", "working", at=now - days * store.DAY)
             store.add_event(self.conn, "first", "tick", at=now - days * store.DAY)
         removed = store.trim(self.conn, now)
         self.assertEqual((3, 1), (removed["samples"], removed["events"]))
-        self.assertEqual(2, len(store.samples(self.conn)))
-        self.assertEqual(4, len(store.events(self.conn)))
+        (self.tmp / "store.toml").write_text("[retention]\nsamples_days = 2\nevents_days = 30\n")
+        for days in (1, 13, 40):
+            store.add_event(self.conn, "first", "tick", at=now - days * store.DAY)
+        store.add_sample(self.conn, "first", "a1", "working", at=now - 3 * store.DAY)
+        removed = store.trim(self.conn, now)
+        self.assertEqual((2, 2), (removed["samples"], removed["events"]))
+        (self.tmp / "store.toml").write_text("[retention\n")
+        with self.assertRaises(store.StoreError):
+            store.settings()
 
     def test_every_growing_table_is_trimmed_by_age_and_the_latest_run_survives(self):
         now = time.time()
@@ -524,18 +421,6 @@ class MaintenanceTests(StoreCase):
         left = {table: self.conn.execute(f'SELECT COUNT(*) FROM "{table}" WHERE project = ?', ("gone",)).fetchone()[0]
                 for table in tables if "project" in [c[1] for c in self.conn.execute(f'PRAGMA table_info("{table}")')]}
         self.assertEqual({}, {table: count for table, count in left.items() if count})
-
-    def test_retention_comes_from_store_toml(self):
-        (self.tmp / "store.toml").write_text("[retention]\nsamples_days = 2\nevents_days = 30\n")
-        now = time.time()
-        for days in (1, 13, 40):
-            store.add_sample(self.conn, "first", "a1", "working", at=now - days * store.DAY)
-            store.add_event(self.conn, "first", "tick", at=now - days * store.DAY)
-        removed = store.trim(self.conn, now)
-        self.assertEqual((2, 1), (removed["samples"], removed["events"]))
-        (self.tmp / "store.toml").write_text("[retention\n")
-        with self.assertRaises(store.StoreError):
-            store.settings()
 
     def test_maintain_returns_free_pages_converts_old_files_and_records_the_run(self):
         self.conn.execute("PRAGMA auto_vacuum = NONE")

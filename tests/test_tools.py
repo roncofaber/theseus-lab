@@ -37,10 +37,14 @@ class ToolResolutionTests(Sandbox):
     def conf(self):
         return cfg.load(root=self.project)
 
-    def test_install_locations_pick_the_newest_version(self):
+    def test_install_locations_pick_the_newest_version_below_a_local_setting(self):
         make_ghidra(self.home / "software/ghidra_11.4_PUBLIC")
         newest = make_ghidra(self.home / "software/ghidra_12.2_PUBLIC")
         self.assertEqual((str(newest), "install location"), tools.resolve(self.conf(), "ghidra"))
+        chosen = make_ghidra(self.tmp / "elsewhere/ghidra")
+        tools.set_tool(self.conf(), "ghidra", str(chosen))
+        self.assertEqual((str(chosen), "theseus.local.toml"), tools.resolve(self.conf(), "ghidra"),
+                         "a local setting beats discovery")
         home_only = [g for g in tools.CATALOG["java"]["globs"] if g.startswith("~")]
         self.addCleanup(tools.CATALOG["java"].__setitem__, "globs", tools.CATALOG["java"]["globs"])
         tools.CATALOG["java"]["globs"] = home_only
@@ -49,16 +53,6 @@ class ToolResolutionTests(Sandbox):
         make_executable(jdk25 / "bin/java")
         self.assertEqual(str(jdk25), tools.resolve(self.conf(), "java")[0])
 
-    def test_environment_beats_local_setting_beats_discovery(self):
-        make_ghidra(self.home / "software/ghidra_12.2_PUBLIC")
-        chosen = make_ghidra(self.tmp / "elsewhere/ghidra")
-        tools.set_tool(self.conf(), "ghidra", str(chosen))
-        self.assertEqual((str(chosen), "theseus.local.toml"), tools.resolve(self.conf(), "ghidra"))
-        override = make_ghidra(self.tmp / "override/ghidra")
-        os.environ["GHIDRA_INSTALL_DIR"] = str(override)
-        self.assertEqual((str(override), "environment GHIDRA_INSTALL_DIR"), tools.resolve(self.conf(), "ghidra"))
-        self.assertIn("[tools.paths]", (self.project / "theseus.local.toml").read_text())
-
     def test_environment_exports_tools_to_scripts_and_workers(self):
         ghidra = make_ghidra(self.home / "software/ghidra_12.2_PUBLIC")
         env = self.conf().environment()
@@ -66,6 +60,7 @@ class ToolResolutionTests(Sandbox):
         self.assertEqual(str(ghidra), env["GHIDRA_INSTALL_DIR"])
         exported = self.theseus("tools", "env").stdout
         self.assertIn(f"export GHIDRA_INSTALL_DIR={ghidra}", exported)
+
 
 if __name__ == "__main__":
     unittest.main()

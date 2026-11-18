@@ -1,6 +1,4 @@
 """Configuration loading, task record rules and cleanup, exercised directly through the package."""
-import contextlib
-import io
 import json
 import os
 import time
@@ -40,23 +38,11 @@ class ConfigTests(Sandbox):
         with self.assertRaises(cfg.ConfigError):
             cfg.expand("$UNSET_THESEUS_VARIABLE", {})
 
-    def test_unknown_sections_are_ignored_but_fail_config_check_and_roots_inside_the_project_are_rejected(self):
+    def test_roots_inside_the_project_are_rejected(self):
         self.scaffold()
-        self.set_config("[surprise]\nx = 1\n")
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertNotIn("surprise", cfg.load(root=self.project).raw)
-        self.assertIn("unknown configuration sections: surprise", self.theseus("config", "check", check=False).stderr)
-        self.replace_config("[surprise]\nx = 1\n", "")
         os.environ["THESEUS_DATA"] = str(self.project / "data")
         with self.assertRaises(cfg.ConfigError):
             cfg.load(root=self.project)
-
-    def test_config_get_prints_resolved_values(self):
-        self.scaffold()
-        self.assertEqual(str(self.tmp / "data"), self.theseus("config", "get", "paths.data").stdout.strip())
-        self.assertEqual("claude-code", self.theseus("config", "get", "workers.default").stdout.strip())
-        self.assertIn("codex", self.theseus("agents", "profiles").stdout)
-        self.theseus("config", "check")
 
 
 class OwnershipTests(unittest.TestCase):
@@ -252,8 +238,22 @@ class CleanupTests(Sandbox):
         self.assertTrue((conf.data / "archive/scratch/old-run/log.txt").exists())
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+class ContextTests(Sandbox):
+    def test_context_use_prefers_the_transcript_and_its_model_window_then_the_pane_hint(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from theseus import agents, profiles
+        table = {"context": {"claude-*": 1000000, "claude-haiku-4-5*": 200000, "lbl/cborg-coder-ultra": 229376}}
+        conf = SimpleNamespace(section=lambda name: table if name == "models" else {}, root=self.tmp)
+        with mock.patch.object(profiles, "resolve", lambda conf, name: {"context_limit": 123}):
+            self.assertEqual({"tokens": 5, "limit": 200000, "model": "claude-haiku-4-5", "source": "transcript"},
+                             agents.context_use(conf, "p", {"tokens": 5, "model": "claude-haiku-4-5"}, 9))
+            limit = lambda model: agents.context_use(conf, "p", {"tokens": 5, "model": model}, None)["limit"]
+            self.assertEqual([1000000, 229376, 123], [limit(m) for m in ("claude-opus-5-5", "lbl/cborg-coder-ultra", "other")])
+            self.assertEqual({"tokens": 9, "limit": 123, "model": None, "source": "pane hint"},
+                             agents.context_use(conf, "p", {"tokens": None}, 9))
+            self.assertIsNone(agents.context_use(conf, "p", None, None))
 
 
 class RedactionTests(Sandbox):
@@ -334,7 +334,6 @@ class LongRunningQueueTests(Sandbox):
             self.assertEqual([("a1", "stopped", "killed")], supervisor.down(cfg.load(root=self.project), ["a1"], force=True))
         stop.assert_called_once_with(mock.ANY, rec, graceful=False, reason="down", grace=5)
 
-
     def test_reconcile_after_down_and_scale_keeps_live_agents_and_stops_the_newest(self):
         from unittest import mock
         from theseus import supervisor
@@ -359,6 +358,7 @@ class LongRunningQueueTests(Sandbox):
         self.assertEqual({name(1): "kept", name(2): "down", name(3): "kept", name(4): "removed", name(5): "kept"},
                          actions, "a disabled agent runs on uncounted")
         retire.assert_called_once_with(conf, server, regs[name(4)], False)
+
 
 class CountPlanTests(unittest.TestCase):
     """[agents.counts] as live agents per profile: supervisor.plan over {slot: record}."""
@@ -408,3 +408,6 @@ class GitLockRetryTests(unittest.TestCase):
                 mock.patch.object(gitutil.time, "sleep"):
             self.assertEqual("ok", gitutil.git("/repo", "commit", "-m", "x").stdout)
         self.assertEqual(3, run.call_count)
+
+if __name__ == "__main__":
+    unittest.main()

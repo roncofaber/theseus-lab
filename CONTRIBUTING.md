@@ -25,7 +25,7 @@ uv tool install --editable .
 - Process supervision and tmux handling live in `src/theseus/scripts/` as Bash, and must pass `shellcheck`.
 - Templates for new projects are in `src/theseus/templates/project/`. A path segment starting with `dot-` becomes `.` when a project is scaffolded.
 - Keep the package neutral. No company, site or vendor-specific settings in the package, the templates or the docs; those belong in a project's `theseus.toml` as a profile variant. The test suite checks this.
-- Add or update tests with every behavior change, and run the full suite before opening a pull request. Keep the suite small and fast (under 30 s, at most 3 s per test, enforced by `tests/test_zbudget.py`): one or two tests per behavior that matters, fakes over real tmux and the Textual Pilot where a unit test proves the same thing, fake clocks (`helpers.fake_clock`) and short test-only settings instead of real sleeps or verification windows, no timing benchmarks.
+- Add or update tests with every behavior change, and run the full suite before opening a pull request. Tests use fakes and fake clocks (`helpers.fake_clock`), not real waits.
 - Write comments only when the reason for the code is not obvious from the code itself.
 
 ## Agent profiles
