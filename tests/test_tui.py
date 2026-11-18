@@ -17,6 +17,22 @@ from test_queue import FAKE_TMUX
 from theseus import host, registry, store, top
 
 
+def quick_idle(case):
+    """Cap Textual's wait for an idle CPU after each Pilot key press at one 20 ms slice: the dashboard's 0.05 s mirror
+    timer keeps the CPU busy, so the default waits up to 1 s twice per key, and every test waits on its own condition."""
+    from unittest import mock
+    from textual import _wait
+    original = _wait.wait_for_idle
+
+    async def capped(min_sleep=_wait.SLEEP_GRANULARITY, max_sleep=1):
+        await original(0, min(max_sleep, _wait.SLEEP_GRANULARITY))
+
+    for module in ("textual.app", "textual.pilot"):
+        patcher = mock.patch(f"{module}.wait_for_idle", capped)
+        patcher.start()
+        case.addCleanup(patcher.stop)
+
+
 def fake_conf(root, name="alpha"):
     return SimpleNamespace(root=Path(root), name=name, data=Path(root) / "data",
                            section=lambda section: {"coordinator": "coord"} if section == "instances" else {})
@@ -130,6 +146,7 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from theseus.tui.app import TopApp
         asyncio.get_running_loop().set_debug(False)
+        quick_idle(self)
         self.jumps = []
         self.sent, self.keys, self.captures = [], [], []
         self.app = TopApp(interval=3600, snapshot_fn=host.snapshot, tmux_ok=True, mirror_seconds=0.05,
@@ -218,13 +235,16 @@ def grown(base, agents=0, events=0, tasks=0, gpus=None, gateway=False):
 class DashboardBase(HostCase, unittest.IsolatedAsyncioTestCase):
     """A dashboard app on a grown copy of a real host snapshot, with fakes for tmux jumps, sends, keys and captures."""
 
+    cached = None
+
     async def asyncSetUp(self):
         from theseus.tui.app import TopApp
         asyncio.get_running_loop().set_debug(False)
+        quick_idle(self)
         self.event("alpha", "assigned", 5)
         self.event("alpha", "delivered", 3, "t2")
         self.event("alpha", "error", 2, "t3")
-        self.base = host.snapshot()
+        self.base = self.shared_snapshot()
         self.extra = {}
         self.jumps, self.sent, self.keys, self.captures, self.fits = [], [], [], [], []
         self.conversation = []
@@ -239,6 +259,13 @@ class DashboardBase(HostCase, unittest.IsolatedAsyncioTestCase):
                           send_fn=lambda conf, agent, text, expect_busy=True: self.sent.append(
                               (agent["pane"], text, expect_busy)) or "sent",
                           keys_fn=lambda pane, *keys: self.keys.append((pane, keys)) or "")
+
+    def shared_snapshot(self):
+        """The host snapshot is the same for every test of the class but its temporary root, so it is taken once."""
+        cached = DashboardBase.cached
+        if cached is None:
+            cached = DashboardBase.cached = (str(self.tmp), json.dumps(host.snapshot()))
+        return json.loads(cached[1].replace(cached[0], str(self.tmp)))
 
     async def settle(self, pilot, condition):
         await self.app.workers.wait_for_complete()
@@ -347,7 +374,7 @@ class ConsoleTests(DashboardBase):
         self.assertEqual(("worker-a", None, None), self.fits[-1], "quitting with the popup open restores the size")
 
     async def test_the_agent_popup_has_four_buttons_that_fit_and_the_rest_in_keys_and_the_palette(self):
-        from textual.command import CommandPalette
+        from textual.command import CommandList, CommandPalette
         from textual.widgets import Button, Input
         from theseus.tui.popups import AgentScreen
         async with self.app.run_test(size=(80, 40)) as pilot:
@@ -365,8 +392,11 @@ class ConsoleTests(DashboardBase):
             await self.settle(pilot, lambda: ("%1", ("Escape",)) in self.keys)
             await pilot.press("ctrl+p")
             await self.settle(pilot, lambda: isinstance(self.app.screen, CommandPalette))
-            self.app.screen.query_one(Input).value = "fake-1: send enter"
-            await pilot.pause(0.3)
+            palette = self.app.screen
+            palette.query_one(Input).value = "fake-1: send enter"
+            commands = palette.query_one(CommandList)
+            await self.settle(pilot, lambda: commands.highlighted is not None and "Send Enter" in str(
+                commands.get_option_at_index(commands.highlighted).prompt))
             await pilot.press("enter")
             await self.settle(pilot, lambda: ("%1", ("Enter",)) in self.keys)
 

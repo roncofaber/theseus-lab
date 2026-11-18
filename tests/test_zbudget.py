@@ -6,11 +6,11 @@ import unittest
 
 class TimeBudgetTests(unittest.TestCase):
     def run(self, result=None):
-        self.durations = list(getattr(result, "collectedDurations", None) or [])
+        self.durations = getattr(result, "collectedDurations", None)
         return super().run(result)
 
     def test_no_single_test_exceeds_the_time_budget(self):
-        if not hasattr(unittest.TestResult, "collectedDurations"):
+        if self.durations is None:
             self.skipTest("per-test durations need Python 3.12")
         budget = float(os.environ.get("THESEUS_TEST_BUDGET") or 3.0) * (2 if os.environ.get("CI") else 1)
         slow = [f"{name} {elapsed:.1f}s" for name, elapsed in self.durations if elapsed > budget]
