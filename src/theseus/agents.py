@@ -52,7 +52,7 @@ def seed(conf, conn):
 
 
 def entry(row):
-    record = {"name": row["name"], "pane": row["pane"], "provider": row["profile"], "enabled": row["enabled"],
+    record = {"name": row["name"], "id": row.get("id"), "pane": row["pane"], "provider": row["profile"], "enabled": row["enabled"],
               "registered": row["registered"]}
     if row["rooms"]:
         record["rooms"] = row["rooms"]
@@ -450,11 +450,19 @@ def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, 
 
 
 def current_task(conf, name):
-    """The open task assigned to this agent (owner provider:<name>:...), if any."""
+    """The open task assigned to this agent (owner provider:<name>:...), if any. A task that records its owner's ID
+    belongs to that agent only, not to a later one registered under the same name."""
     from . import tasks as t
+    current = None
     for task in t.Queue(conf).load()["tasks"]:
         owner = task.get("owner") or ""
         if task["status"] == "in_progress" and owner.split(":")[1:2] == [name]:
+            if task.get("ownerId"):
+                if current is None:
+                    with store.for_project(conf) as conn:
+                        current = store.agent_id(conn, conf.name, name) or ""
+                if task["ownerId"] != current:
+                    continue
             return task
     return None
 
@@ -523,7 +531,7 @@ def state(conf, agent):
     from . import tasks as t
     pane = agent["pane"]
     task = current_task(conf, agent["name"])
-    info = {"name": agent["name"], "display": display_name(conf, agent), "pane": pane, "provider": agent.get("provider", ""),
+    info = {"name": agent["name"], "id": agent.get("id"), "display": display_name(conf, agent), "pane": pane, "provider": agent.get("provider", ""),
             "enabled": agent.get("enabled", True),
             "task": task["id"] if task else None, "room": (task or {}).get("room"), "idleMinutes": None,
             "tainted": rooms.ledger(conf)["tainted"].get(agent["name"]) if rooms.enabled(conf) else None}

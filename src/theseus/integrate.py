@@ -88,7 +88,7 @@ def worker_environment(conf, tree):
     return {**os.environ, **conf.environment(), "THESEUS_ROOT": str(tree)}
 
 
-def assign(conf, task_id, name, provider, model, owner=None, commit=True, instance=None):
+def assign(conf, task_id, name, provider, model, owner=None, commit=True, instance=None, owner_id=None):
     """Create the worktree, record the assignment and (by default) commit only the task file."""
     from . import rooms
     queue = t.Queue(conf)
@@ -107,7 +107,7 @@ def assign(conf, task_id, name, provider, model, owner=None, commit=True, instan
     rooms.exclude_dirty(conf, task, worktree)
     try:
         message = t.assign(queue, task_id, owner or f"{provider}:{model}:{name}", provider, model, worktree, base[:12],
-                           worktree / cfg.WORKER_LOG)
+                           worktree / cfg.WORKER_LOG, owner_id=owner_id)
     except t.TaskError:
         g.git(conf.root, "worktree", "remove", "--force", str(worktree), check=False)
         g.git(conf.root, "branch", "-D", f"work/{name}", check=False)
@@ -119,7 +119,7 @@ def assign(conf, task_id, name, provider, model, owner=None, commit=True, instan
     return worktree, base, message
 
 
-def assign_in_place(conf, task_id, name, provider, model, owner=None, instance=None):
+def assign_in_place(conf, task_id, name, provider, model, owner=None, instance=None, owner_id=None):
     """Assign without a worktree or commit: the worker edits its owned paths in the main checkout and writes its
     records to .theseus/<task>/. For docs-only rounds, or before the repository has a first commit. Owned paths must
     not overlap any other active task, since nothing isolates the workers from each other."""
@@ -139,7 +139,8 @@ def assign_in_place(conf, task_id, name, provider, model, owner=None, instance=N
     base = head.stdout.strip() if head.returncode == 0 else "uncommitted"
     log_dir = conf.root / cfg.WORKER_LOG / task_id
     log_dir.mkdir(parents=True, exist_ok=True)
-    message = t.assign(queue, task_id, owner or f"{provider}:{model}:{name}", provider, model, conf.root, base, log_dir)
+    message = t.assign(queue, task_id, owner or f"{provider}:{model}:{name}", provider, model, conf.root, base, log_dir,
+                       owner_id=owner_id)
     if instance:
         rooms.record_assignment(conf, task, instance)
     return conf.root, base, message

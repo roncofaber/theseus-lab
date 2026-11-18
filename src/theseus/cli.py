@@ -230,6 +230,8 @@ def cmd_tasks(args):
         emit(t.assign(queue, args.id, args.owner, args.provider, args.model, args.worktree, args.base, args.log_dir, args.force))
     elif action == "release":
         emit(t.release(queue, args.id, args.reason))
+    elif action == "migrate-ids":
+        emit(t.migrate_ids(queue))
     elif action == "deliver":
         emit(t.deliver(queue, args.id, args.handoff))
     elif action == "note":
@@ -980,6 +982,8 @@ def build_parser():
     for flag in ("--owner", "--provider", "--model", "--worktree", "--base", "--log-dir"):
         p.add_argument(flag, required=True)
     p.add_argument("--force", action="store_true")
+    ts.add_parser("migrate-ids", help="record the owning agent's ID (ownerId, agentId on attempts) on task records "
+                                      "written before agents had IDs; safe to rerun")
     p = ts.add_parser("release", help="return an assigned task to pending, keeping the attempt")
     p.add_argument("id")
     p.add_argument("--reason", required=True)

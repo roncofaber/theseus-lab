@@ -1341,7 +1341,7 @@ def snapshot(conf):
         info = pane_info(server_of(rec), rec["target"]) if rec.get("target") else None
         run = last_run(conf, name) or {}
         count, _, _ = crash_history(conf, name)
-        found.append({"name": name, "profile": rec.get("profile"), "phase": rec.get("phase"), "desired": rec.get("desired"),
+        found.append({"name": name, "id": rec.get("id"), "profile": rec.get("profile"), "phase": rec.get("phase"), "desired": rec.get("desired"),
                       "gen": run.get("gen"), "runProfile": run.get("profile"), "sessionId": rec.get("session_id"),
                       "pid": int(info["pane_pid"]) if info and info.get("pane_pid", "").isdigit() else None,
                       "paneId": (info or {}).get("pane_id"), "dead": bool(info and info.get("pane_dead") == "1"),

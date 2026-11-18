@@ -48,11 +48,21 @@ def agent_of(task):
     return owner or None
 
 
+def owner_id_of(conf, task):
+    """The ID of the agent registered now under the task's owner name, or None for a worker no registry lists."""
+    from . import store
+    try:
+        with store.for_project(conf) as conn:
+            return store.agent_id(conn, conf.name, agent_of(task))
+    except (OSError, sqlite3.Error):
+        return None
+
+
 def record(queue, kind, task, detail=""):
     """Append the status change to the queue's event history, so `theseus top` shows it however it was made."""
     from . import workqueue
     try:
-        workqueue.event(queue.conf, kind, agent_of(task), task["id"], detail)
+        workqueue.event(queue.conf, kind, agent_of(task), task["id"], detail, agent_id=task.get("ownerId"))
     except (OSError, sqlite3.Error):
         pass
 
@@ -61,7 +71,8 @@ def record_delivery(queue, task, handoff, result):
     from . import store
     try:
         with store.for_project(queue.conf) as conn:
-            store.add_delivery(conn, queue.conf.name, task["id"], agent=agent_of(task), handoff=handoff, result=result)
+            store.add_delivery(conn, queue.conf.name, task["id"], agent=agent_of(task), handoff=handoff, result=result,
+                               agent_id=task.get("ownerId"))
     except (OSError, sqlite3.Error):
         pass
 
@@ -255,7 +266,15 @@ def active_by_provider(tasks):
     return counts
 
 
-def assign(queue, task_id, owner, provider, model, worktree, base, log_dir, force=False):
+def attempt_of(task, keys):
+    """A snapshot of the current attempt; the owner's ID is kept as agentId."""
+    attempt = {key: task.get(key) for key in keys}
+    if task.get("ownerId"):
+        attempt["agentId"] = task["ownerId"]
+    return attempt
+
+
+def assign(queue, task_id, owner, provider, model, worktree, base, log_dir, force=False, owner_id=None):
     document = queue.load()
     task = queue.open_task(document, task_id)
     if task.get("pause") and not force:
@@ -270,15 +289,49 @@ def assign(queue, task_id, owner, provider, model, worktree, base, log_dir, forc
     if capacity is not None and not force and active_by_provider(document["tasks"]).get(provider, 0) >= int(capacity):
         raise TaskError(f"provider {provider} is at its capacity of {capacity} active tasks (workers.{provider}.capacity)")
     if task.get("worktree") or task.get("execution") or task.get("pause"):
-        attempt = {key: task.get(key) for key in ("owner", "worktree", "baseCommit", "execution", "pause") if task.get(key) is not None}
+        attempt = {key: value for key, value in attempt_of(task, ("owner", "worktree", "baseCommit", "execution", "pause")).items()
+                   if value is not None}
         attempt.update({"supersededAt": now(), "reason": "reassigned"})
         task.setdefault("previousAttempts", []).append(attempt)
         task.pop("pause", None)
     task.update({"status": "in_progress", "owner": owner, "worktree": str(worktree), "baseCommit": base,
                  "execution": {"provider": provider, "model": model, "logDir": str(log_dir), "assignedAt": now()}})
+    task.pop("ownerId", None)
+    owner_id = owner_id or owner_id_of(queue.conf, task)
+    if owner_id:
+        task["ownerId"] = owner_id
     queue.save(document)
     record(queue, "assigned", task, f"{provider}: {worktree}")
     return f"{task_id} -> in_progress ({owner})"
+
+
+def migrate_ids(queue):
+    """Record ownerId on open tasks and agentId on their earlier attempts where the agent registered under the owner
+    name now was already registered when the attempt was assigned (so it is the same agent). Idempotent."""
+    from . import store
+    with store.for_project(queue.conf) as conn:
+        registered = {a["name"]: a for a in store.list_agents(conn, queue.conf.name)}
+
+    def same_agent(record):
+        agent = registered.get(agent_of(record)) or {}
+        assigned = (record.get("execution") or {}).get("assignedAt")
+        if not (agent.get("id") and agent.get("registered") and assigned):
+            return None
+        return agent["id"] if store.epoch_of(agent["registered"]) <= store.epoch_of(assigned) else None
+
+    document = queue.load()
+    owners = attempts = 0
+    for task in document["tasks"]:
+        if task.get("owner") and not task.get("ownerId") and same_agent(task):
+            task["ownerId"] = same_agent(task)
+            owners += 1
+        for attempt in task.get("previousAttempts") or []:
+            if attempt.get("owner") and not attempt.get("agentId") and same_agent(attempt):
+                attempt["agentId"] = same_agent(attempt)
+                attempts += 1
+    if owners or attempts:
+        queue.save(document)
+    return f"ownerId recorded on {owners} task(s), agentId on {attempts} attempt(s)"
 
 
 def release(queue, task_id, reason):
@@ -286,14 +339,15 @@ def release(queue, task_id, reason):
     task = queue.open_task(document, task_id)
     if task["status"] not in ("in_progress", "verification"):
         raise TaskError(f"{task_id} is {task['status']}, not assigned")
-    attempt = {key: task.get(key) for key in ("owner", "worktree", "baseCommit", "execution")}
+    attempt = attempt_of(task, ("owner", "worktree", "baseCommit", "execution"))
     attempt.update({"releasedAt": now(), "reason": reason})
     task.setdefault("previousAttempts", []).append(attempt)
     task["status"], task["owner"] = "pending", None
-    for key in ("worktree", "baseCommit", "execution"):
+    for key in ("worktree", "baseCommit", "execution", "ownerId"):
         task.pop(key, None)
     queue.save(document)
-    record(queue, "released", {**task, "owner": attempt.get("owner"), "execution": attempt.get("execution")}, reason)
+    record(queue, "released", {**task, "owner": attempt.get("owner"), "ownerId": attempt.get("agentId"),
+                               "execution": attempt.get("execution")}, reason)
     return f"{task_id} -> pending (attempt recorded in previousAttempts)"
 
 

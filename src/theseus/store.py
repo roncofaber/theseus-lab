@@ -208,6 +208,11 @@ MIGRATIONS = [
             stop_reason TEXT)""",
         "CREATE INDEX IF NOT EXISTS agent_runs_agent ON agent_runs(project, agent, started_epoch)",
     ],
+    [
+        lambda conn: backfill_agent_ids(conn),
+        "CREATE UNIQUE INDEX IF NOT EXISTS agents_id ON agents(id)",
+        "CREATE INDEX IF NOT EXISTS agent_runs_agent_id ON agent_runs(agent_id, started_epoch)",
+    ],
 ]
 AGENT_SUPERVISOR_COLUMNS = [("managed", "INTEGER NOT NULL DEFAULT 0"), ("server", "TEXT"), ("target", "TEXT"),
                             ("session_id", "TEXT"), ("slot", "INTEGER"), ("desired", "TEXT NOT NULL DEFAULT 'up'"),
@@ -220,6 +225,28 @@ def add_columns(conn, table, columns):
     for name, declaration in columns:
         if name not in present:
             conn.execute(f'ALTER TABLE "{table}" ADD COLUMN {name} {declaration}')
+
+
+AGENT_ID_TABLES = ("events", "deliveries", "samples", "pool_leases", "gateway_errors", "gateway_retries", "agent_runs")
+CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def new_id(now=None):
+    """A ULID: 48-bit millisecond timestamp and 80 random bits in 26 Crockford base32 characters, sortable by time."""
+    value = int((time.time() if now is None else now) * 1000) << 80 | int.from_bytes(os.urandom(10), "big")
+    return "".join(CROCKFORD[(value >> shift) & 31] for shift in range(125, -1, -5))
+
+
+def backfill_agent_ids(conn):
+    """One ID per registered agent, and every record that names a registered agent mapped to it by name."""
+    add_columns(conn, "agents", [("id", "TEXT")])
+    for table in AGENT_ID_TABLES:
+        add_columns(conn, table, [("agent_id", "TEXT")])
+    for (rowid,) in conn.execute("SELECT rowid FROM agents WHERE id IS NULL").fetchall():
+        conn.execute("UPDATE agents SET id = ? WHERE rowid = ?", (new_id(), rowid))
+    for table in AGENT_ID_TABLES:
+        conn.execute(f"""UPDATE "{table}" SET agent_id = (SELECT id FROM agents
+                         WHERE agents.project = "{table}".project AND agents.name = "{table}".agent) WHERE agent_id IS NULL""")
 
 
 SCHEMA_VERSION = len(MIGRATIONS)
@@ -473,16 +500,34 @@ def agent_row(row):
 
 
 def upsert_agent(conn, project, name, pane=None, profile=None, rooms=None, enabled=True, registered=None, source=None):
+    """Register an agent or update its registration; a new registration gets a new ID, an update keeps it. Returns
+    the ID."""
     with transaction(conn):
         touch_project(conn, project)
-        conn.execute("""INSERT INTO agents (project, name, pane, profile, rooms, enabled, registered, source)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        if agent_id(conn, project, name) is None:
+            # A live record left under this name by an earlier agent must not carry over to the new one.
+            conn.execute("DELETE FROM gateway_retries WHERE project = ? AND agent = ?", (project, name))
+        conn.execute("""INSERT INTO agents (project, name, pane, profile, rooms, enabled, registered, source, id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT (project, name) DO UPDATE SET pane = excluded.pane, profile = excluded.profile,
                         rooms = excluded.rooms, enabled = excluded.enabled,
                         registered = COALESCE(agents.registered, excluded.registered),
-                        source = COALESCE(excluded.source, agents.source)""",
+                        source = COALESCE(excluded.source, agents.source), id = COALESCE(agents.id, excluded.id)""",
                      (project, name, pane, profile, json.dumps(list(rooms)) if rooms else None, int(bool(enabled)),
-                      registered or iso(), source))
+                      registered or iso(), source, new_id()))
+        return agent_id(conn, project, name)
+
+
+def agent_id(conn, project, name):
+    """The ID of the agent registered under name in project now, or None."""
+    if not name:
+        return None
+    row = conn.execute("SELECT id FROM agents WHERE project = ? AND name = ?", (project, name)).fetchone()
+    return row[0] if row else None
+
+
+def id_or_name(conn, project, name, given=None):
+    return given if given is not None else agent_id(conn, project, name)
 
 
 def list_agents(conn, project=None, include_disabled=True):
@@ -535,16 +580,19 @@ RUN_FIELDS = ("pid", "ready_epoch", "ended", "ended_epoch", "exit_status", "exit
               "launch_hash")
 
 
-def add_run(conn, project, agent, intent, profile=None, launch_hash=None, session_id=None, resume=False, at=None):
-    """Open the next generation of a managed agent and return its row."""
+def add_run(conn, project, agent, intent, profile=None, launch_hash=None, session_id=None, resume=False, at=None,
+            agent_id=None):
+    """Open the next generation of a managed agent and return its row. Generations count per name, so a name reused by
+    a new agent goes on from the last one and `name gen` stays unique."""
     text, epoch = stamp(at)
     with transaction(conn):
         touch_project(conn, project)
         gen = (conn.execute("SELECT MAX(gen) FROM agent_runs WHERE project = ? AND agent = ?",
                             (project, agent)).fetchone()[0] or 0) + 1
         cursor = conn.execute("""INSERT INTO agent_runs (project, agent, gen, intent, profile, launch_hash, session_id, resume,
-                                 started, started_epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                              (project, agent, gen, intent, profile, launch_hash, session_id, int(bool(resume)), text, epoch))
+                                 started, started_epoch, agent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                              (project, agent, gen, intent, profile, launch_hash, session_id, int(bool(resume)), text, epoch,
+                               id_or_name(conn, project, agent, agent_id)))
     return dict(conn.execute("SELECT * FROM agent_runs WHERE id = ?", (cursor.lastrowid,)).fetchone())
 
 
@@ -570,11 +618,13 @@ def close_run(conn, run_id, stop_reason, exit_status=None, exit_signal=None, at=
 
 
 def runs(conn, project, agent=None, limit=None, open_only=False, since=None):
-    """Runs newest first."""
+    """Runs newest first; for an agent name, only the runs of the agent registered under it now (all runs under the
+    name once none is)."""
     sql, args = "SELECT * FROM agent_runs WHERE project = ?", [project]
     if agent is not None:
-        sql += " AND agent = ?"
-        args.append(agent)
+        current = agent_id(conn, project, agent)
+        sql += " AND agent_id = ?" if current else " AND agent = ?"
+        args.append(current or agent)
     if open_only:
         sql += " AND ended IS NULL"
     if since is not None:
@@ -596,20 +646,22 @@ def last_run(conn, project, agent):
     return found[0] if found else None
 
 
-EVENT_COLUMNS = "id, project, time, epoch, kind, agent, task, detail"
+EVENT_COLUMNS = "id, project, time, epoch, kind, agent, agent_id, task, detail"
 
 
-def add_event(conn, project, kind, agent=None, task=None, detail="", at=None, origin=None):
-    """Append an event and return it as a dict with its id (None when origin repeats an imported one)."""
+def add_event(conn, project, kind, agent=None, task=None, detail="", at=None, origin=None, agent_id=None):
+    """Append an event and return it as a dict with its id (None when origin repeats an imported one). agent_id
+    defaults to the agent registered under the name now."""
     text, epoch = stamp(at)
     with transaction(conn):
         touch_project(conn, project)
-        cursor = conn.execute("""INSERT OR IGNORE INTO events (project, time, epoch, kind, agent, task, detail, origin)
-                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                              (project, text, epoch, kind, agent, task, detail or "", origin))
+        agent_id = id_or_name(conn, project, agent, agent_id)
+        cursor = conn.execute("""INSERT OR IGNORE INTO events (project, time, epoch, kind, agent, task, detail, origin, agent_id)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                              (project, text, epoch, kind, agent, task, detail or "", origin, agent_id))
     event_id = cursor.lastrowid if cursor.rowcount else None
     return {"id": event_id, "project": project, "time": text, "epoch": epoch, "kind": kind, "agent": agent,
-            "task": task, "detail": detail or ""}
+            "agent_id": agent_id, "task": task, "detail": detail or ""}
 
 
 def filters(project=None, since=None, until=None, kinds=None, after_id=None):
@@ -665,9 +717,11 @@ RETRY_FIELDS = ("task", "pool", "code", "phase", "attempt", "errors", "retry_aft
 
 
 def gateway_retry(conn, project, agent):
-    """The gateway retry episode of one agent, or None."""
+    """The gateway retry episode of the agent registered under this name, or None."""
     row = conn.execute("SELECT * FROM gateway_retries WHERE project = ? AND agent = ?", (project, agent)).fetchone()
-    return dict(row) if row else None
+    if row is None or (row["agent_id"] and row["agent_id"] != agent_id(conn, project, agent)):
+        return None
+    return dict(row)
 
 
 def put_gateway_retry(conn, project, agent, now=None, **fields):
@@ -679,8 +733,9 @@ def put_gateway_retry(conn, project, agent, now=None, **fields):
         current = gateway_retry(conn, project, agent) or {"phase": "idle", "attempt": 0, "errors": 0, "recovered": 0}
         current.update(fields)
         values = [current.get(key) for key in RETRY_FIELDS]
-        conn.execute(f"""INSERT OR REPLACE INTO gateway_retries (project, agent, {', '.join(RETRY_FIELDS)}, updated_epoch)
-                         VALUES (?, ?, {', '.join('?' * len(RETRY_FIELDS))}, ?)""", [project, agent, *values, now])
+        conn.execute(f"""INSERT OR REPLACE INTO gateway_retries (project, agent, {', '.join(RETRY_FIELDS)}, updated_epoch,
+                         agent_id) VALUES (?, ?, {', '.join('?' * len(RETRY_FIELDS))}, ?, ?)""",
+                     [project, agent, *values, now, agent_id(conn, project, agent)])
     return gateway_retry(conn, project, agent)
 
 
@@ -695,15 +750,15 @@ def drop_gateway_retry(conn, project, agent):
 
 
 def add_gateway_error(conn, pool, project, code, retryable, agent=None, task=None, retry_after=None, at=None, kind=None,
-                      subtype=None, label=None, excerpt=None):
+                      subtype=None, label=None, excerpt=None, agent_id=None):
     """One gateway error; kind, subtype, label and the redacted excerpt come from theseus.gateway.classify."""
     text, epoch = stamp(at)
     with transaction(conn):
         conn.execute("""INSERT INTO gateway_errors (pool, project, agent, task, code, retryable, retry_after, time, epoch,
-                                                    kind, subtype, label, excerpt)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                                    kind, subtype, label, excerpt, agent_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                      (pool, project, agent, task, code, int(bool(retryable)), retry_after, text, epoch, kind, subtype,
-                      label, excerpt))
+                      label, excerpt, id_or_name(conn, project, agent, agent_id)))
 
 
 def gateway_retries(conn):
@@ -828,9 +883,10 @@ def yielding_to(conn, pool, project, priority):
 
 def put_lease(conn, pool, project, agent, task, now, until=None, replace=True):
     verb = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
-    conn.execute(f"""{verb} INTO pool_leases (pool, project, agent, task, seen, seen_epoch, until, until_epoch)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                 (pool, project, agent, task, iso(now), now, iso(until) if until else None, until))
+    conn.execute(f"""{verb} INTO pool_leases (pool, project, agent, task, seen, seen_epoch, until, until_epoch, agent_id)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 (pool, project, agent, task, iso(now), now, iso(until) if until else None, until,
+                  agent_id(conn, project, agent)))
 
 
 def claim(conn, pool, project, now):
@@ -920,7 +976,8 @@ def status(conn, pool, spec=None):
     leases = {}
     by_project = {}
     for row in rows:
-        lease = {"project": row["project"], "agent": row["agent"], "task": row["task"], "seen": row["seen_epoch"]}
+        lease = {"project": row["project"], "agent": row["agent"], "agentId": row["agent_id"], "task": row["task"],
+                 "seen": row["seen_epoch"]}
         if row["until_epoch"] is not None:
             lease["until"] = row["until_epoch"]
         leases[f"{row['project']}/{row['agent']}"] = lease
@@ -930,14 +987,14 @@ def status(conn, pool, spec=None):
             "claims": sorted(claims), "leases": leases, "capCut": cut, "capUntil": until}
 
 
-def add_delivery(conn, project, task, agent=None, handoff=None, result=None, at=None, origin=None):
+def add_delivery(conn, project, task, agent=None, handoff=None, result=None, at=None, origin=None, agent_id=None):
     text, epoch = stamp(at)
     with transaction(conn):
         touch_project(conn, project)
-        cursor = conn.execute("""INSERT OR IGNORE INTO deliveries (project, task, agent, handoff, result, time, epoch, origin)
-                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        cursor = conn.execute("""INSERT OR IGNORE INTO deliveries (project, task, agent, handoff, result, time, epoch, origin,
+                                 agent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                               (project, task, agent, None if handoff is None else str(handoff), result, text, epoch,
-                               origin))
+                               origin, id_or_name(conn, project, agent, agent_id)))
     return cursor.lastrowid if cursor.rowcount else None
 
 
@@ -946,7 +1003,7 @@ def deliveries(conn, project=None, since=None, until=None, task=None, limit=None
     if task is not None:
         where += (" AND" if where else " WHERE") + " task = ?"
         args.append(task)
-    sql = f"SELECT id, project, task, agent, handoff, result, time, epoch FROM deliveries{where} ORDER BY id DESC"
+    sql = f"SELECT id, project, task, agent, agent_id, handoff, result, time, epoch FROM deliveries{where} ORDER BY id DESC"
     if limit:
         sql += f" LIMIT {int(limit)}"
     return [dict(row) for row in reversed(conn.execute(sql, args).fetchall())]
@@ -956,8 +1013,8 @@ def add_sample(conn, project, agent, state, task=None, at=None):
     text, epoch = stamp(at)
     with transaction(conn):
         touch_project(conn, project)
-        conn.execute("INSERT INTO samples (project, agent, time, epoch, state, task) VALUES (?, ?, ?, ?, ?, ?)",
-                     (project, agent, text, epoch, state, task))
+        conn.execute("INSERT INTO samples (project, agent, time, epoch, state, task, agent_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (project, agent, text, epoch, state, task, agent_id(conn, project, agent)))
 
 
 def add_samples(conn, project, rows, at=None):
@@ -965,16 +1022,18 @@ def add_samples(conn, project, rows, at=None):
     text, epoch = stamp(at)
     with transaction(conn):
         touch_project(conn, project)
-        conn.executemany("INSERT INTO samples (project, agent, time, epoch, state, task) VALUES (?, ?, ?, ?, ?, ?)",
-                         [(project, agent, text, epoch, state, task) for agent, state, task in rows])
+        conn.executemany("INSERT INTO samples (project, agent, time, epoch, state, task, agent_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                         [(project, agent, text, epoch, state, task, agent_id(conn, project, agent))
+                          for agent, state, task in rows])
 
 
 def samples(conn, project=None, agent=None, since=None, until=None):
     where, args = filters(project, since, until)
     if agent is not None:
-        where += (" AND" if where else " WHERE") + " agent = ?"
-        args.append(agent)
-    sql = f"SELECT project, agent, time, epoch, state, task FROM samples{where} ORDER BY epoch, id"
+        current = agent_id(conn, project, agent) if project is not None else None
+        where += (" AND" if where else " WHERE") + (" agent_id = ?" if current else " agent = ?")
+        args.append(current or agent)
+    sql = f"SELECT project, agent, agent_id, time, epoch, state, task FROM samples{where} ORDER BY epoch, id"
     return [dict(row) for row in conn.execute(sql, args)]
 
 
@@ -1030,10 +1089,11 @@ def import_events(conn, project, events_file):
             except (ValueError, KeyError, TypeError):
                 continue
             origin = f"{events_file.name}:{number}"
-            cursor = conn.execute("""INSERT OR IGNORE INTO events (project, time, epoch, kind, agent, task, detail, origin)
-                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            cursor = conn.execute("""INSERT OR IGNORE INTO events (project, time, epoch, kind, agent, task, detail, origin,
+                                     agent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                   (project, text, epoch, record.get("kind") or "unknown", record.get("agent"),
-                                   record.get("task"), record.get("detail") or "", origin))
+                                   record.get("task"), record.get("detail") or "", origin,
+                                   agent_id(conn, project, record.get("agent"))))
             added += cursor.rowcount
             if record.get("kind") in DELIVERY_KINDS and record.get("task"):
                 conn.execute("""INSERT OR IGNORE INTO deliveries (project, task, agent, result, time, epoch, origin)

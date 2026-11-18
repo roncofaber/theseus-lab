@@ -79,9 +79,9 @@ def set_paused(conf, value):
     return "queue resumed"
 
 
-def event(conf, kind, agent=None, task=None, detail=""):
+def event(conf, kind, agent=None, task=None, detail="", agent_id=None):
     with store.for_project(conf) as conn:
-        record = store.add_event(conn, conf.name, kind, agent=agent, task=task, detail=detail)
+        record = store.add_event(conn, conf.name, kind, agent=agent, task=task, detail=detail, agent_id=agent_id)
     try:
         with open(queue_dir(conf) / "events.jsonl", "a") as handle:
             handle.write(json.dumps({key: record[key] for key in ("time", "kind", "agent", "task", "detail")}) + "\n")
@@ -218,7 +218,8 @@ def assign_and_send(conf, agent, task):
     suffix = task["id"][:24]
     name = f"{agent['name']}-{suffix}"
     worktree, base, _ = integrate.assign(conf, task["id"], name, provider, "persistent-instance",
-                                         owner=f"{provider}:{agent['name']}:{name}", instance=agent["name"])
+                                         owner=f"{provider}:{agent['name']}:{name}", instance=agent["name"],
+                                         owner_id=agent.get("id"))
     record = (f"Owned paths: {', '.join(task['ownedPaths'])}. Objective: {task['objective']} "
               f"Contract: {task.get('generalContract') or 'not recorded'} Acceptance: {' | '.join(task['acceptance'])}.")
     record += f" Log directory (handoff.md, changed.sha256): {worktree}/{cfg.WORKER_LOG}."
