@@ -395,3 +395,16 @@ class CountPlanTests(unittest.TestCase):
         self.assertEqual([5], supervisor.plan(4, downed)[1])
         replaced = self.members(1, 3, 4, 5, n2={"desired": "down"})
         self.assertEqual(([1, 3], [], [4, 5]), supervisor.plan(2, replaced, started=lambda n: n))
+
+
+class GitLockRetryTests(unittest.TestCase):
+    def test_a_held_index_lock_is_retried_then_succeeds(self):
+        import subprocess
+        from unittest import mock
+        from theseus import gitutil
+        locked = subprocess.CompletedProcess([], 128, "", "fatal: Unable to create '.git/index.lock': File exists.")
+        done = subprocess.CompletedProcess([], 0, "ok", "")
+        with mock.patch.object(gitutil.subprocess, "run", side_effect=[locked, locked, done]) as run, \
+                mock.patch.object(gitutil.time, "sleep"):
+            self.assertEqual("ok", gitutil.git("/repo", "commit", "-m", "x").stdout)
+        self.assertEqual(3, run.call_count)
