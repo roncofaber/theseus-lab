@@ -65,6 +65,33 @@ def base_mismatch(conf, task_id, base):
     return f"the {task_id} record is not committed at {where}: commit {cfg.TASKS} and make {ref} include it"
 
 
+def adopt_rebase(conf, queue, task):
+    """Record the worktree HEAD as the new base when it moved only onto commits of the configured base branch, as a
+    worker rebase does. Returns a message, or None when HEAD is still the base. Refuses when the worker committed."""
+    worktree = Path(task["worktree"])
+    head = g.out(worktree, "rev-parse", "HEAD")
+    base = g.out(conf.root, "rev-parse", task["baseCommit"])
+    if head == base:
+        return None
+    ref = conf.section("git").get("base") or "HEAD"
+    # Resolve in the main checkout: HEAD inside the worktree is the worker's own.
+    tip = g.out(conf.root, "rev-parse", ref)
+    own = int(g.out(conf.root, "rev-list", "--count", f"{tip}..{head}"))
+    if own:
+        raise IntegrationError(f"{task['id']}: the worker committed in its worktree (HEAD {head[:12]}, base {base[:12]}, "
+                               f"{own} commit(s) not on {ref}); workers never commit. Inspect the commits, then reset "
+                               "them into the working tree before merging.", EXIT_CONFLICT)
+    return t.rebase(queue, task["id"], head[:12])
+
+
+def rebase(conf, task_id):
+    queue = t.Queue(conf)
+    task = queue.get(task_id)
+    if not task.get("worktree") or not Path(task["worktree"]).is_dir():
+        raise IntegrationError(f"{task_id} has no live worktree")
+    return adopt_rebase(conf, queue, task) or f"{task_id}: worktree HEAD is still the base {task['baseCommit']}"
+
+
 def create_worktree(conf, name, base):
     worktree = conf.worktrees / name
     if worktree.exists():
@@ -161,8 +188,8 @@ def patch_paths(text):
     return [p for p in paths if p and p != "/dev/null"]
 
 
-def worktree_diff(worktree):
-    excludes = [f":!{cfg.WORKER_LOG}", f":!{cfg.LOCAL_NAME}"]
+def worktree_diff(worktree, exclude=()):
+    excludes = [f":!{cfg.WORKER_LOG}", f":!{cfg.LOCAL_NAME}"] + [f":(exclude,literal){p}" for p in exclude]
     g.git(worktree, "add", "-A", "--intent-to-add", "--", ".", *excludes, check=False)
     try:
         return g.git(worktree, "diff", "--binary", "-M", "HEAD", "--", ".", *excludes).stdout
@@ -173,6 +200,40 @@ def worktree_diff(worktree):
 def worker_patches(worktree, skip=()):
     directory = Path(worktree) / cfg.WORKER_LOG / "patches"
     return [p for p in sorted(directory.glob("*.patch")) if p.name not in skip]
+
+
+def applied_patches(worktree, patches, outside):
+    """Shipped patches the worktree also applied: each touches an outside path and leaves every path it touches exactly
+    as the worktree has it. Returns (matched patches, the paths they cover, one line per patch that differs)."""
+    worktree, outside = Path(worktree), set(outside)
+    matched, covered, mismatches = [], set(), []
+    for patch in patches:
+        paths = sorted(set(patch_paths(patch.read_text(errors="replace"))))
+        if not outside.intersection(paths):
+            continue
+        with tempfile.TemporaryDirectory() as scratch:
+            patched = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "patched")}
+            actual = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "actual")}
+            g.git(worktree, "read-tree", "HEAD", env=patched)
+            applied = g.git(worktree, "apply", "--cached", str(patch), env=patched, check=False)
+            if applied.returncode != 0:
+                mismatches.append(f"{patch.name} does not apply to the worktree base: {applied.stderr.strip()}")
+                continue
+            g.git(worktree, "read-tree", "HEAD", env=actual)
+            present = [p for p in paths if (worktree / p).exists() or (worktree / p).is_symlink()]
+            if present:
+                g.git(worktree, "--literal-pathspecs", "add", "-f", "--", *present, env=actual)
+            gone = [p for p in paths if p not in present]
+            if gone:
+                g.git(worktree, "--literal-pathspecs", "rm", "-q", "--cached", "--ignore-unmatch", "--", *gone, env=actual)
+            entries = lambda env: set(g.out(worktree, "--literal-pathspecs", "ls-files", "-s", "--", *paths, env=env).splitlines())
+            differ = sorted({line.split("\t", 1)[1] for line in entries(patched) ^ entries(actual)})
+        if differ:
+            mismatches.append(f"the worktree changes differ from what {patch.name} applies: {', '.join(differ)}")
+        else:
+            matched.append(patch)
+            covered.update(paths)
+    return matched, covered, mismatches
 
 
 def apply_patches(root, patches, skip=()):
@@ -279,16 +340,22 @@ def merge(conf, task_id, subject=None, accept=(), skip_patches=(), commit=True, 
     if dirty:
         raise IntegrationError("the main checkout has uncommitted changes to tracked files (" + ", ".join(dirty)
                                + "); commit or set them aside first", 2)
-    head = g.out(worktree, "rev-parse", "HEAD")
-    base = g.out(root, "rev-parse", task["baseCommit"])
-    if head != base:
-        raise IntegrationError(f"{task_id}: the worker committed in its worktree (HEAD {head[:12]}, base {base[:12]}); "
-                               "workers never commit. Inspect the commits, then reset them into the working tree before merging.", EXIT_CONFLICT)
+    rebased = adopt_rebase(conf, queue, task)
     lines, outside = t.check_delivery(queue, task_id, accept)
-    if outside:
-        raise IntegrationError("\n".join(lines + ["changes outside ownedPaths; reject them, move them to a patch, or pass --accept PATH"]), EXIT_CONFLICT)
-    diff = worktree_diff(worktree)
     patches = worker_patches(worktree, skip_patches)
+    covered = set()
+    if outside:
+        matched, covered, mismatches = applied_patches(worktree, patches, outside)
+        uncovered = [p for p in outside if p not in covered]
+        if uncovered or mismatches:
+            hint = ["changes outside ownedPaths; reject them, move them to a patch, or pass --accept PATH"] if uncovered else []
+            raise IntegrationError("\n".join(lines + mismatches + hint), EXIT_CONFLICT)
+        lines, _ = t.check_delivery(queue, task_id, [*accept, *covered])
+        lines += [f"the worktree already holds {p.name} ({', '.join(sorted(set(patch_paths(p.read_text(errors='replace')))))}); "
+                  "applying it once" for p in matched]
+    if rebased:
+        lines.insert(0, rebased)
+    diff = worktree_diff(worktree, covered)
     touched = set(patch_paths(diff))
     for patch in patches:
         touched.update(patch_paths(patch.read_text(errors="replace")))

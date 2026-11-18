@@ -161,5 +161,51 @@ class TaskFlowTests(Sandbox):
         self.assertFalse((self.project / "README.md").exists())
         self.assertEqual("in_progress", self.record()["status"])
 
+    def test_merge_adopts_a_rebase_onto_main_but_refuses_worker_commits(self):
+        self.add_task()
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        worktree = self.tmp / "worktrees/worker-1-a"
+        self.git("rebase", "-q", "main", cwd=worktree)
+        head = self.git("rev-parse", "--short=12", "HEAD", cwd=worktree).stdout.strip()
+        self.assertNotEqual(head, self.record()["baseCommit"])
+        self.write("notes.txt", "a worker commit\n", root=worktree)
+        self.git("add", "notes.txt", cwd=worktree)
+        self.git("commit", "-q", "-m", "worker commit", cwd=worktree)
+        for command in (("tasks", "rebase", TASK), ("merge", TASK)):
+            refused = self.theseus(*command, check=False)
+            self.assertEqual(3, refused.returncode, refused.stdout + refused.stderr)
+            self.assertIn("workers never commit", refused.stderr)
+        self.git("reset", "-q", "--hard", "HEAD~1", cwd=worktree)
+        self.assertIn(head, self.theseus("tasks", "rebase", TASK).stdout)
+        self.assertEqual(head, self.record()["baseCommit"])
+        from theseus import config as cfg, workqueue
+        events = workqueue.events(cfg.load(root=self.project), task=TASK, kinds=["rebased"])
+        self.assertEqual(1, len(events))
+        self.git("commit", "-q", "-am", "record the rebase")
+        self.git("rebase", "-q", "main", cwd=worktree)
+        self.deliver(worktree)
+        merge = self.theseus("merge", TASK).stdout
+        self.assertIn("rebased", merge)
+        self.assertEqual("merged", self.record()["status"])
+
+    def test_a_patch_also_applied_in_the_worktree_merges_once(self):
+        self.add_task()
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        worktree = self.tmp / "worktrees/worker-1-a"
+        self.deliver(worktree)
+        self.write("README.md", "# demo-port, edited after the patch\n", root=worktree)
+        refused = self.theseus("merge", TASK, check=False)
+        self.assertEqual(3, refused.returncode, refused.stdout + refused.stderr)
+        self.assertIn("01-readme.patch", refused.stderr)
+        self.assertIn("README.md", refused.stderr)
+        self.write("README.md", "# demo-port\n", root=worktree)
+        merge = self.theseus("merge", TASK).stdout
+        self.assertIn("01-readme.patch", merge)
+        self.assertEqual("# demo-port\n", (self.project / "README.md").read_text())
+        commit = self.record()["merge"]["commit"]
+        self.assertIn("README.md", self.git("show", "--name-only", "--format=", commit).stdout.split())
+        self.assertEqual("", self.git("status", "--porcelain").stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

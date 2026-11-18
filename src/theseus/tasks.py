@@ -396,6 +396,19 @@ def reopen(queue, task_id, reason):
     return f"{task_id} -> in_progress again ({reason})"
 
 
+def rebase(queue, task_id, base):
+    """Record a new base after the worker moved its worktree HEAD along the base branch."""
+    document = queue.load()
+    task = queue.open_task(document, task_id)
+    if task["status"] not in ("in_progress", "verification"):
+        raise TaskError(f"{task_id} is {task['status']}; only an assigned or delivered task can be rebased")
+    old = task.get("baseCommit")
+    task["baseCommit"] = base
+    queue.save(document)
+    record(queue, "rebased", task, f"base {old} -> {base}")
+    return f"{task_id}: worktree rebased, base {old} -> {base}"
+
+
 def mark_merged(queue, task_id, commit):
     document = queue.load()
     task = queue.open_task(document, task_id)

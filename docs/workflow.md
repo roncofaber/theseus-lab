@@ -33,7 +33,7 @@ Original software, decompiled code, captures, logs and worktrees live in the dat
 2. **Assign.** `theseus tasks ready` lists tasks whose dependencies are done and that belong to the current milestone. A task is started as a one-shot run (`theseus dispatch ID`) or given to a long-running agent (`theseus queue`, below).
 3. **Work.** The worker edits only its owned files in its worktree. Changes to shared files (a build file, for example) go in `.theseus/patches/` as patches. It never commits.
 4. **Hand off.** The worker writes `.theseus/handoff.md`: the result (`delivered`, `partial` or `blocked`), changed files with hashes, the exact checks it ran with their output, and known limits.
-5. **Merge.** `theseus merge ID` checks that only owned files changed and the worker did not commit, applies the work and its patches, and commits. Any conflict leaves the main checkout untouched.
+5. **Merge.** `theseus merge ID` checks that only owned files changed and the worker did not commit, applies the work and its patches, and commits. Any conflict leaves the main checkout untouched. A worktree HEAD moved only onto commits of the base branch (a rebase) is recorded as the new base, as `theseus tasks rebase ID` does by hand. Outside-owned changes that equal what a shipped patch applies are merged once, as that patch.
 6. **Verify.** `theseus verify` runs the configured build and test commands on a clean checkout of the commit and writes a log.
 7. **Complete.** `theseus tasks complete ID --from-log LOG` closes the task; `theseus tasks archive` moves it out of the open list.
 

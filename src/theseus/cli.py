@@ -248,6 +248,9 @@ def cmd_tasks(args):
         emit(t.reopen(queue, args.id, args.reason))
     elif action == "merged":
         emit(t.mark_merged(queue, args.id, args.commit))
+    elif action == "rebase":
+        from . import integrate
+        emit(integrate.rebase(conf, args.id))
     elif action == "observe":
         emit(t.observe(queue, args.id, args.how, "userTested" if args.user else "observed"))
     elif action == "complete":
@@ -1021,6 +1024,9 @@ def build_parser():
     p = ts.add_parser("reopen", help="undo a premature delivery (verification back to in_progress)")
     p.add_argument("id")
     p.add_argument("--reason", required=True)
+    p = ts.add_parser("rebase", help="record the worktree HEAD as the task base after the worker rebased onto the base "
+                                     "branch; refuses when the worker committed")
+    p.add_argument("id")
     p = ts.add_parser("merged", help="record a merge the coordinator committed by hand")
     p.add_argument("id")
     p.add_argument("--commit", required=True)
