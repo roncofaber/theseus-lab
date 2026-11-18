@@ -26,8 +26,8 @@ SUPERVISOR_DEFAULTS = {"socket": "theseus", "size": "220x50", "history_limit": 5
                        "env_passthrough": [], "launch_shell": "exec", "ready_seconds": 90,
                        "restart": {"backoff_seconds": [5, 30, 120, 600], "max_crashes": 5, "window_minutes": 30}}
 GATEWAY_DEFAULTS = {"breaker_errors": 3, "breaker_window_minutes": 10, "strong_codes": [530], "parallel_cap_step": 1,
-                    "parallel_cap_minutes": 10}
-POOL_KEYS = ("max", "priority")
+                    "parallel_cap_minutes": 10, "cap_step_up_minutes": 10}
+POOL_KEYS = ("max", "priority", "tokens_per_minute", "turns_per_minute")
 STORE_KEYS = {"retention": ("samples_days", "events_days", "deliveries_days", "runs_days", "gateway_days"), "backups": ("directory", "daily", "weekly")}
 
 
@@ -187,11 +187,20 @@ def validate(data, file, profile_problems, tool_names=None):
             errors.append(f"{file}: [workers] {name} is not a profile table; the host [workers] holds only [workers.<name>] profiles{hint}")
             continue
         errors += [f"{file}: [workers.{name}] {problem}" for problem in profile_problems(name, value)]
+        fallback = value.get("fallback")
+        if isinstance(fallback, str) and fallback and fallback != name and not isinstance((data.get("workers") or {}).get(fallback), dict):
+            from . import profiles
+            if fallback not in profiles.PRESETS:
+                errors.append(f"{file}: [workers.{name}] fallback {fallback!r} is not a profile of this file or a preset")
     for name, value in (data.get("pools") or {}).items():
         if not isinstance(value, dict):
             errors.append(f"{file}: [pools] {name} must be a table [pools.{name}] with {', '.join(POOL_KEYS)}")
             continue
         errors += [f"{file}: [pools.{name}] unknown key {key}; known: {', '.join(POOL_KEYS)}" for key in value if key not in POOL_KEYS]
+        for key in ("tokens_per_minute", "turns_per_minute"):
+            number = value.get(key)
+            if number is not None and (isinstance(number, bool) or not isinstance(number, (int, float)) or number <= 0):
+                errors.append(f"{file}: [pools.{name}] {key} must be a positive number")
     for section, value in (data.get("store") or {}).items():
         if section not in STORE_KEYS or not isinstance(value, dict):
             errors.append(f"{file}: [store] unknown key {section}; known tables: {', '.join(f'[store.{s}]' for s in STORE_KEYS)}")

@@ -810,16 +810,37 @@ def pause_gateway(conn, pool, until, reason, now=None):
 CAP_INCIDENT_SECONDS = 60
 
 
-def cut_cap(conn, pool, step, seconds, limit, now=None):
-    """Lower a pool's working cap by step for seconds, never below one slot of `limit`; returns the cut in force. A
-    cut that started less than CAP_INCIDENT_SECONDS ago is the same incident (several agents hit by one burst): it is
-    only extended. A later error while the cut is in force deepens it by step."""
+def cap_step_seconds():
+    from . import hostconfig
+    return float(hostconfig.gateway().get("cap_step_up_minutes") or 0) * 60
+
+
+def effective_cut(cut, until, now, step_seconds):
+    """(slots cut at now, epoch of the next step up or None): the full cut holds until `until`, then the cap rises one
+    slot at a time, one every step_seconds (all at once when step_seconds is 0)."""
+    cut = int(cut or 0)
+    if not cut or until is None:
+        return 0, None
+    if now < until:
+        return cut, until
+    if step_seconds <= 0:
+        return 0, None
+    steps = 1 + int((now - until) // step_seconds)
+    left = max(0, cut - steps)
+    return left, (until + steps * step_seconds if left else None)
+
+
+def cut_cap(conn, pool, step, seconds, limit, now=None, step_seconds=None):
+    """Lower a pool's working cap by step and hold it for seconds, never below one slot of `limit`; returns the cut in
+    force. A cut that started less than CAP_INCIDENT_SECONDS ago is the same incident (several agents hit by one burst):
+    it is only extended. A later error deepens the cut in force (after a partial step up, from where it stands)."""
     now = time.time() if now is None else now
+    step_seconds = cap_step_seconds() if step_seconds is None else step_seconds
     with transaction(conn):
         current = gateway_pool(conn, pool)
         until = current.get("cap_until") or 0
-        running = (current.get("cap_cut") or 0) if until > now else 0
-        if running and now - (until - seconds) < CAP_INCIDENT_SECONDS:
+        running, _ = effective_cut(current.get("cap_cut"), until or None, now, step_seconds)
+        if running and until > now and now - (until - seconds) < CAP_INCIDENT_SECONDS:
             cut = running
         else:
             cut = max(0, min(running + step, limit - 1)) if limit else 0
@@ -829,13 +850,13 @@ def cut_cap(conn, pool, step, seconds, limit, now=None):
     return cut
 
 
-def cap_cut(conn, pool, now=None):
-    """(slots cut, until) of a pool's cap cut in force, or (0, None)."""
+def cap_cut(conn, pool, now=None, step_seconds=None):
+    """(slots cut, epoch of the next step up) of a pool's cap cut in force, or (0, None)."""
     now = time.time() if now is None else now
     row = conn.execute("SELECT cap_cut, cap_until FROM gateway_pools WHERE pool = ?", (pool,)).fetchone()
-    if row and row[0] and (row[1] or 0) > now:
-        return int(row[0]), row[1]
-    return 0, None
+    if not row or not row[0]:
+        return 0, None
+    return effective_cut(row[0], row[1], now, cap_step_seconds() if step_seconds is None else step_seconds)
 
 
 def gateway_success(conn, pool, at=None):
@@ -846,14 +867,14 @@ def gateway_success(conn, pool, at=None):
                      (pool, epoch))
 
 
-def pool_spec(pool, spec, conn=None):
+def pool_spec(pool, spec, conn=None, now=None):
     """(working cap, priority) of a pool; with conn the cap is lowered by a cap cut in force (cut_cap)."""
     if spec is None:
         from . import pools
         spec = pools.definitions().get(pool, {})
     limit = int(spec.get("max") or 0)
     if conn is not None and limit:
-        limit = max(1, limit - cap_cut(conn, pool)[0])
+        limit = max(1, limit - cap_cut(conn, pool, now)[0])
     return limit, list(spec.get("priority") or [])
 
 

@@ -28,9 +28,16 @@ is read before the pane, and profiles without an adapter use the pane alone), el
 Cloudflare's error_name or its status; a connection or server error mid-response is retryable without a status. Every
 error is stored with a short excerpt whose API keys, key hashes and email addresses are redacted.
 
-A 429 parallel cap means the shared key's parallel requests are exhausted: besides the staggered resend, the pool's
-working cap is lowered host-wide by [gateway] parallel_cap_step for parallel_cap_minutes (pools.status shows the cut),
-and the error does not count toward the breaker. Model capacity 429s and 529s back off per agent and feed the breaker.
+A key-level 429 (scope "key": the shared key's parallel cap, `Rate limit exceeded for api_key`, or a per-minute rate
+limit of the account) is rate, never health: besides the staggered resend, the pool is paused for the first backoff
+(no resends, nudges or new tasks on it, host-wide), its working cap is lowered by [gateway] parallel_cap_step and held
+for parallel_cap_minutes, then raised one slot every cap_step_up_minutes (pools.status shows the cut), and while a cut
+is in force the newest working agents of the pool beyond the cap get no input at all (theseus.pools.turn_plan). It never
+counts toward the breaker or a profile's health. Model capacity 429s and 529s back off per agent and feed the breaker.
+
+Model-level errors (any 5xx, a connection lost or server error mid-response) of a profile with a fallback
+([workers.<name>] fallback in the host file) go to its health instead of the breaker (theseus.health): they can mark it
+down and move its agents to the fallback.
 """
 import re
 import time
@@ -58,6 +65,7 @@ STATUS_NAMES = {400: "bad request", 401: "unauthorized", 403: "forbidden", 404: 
                 504: "gateway timeout", 520: "origin error", 521: "origin down", 522: "connect timeout",
                 523: "origin unreachable", 524: "origin timeout", 529: "overloaded", 530: "tunnel down"}
 PARALLEL_CAP = "parallel cap"
+KEY_LEVEL = re.compile(r"for\s*api[_ ]?key|exceeded your (?:[\w-]+ )?rate limit|max_parallel_requests", re.IGNORECASE)
 
 
 def scrub(text):
@@ -87,12 +95,15 @@ def classify(text, kind=None):
     elif status == 429 or kind == "rate_limit":
         model = field(r"[Mm]odel capacity reached for ([^\s,]+?)\.?(?:\s|$)", text)
         window = field(r"[Rr]ate limit type:\s*(\w+)", text)
+        limit_type = field(r"[Ll]imit type:\s*(\w+)", text)
         if "max_parallel_requests" in text:
             subtype = PARALLEL_CAP
         elif model or re.search(r"Model [TR]PM", text):
             subtype = f"model {'RPM' if window == 'requests' else 'TPM'}" + (f" ({model})" if model else "")
         elif usage := field(r"hit your ([\w-]+) limit", text):
             subtype = f"{usage} usage limit"
+        elif KEY_LEVEL.search(text):
+            subtype = f"key rate ({limit_type})" if limit_type else "key rate"
         else:
             subtype = "rate limit"
         kind = kind or "rate_limit"
@@ -115,7 +126,16 @@ def classify(text, kind=None):
         kind, label = kind or "unknown", "unknown (resend marker)"
     retryable = not FATAL_TEXT.search(text) and (status is None or status == 429 or 500 <= status <= 599)
     return {"status": status, "kind": kind, "subtype": subtype, "label": label, "retryable": retryable,
-            "excerpt": redact(text)}
+            "scope": scope_of(status, kind, subtype), "excerpt": redact(text)}
+
+
+def scope_of(status, kind, subtype):
+    """key for a 429 of the shared key (rate, not health), model for a model-level failure, else None."""
+    if subtype == PARALLEL_CAP or str(subtype or "").startswith("key rate"):
+        return "key"
+    if kind == "connection_lost" or (status is None and kind == "server_error") or (status is not None and 500 <= status <= 599):
+        return "model"
+    return None
 
 
 def settings(conf):
@@ -156,6 +176,7 @@ def parse(lines):
     if code is None:
         code = typed["status"]
     return {"code": code, "error_type": error_type, "kind": typed["kind"], "subtype": typed["subtype"],
+            "scope": typed["scope"] if code == typed["status"] else scope_of(code, typed["kind"], None),
             "label": typed["label"] if code == typed["status"] else f"{code} {STATUS_NAMES.get(code, 'error')}",
             "excerpt": typed["excerpt"],
             "retry_after": field(r'"retry_after"\s*:\s*(\d+(?:\.\d+)?)', tail, float),
@@ -201,6 +222,7 @@ def detect(conf, profile, screen, transcript_error=None):
     if transcript_error and transcript_error.get("text"):
         typed = classify(transcript_error["text"], transcript_error.get("error"))
         info.update({"code": typed["status"], "kind": typed["kind"], "subtype": typed["subtype"], "label": typed["label"],
+                     "scope": typed["scope"],
                      "excerpt": typed["excerpt"], "source": "transcript",
                      "fatal_text": bool(FATAL_TEXT.search(transcript_error["text"]))})
         info["signature"] = info["signature"] or redact(typed["excerpt"], 160)
@@ -266,11 +288,15 @@ def stale(conf, agent_name, info):
 
 
 def breaker(conf, conn, pool, code, retry_after, now):
-    """Pause the pool when the host saw enough retryable errors on it; returns (until, started, count) or None."""
+    """Pause the pool when the host saw enough retryable errors on it; returns (until, started, count) or None. Key-level
+    429s and the model-level errors a profile's health took (theseus.health) do not count."""
+    from . import health
     host = hostconfig.gateway()
     window = float(host["breaker_window_minutes"]) * 60
+    taken = health.error_agents(conn, since=now - window)
     count = len({(e["project"], e["agent"]) for e in store.gateway_errors(conn, pool, since=now - window, retryable=True)
-                 if e.get("subtype") != PARALLEL_CAP})
+                 if scope_of(e.get("code"), e.get("kind"), e.get("subtype")) != "key"
+                 and (e["project"], e["agent"]) not in taken})
     strong = code is not None and code in [int(x) for x in host.get("strong_codes") or []]
     if count < int(host["breaker_errors"]) and not strong:
         return None
@@ -286,9 +312,10 @@ def typed(error):
             "excerpt": error.get("excerpt")}
 
 
-def cap_pool(conn, pool, now):
-    """Lower the pool's working cap host-wide after a 429 parallel cap ([gateway] parallel_cap_step slots for
-    parallel_cap_minutes); returns the event detail, or '' for a pool without a configured cap."""
+def cap_pool(conn, pool, now, why="a 429 parallel cap"):
+    """Lower the pool's working cap host-wide after a key-level 429 ([gateway] parallel_cap_step slots, held for
+    parallel_cap_minutes, then raised a slot every cap_step_up_minutes); returns the event detail, or '' for a pool
+    without a configured cap."""
     from . import pools
     limit = int(pools.spec_of(pool).get("max") or 0)
     if not limit:
@@ -296,7 +323,9 @@ def cap_pool(conn, pool, now):
     host = hostconfig.gateway()
     until = now + float(host["parallel_cap_minutes"]) * 60
     cut = store.cut_cap(conn, pool, int(host["parallel_cap_step"]), until - now, limit, now=now)
-    return f"pool {pool} working cap {limit - cut}/{limit} until {store.iso(until)} after a 429 parallel cap" if cut else ""
+    step = store.cap_step_seconds()
+    raise_text = f", then one slot every {step / 60:g} min" if step else ""
+    return f"pool {pool} working cap {limit - cut}/{limit} held until {store.iso(until)}{raise_text} after {why}" if cut else ""
 
 
 def prompt_file(conf, task):
@@ -376,6 +405,8 @@ def recover(conf, agent, task, fresh, reason, text=None):
 
 def handle(conf, agent, info, now=None):
     """Advance one agent's gateway episode for this tick. Returns the events it recorded."""
+    from . import health
+    from . import pools
     from . import tasks as t
     from . import workqueue
     now = time.time() if now is None else now
@@ -404,7 +435,7 @@ def handle(conf, agent, info, now=None):
     if phase == "exhausted":
         return []
     if phase == "waiting":
-        if now < (row["next_epoch"] or 0) or paused_until(pool, now):
+        if now < (row["next_epoch"] or 0) or paused_until(pool, now) or pools.turn_held(conf.name, pool, name, now):
             return []
         attempt, errors = row["attempt"], row["errors"]
         tokens = info.get("contextTokens") or 0
@@ -426,20 +457,33 @@ def handle(conf, agent, info, now=None):
         return [workqueue.event(conf, "stalled", name, task_id, f"{tag} x{attempt}: still failing after {attempt} resends")]
     wait = delay(conf, attempt, code, error.get("retry_after"))
     recorded = []
+    scope = error.get("scope") or scope_of(code, error.get("kind"), error.get("subtype"))
+    key_level = scope == "key"
+    to_health = scope == "model" and health.has_fallback(profile)
+    strong = code is not None and code in [int(x) for x in hostconfig.gateway().get("strong_codes") or []]
     with store.for_project(conf) as conn:
         if code == 429 and section["stagger_seconds"]:
             wait = max(wait, stagger(conn, pool, now, section["stagger_seconds"]) - now)
         store.add_gateway_error(conn, pool, conf.name, code, True, agent=name, task=task_id,
                                 retry_after=error.get("retry_after"), at=now, **typed(error))
-        cut = cap_pool(conn, pool, now) if error.get("subtype") == PARALLEL_CAP else ""
+        cut = cap_pool(conn, pool, now, f"a key-level {error.get('label') or '429'}") if key_level else ""
+        paused = None
+        if key_level:
+            until = now + delay(conf, 0, code, error.get("retry_after"))
+            if store.pause_gateway(conn, pool, until, f"key-level {error.get('label') or '429'}: turns paused", now=now):
+                paused = (until, True, f"key-level {error.get('label') or '429'}; resends resume oldest task first")
         store.put_gateway_retry(conn, conf.name, name, now=now, task=task_id, pool=pool, code=code, phase="waiting",
                                 attempt=attempt, errors=errors, retry_after=error.get("retry_after"),
                                 next_epoch=now + wait, signature=error["signature"], recovered=0)
-        tripped = None if error.get("subtype") == PARALLEL_CAP else breaker(conf, conn, pool, code, error.get("retry_after"), now)
+    down = health.record_error(conf.name, profile, name, error.get("label") or str(code or "?"), now=now) if to_health else None
+    with store.for_project(conf) as conn:
+        tripped = paused if key_level else (None if to_health and not strong else
+                                            breaker(conf, conn, pool, code, error.get("retry_after"), now))
     after = f", retry_after {error['retry_after']:g}s" if error.get("retry_after") else ""
     recorded.append(workqueue.event(conf, "gateway_error", name, task_id,
                                     f"code {code or '?'} attempt {attempt + 1}/{attempts}, next retry at "
-                                    f"{store.iso(now + wait)} (in {wait:g}s{after}) · {error.get('label') or code or '?'}"))
+                                    f"{store.iso(now + wait)} (in {wait:g}s{after}) · {error.get('label') or code or '?'}"
+                                    + (f"; profile {profile} marked down: {down}" if down else "")))
     if cut:
         recorded.append(workqueue.event(conf, "gateway_capped", name, task_id, cut))
     if tripped and tripped[1]:
@@ -477,19 +521,20 @@ def health(now=None, window=24 * 3600):
     with store.for_host() as conn:
         pools = {row["pool"]: row for row in store.gateway_pools(conn)}
         errors = store.gateway_errors(conn, since=now - window)
+        cuts = {name: store.cap_cut(conn, name, now) for name in pools}
     names = sorted(set(pools) | {e["pool"] for e in errors})
     found = []
     for name in names:
         mine = [e for e in errors if e["pool"] == name]
         row = pools.get(name) or {}
         until = row.get("paused_until")
-        cut = row.get("cap_cut") if (row.get("cap_until") or 0) > now else 0
+        cut, cut_until = cuts.get(name, (0, None))
         found.append({"pool": name, "codes": [e["code"] for e in mine[-8:]], "errors": len(mine),
                       "labels": [e.get("label") or (str(e["code"]) if e["code"] else "unknown (resend marker)")
                                  for e in mine[-8:]],
                       "lastError": mine[-1]["epoch"] if mine else None, "lastSuccess": row.get("last_success"),
                       "pausedUntil": until if until and until > now else None, "reason": row.get("reason"),
-                      "capCut": cut or 0, "capUntil": row.get("cap_until") if cut else None})
+                      "capCut": cut or 0, "capUntil": cut_until if cut else None})
     return [entry for entry in found if entry["errors"] or entry["pausedUntil"] or entry["capCut"]]
 
 
@@ -506,6 +551,7 @@ def recent(now=None, window=24 * 3600, limit=40, attempts=None):
         errors = store.gateway_errors(conn, since=now - window)
         retries = {(row["project"], row["agent"]): row for row in store.gateway_retries(conn)}
         pools = {row["pool"]: row for row in store.gateway_pools(conn)}
+        cuts = {name: store.cap_cut(conn, name, now) for name in pools}
     counted = {}
     for error in errors:
         key = (error["project"], error["agent"], error["task"])
@@ -533,8 +579,8 @@ def recent(now=None, window=24 * 3600, limit=40, attempts=None):
                       "label": error.get("label") or (f"{error['code']} {STATUS_NAMES.get(error['code'], 'error')}"
                                                       if error["code"] else "unknown (resend marker)"),
                       "pausedUntil": pool.get("paused_until") if (pool.get("paused_until") or 0) > now else None,
-                      "capCut": pool.get("cap_cut") if (pool.get("cap_until") or 0) > now else 0,
-                      "capUntil": pool.get("cap_until") if (pool.get("cap_until") or 0) > now else None})
+                      "capCut": cuts.get(error["pool"], (0, None))[0],
+                      "capUntil": cuts.get(error["pool"], (0, None))[1]})
         if len(found) >= limit:
             break
     return found

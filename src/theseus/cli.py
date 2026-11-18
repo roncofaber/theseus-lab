@@ -859,10 +859,18 @@ def cmd_pool(args):
     for name in names:
         info = pools.status(name)
         projects = ", ".join(f"{p} {n}" for p, n in sorted(info["projects"].items())) or "none"
-        print(f"{name}: {info['active']}/{info['max'] or '-'} working ({projects}); priority {' > '.join(info['priority']) or '-'}; "
-              f"claims {', '.join(info['claims']) or 'none'}")
+        cut = f" (cap cut -{info['capCut']})" if info.get("capCut") else ""
+        budget = f"; tokens {info['estimate']:,}/{int(info['budget']):,} per min (estimate)" if info.get("budget") else ""
+        print(f"{name}: {info['active']}/{info['max'] or '-'} working{cut} ({projects}); priority {' > '.join(info['priority']) or '-'}; "
+              f"claims {', '.join(info['claims']) or 'none'}{budget}")
         for lease in sorted(info["leases"].values(), key=lambda v: (v["project"], v["agent"])):
-            print(f"  {lease['project']:<16} {lease['agent']:<20} {lease['task']}")
+            held = "  (turns held)" if f"{lease['project']}/{lease['agent']}" in info.get("held", []) else ""
+            print(f"  {lease['project']:<16} {lease['agent']:<20} {lease['task']}{held}")
+    from . import health, top
+    for entry in health.snapshot():
+        state = top.fallback_text(entry) if entry["onFallback"] or entry["state"] == "down" else \
+            f"profile {entry['profile']} healthy (fallback {entry['fallback'] or 'none'})"
+        print(state)
 
 
 def cmd_queue(args):

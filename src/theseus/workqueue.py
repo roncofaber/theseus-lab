@@ -8,7 +8,8 @@ A tick looks at every registered agent and acts on its state:
   `stalled` event at once and no nudge, since typing more into that context only refills it;
 - gateway_error (an idle pane shows a gateway error of its profile): retried with backoff, a fresh context when needed
   and a host-wide circuit breaker (theseus.gateway); a `stalled` event once the resends run out, an `error` event at
-  once for a fatal error;
+  once for a fatal error; while the agent's profile is on fallback (theseus.health) its task is released instead, with
+  the worktree kept, for an agent of the fallback to take;
 - free (enabled, not stopped by `theseus agents down`, no open task, its gateway pool not paused): if a ready task fits its room, the agent is reset (a full
   /clear when it carries dirty context into clean work, a /compact otherwise), the task is assigned on a fresh
   worktree, and its message is sent. A task message that cannot be typed (the pane is gone) rolls the assignment back:
@@ -20,6 +21,10 @@ A task with a "profile" goes only to agents registered with that profile, or to 
 MCP servers or environment: those are relaunched onto it in their pane first (session resumed, a `relaunched` event),
 and back onto their registered profile before their next task that does not need it. The profile an agent currently
 runs is kept in the runtime state (`launched`).
+Each tick first runs the host's model health checks (theseus.health: probes that are due, switches onto or back from a
+fallback, one `fallback` event per switch in each project that uses the profile). Agents whose pool holds their turns
+(theseus.pools.turn_plan: the newest working agents beyond a cut working cap or the pool's token budget) get nothing
+typed into them and the pool starts no new task meanwhile.
 Tasks with "hold": true are never assigned by the queue; `theseus queue pause` stops all assignment. Events go to the
 host store (theseus.store); `theseus queue wait` blocks until one needs the coordinator. Every message the queue types
 (task messages, nudges, gateway resends, restart prompts) goes through agents.send_verified, which confirms the agent
@@ -51,7 +56,7 @@ from . import store
 from . import tasks as t
 from . import upgrade
 
-ATTENTION = {"delivered", "partial", "blocked", "stalled", "error"}
+ATTENTION = {"delivered", "partial", "blocked", "stalled", "error", "fallback"}
 
 
 def queue_dir(conf):
@@ -157,8 +162,9 @@ def fits(conf, agent, task, info, gate=True):
     minCapability is met by the agent's registered profile and, when the task names another profile it is relaunched
     onto, by that profile too; an agent registered with exactly the task's profile always qualifies. gate=False skips
     the capability check (the console uses it to name capability as the reason a task waits)."""
+    from . import health
     from . import profiles
-    required = task.get("profile")
+    required = health.substitute(task.get("profile"))
     registered = registered_profile(conf, agent)
     if required and not profiles.relaunch_compatible(conf, registered, required):
         return False, None
@@ -257,6 +263,7 @@ def assign_and_send(conf, agent, task):
         record += f" Log directory (handoff.md, changed.sha256): {worktree}/{cfg.WORKER_LOG}."
         if task.get("assignmentNote"):
             record += f" Coordinator notes: {task['assignmentNote']}"
+        record += kept_work_note(task)
         record += rooms.message(conf, task)
         deadline = conf.section("queue").get("deadline") or ""
         text = task_message(conf, task["id"], worktree, record, deadline, launched(conf, agent))
@@ -270,6 +277,41 @@ def assign_and_send(conf, agent, task):
                                                 "thrashing": None})
     save_runtime(conf, state)
     return True, str(worktree)
+
+
+FALLBACK_RELEASE = "fallback:"
+
+
+def kept_work_note(task):
+    """A pointer to the worktree of an attempt released because its profile went down, when it still exists."""
+    from pathlib import Path
+    last = (task.get("previousAttempts") or [{}])[-1]
+    kept = last.get("worktree")
+    if not str(last.get("reason") or "").startswith(FALLBACK_RELEASE) or not kept or not Path(kept).is_dir():
+        return ""
+    return (f" A previous attempt stopped by a model outage left its work in {kept}; check its git status and diff and "
+            f"carry over what is useful before redoing it.")
+
+
+def release_for_fallback(conf, agent, task_id, profile, fallback):
+    """Release the task of an agent stuck on a gateway error while its profile is on fallback: the worktree stays
+    (the next attempt is pointed at it), the retry episode and any owed prompt are dropped and the record committed."""
+    from . import integrate
+    reason = f"{FALLBACK_RELEASE} profile {profile} is down; the task moves to an agent of {fallback}"
+    start = last_event_id(conf)
+    try:
+        t.release(t.Queue(conf), task_id, reason)
+    except t.TaskError as error:
+        return [event(conf, "error", agent["name"], task_id, f"release after {profile} went down failed: {error}")]
+    with store.for_project(conf) as conn:
+        store.drop_gateway_retry(conn, conf.name, agent["name"])
+    drop_owed(conf, agent["name"])
+    try:
+        integrate.commit_record(conf, f"chore: release {task_id} (profile {profile} down)")
+    except Exception as error:
+        event(conf, "error", agent["name"], task_id, f"released after {profile} went down, but the record was not "
+                                                     f"committed: {error}")
+    return events(conf, after_id=start)
 
 
 def roll_back(conf, task_id, name, worktree, base, reason):
@@ -335,7 +377,10 @@ def tick(conf, assign=True):
     with locked(conf), ag.batched(send_budget(conf)) as sends:
         try:
             from . import gateway
+            from . import health
             from . import pools
+            recorded.extend(check_health(conf))
+            active = health.fallbacks()
             recorded.extend(supervise(conf))
             registered = ag.agents(conf)
             recorded.extend(resume_sends(conf, registered, sends))
@@ -349,6 +394,7 @@ def tick(conf, assign=True):
                             held[a["name"]] = current["id"]
                 pools.sync(conf, pool, held)
             waiting_on_pool = set()
+            working = {}
             for agent in registered:
                 press_enter(sends, sends.items, wait=False)
                 info = ag.state(conf, agent)
@@ -362,15 +408,29 @@ def tick(conf, assign=True):
                     recorded.append(events(conf, 1)[-1])
                     drop_owed(conf, name)
                     info = ag.state(conf, agent)
+                pool_name = gateway.pool_key(conf, launched(conf, agent))
+                if info["task"]:
+                    working[name] = info
+                    recorded.extend(note_turn(conf, name, info["task"], pools.turn_held(conf.name, pool_name, name)))
+                elif runtime(conf).get(name, {}).get("turn_held"):
+                    state = runtime(conf)
+                    state[name].pop("turn_held", None)
+                    save_runtime(conf, state)
                 if name in sends.agents() or owed(conf, name):
-                    if name not in sends.agents():
+                    if name not in sends.agents() and not pools.turn_held(conf.name, pool_name, name):
                         recorded.extend(try_owed(conf, agent, info))
                     samples.append((name, info["state"], info["task"]))
+                    continue
+                fallback = active.get(launched(conf, agent))
+                if info["state"] == "gateway_error" and fallback and agent.get("managed"):
+                    recorded.extend(release_for_fallback(conf, agent, task_id, launched(conf, agent), fallback))
+                    working.pop(name, None)
+                    samples.append((name, info["state"], None))
                     continue
                 if info["state"] == "gateway_error":
                     recorded.extend(gateway.handle(conf, agent, info))
                 elif info["state"] == "stalled":
-                    if gateway.paused_until(gateway.pool_key(conf, launched(conf, agent))):
+                    if gateway.paused_until(pool_name) or pools.turn_held(conf.name, pool_name, name):
                         pass
                     elif runtime(conf).get(name, {}).get("nudged") != task_id:
                         if nudge(conf, agent, t.Queue(conf).get(task_id), info):
@@ -407,7 +467,9 @@ def tick(conf, assign=True):
                     continue
                 if agent.get("managed") and agent.get("desired") in ("down", "retire"):
                     continue
-                if gateway.paused_until(gateway.pool_key(conf, launched(conf, agent))):
+                if gateway.paused_until(pool_name):
+                    continue
+                if active.get(registered_profile(conf, agent)):
                     continue
                 from . import profiles as pf
                 used, capacity = t.capacity_use(conf).get(agent.get("provider") or pf.default_name(conf), (0, None))
@@ -418,6 +480,12 @@ def tick(conf, assign=True):
                     continue
                 pool = pool_names.get(name)
                 if pool:
+                    allowed, why = pools.may_add_turn(pool, (info.get("context") or {}).get("tokens"))
+                    if not allowed:
+                        state = runtime(conf)
+                        state.setdefault(name, {})["pool_wait"] = why
+                        save_runtime(conf, state)
+                        continue
                     allowed, why = pools.acquire(conf, pool, name, task["id"])
                     if not allowed:
                         waiting_on_pool.add(pool)
@@ -428,7 +496,7 @@ def tick(conf, assign=True):
                 claimed.add(task["id"])
                 ok = False
                 try:
-                    target = task.get("profile") or registered_profile(conf, agent)
+                    target = health.substitute(task.get("profile"), active) or registered_profile(conf, agent)
                     if target != launched(conf, agent):
                         try:
                             ok, detail = relaunch(conf, agent, target)
@@ -461,6 +529,7 @@ def tick(conf, assign=True):
                     if pool and not ok:
                         pools.release(conf.name, pool, name)
             recorded.extend(note_holds(conf))
+            record_turns(conf, pool_names, working)
         finally:
             recorded.extend(verify_sends(conf, sends))
         for pool in set(filter(None, pool_names.values())) - waiting_on_pool:
@@ -470,6 +539,52 @@ def tick(conf, assign=True):
                 store.add_samples(conn, conf.name, samples)
     housekeeping()
     return recorded
+
+
+def check_health(conf):
+    """The host's model health checks (probes due, fallback switches) and this project's `fallback` events. A failure
+    is reported on stderr and never stops the tick."""
+    from . import health
+    try:
+        health.host_tick()
+        return health.notify(conf)
+    except Exception as error:
+        print(f"theseus health: {error}", file=sys.stderr)
+        return []
+
+
+def note_turn(conf, name, task_id, held):
+    """A turn_held or turn_resumed event (neither wakes the coordinator) when the pool starts or stops holding the
+    agent's turns."""
+    state = runtime(conf)
+    entry = state.setdefault(name, {})
+    if bool(entry.get("turn_held")) == bool(held):
+        return []
+    entry["turn_held"] = bool(held)
+    save_runtime(conf, state)
+    if held:
+        return [event(conf, "turn_held", name, task_id, "the pool is over its working cap or token budget; nothing is typed "
+                                                        "into this agent until older tasks make room")]
+    return [event(conf, "turn_resumed", name, task_id, "the pool has room again")]
+
+
+def record_turns(conf, pool_names, working):
+    """This project's working agents in each pool's turn record: when their task was assigned and their context."""
+    from . import pools
+    queue = t.Queue(conf)
+    index = queue.index()
+    for pool in set(filter(None, pool_names.values())):
+        entries = {}
+        for name, info in working.items():
+            if pool_names.get(name) != pool:
+                continue
+            assigned = ((index.get(info["task"]) or {}).get("execution") or {}).get("assignedAt")
+            entries[name] = {"since": store.epoch_of(assigned) if assigned else None,
+                             "tokens": (info.get("context") or {}).get("tokens") or info.get("contextTokens")}
+        try:
+            pools.sync_turns(conf, pool, entries)
+        except Exception as error:
+            print(f"theseus pools: {error}", file=sys.stderr)
 
 
 def note_holds(conf):
@@ -747,6 +862,11 @@ def wake_times(conf, now=None):
             (conf.name,))]
     try:
         found += supervisor.wake_times(conf, now)
+    except Exception:
+        pass
+    try:
+        from . import health, pools
+        found += health.wake_times(now) + pools.wake_times(conf, now)
     except Exception:
         pass
     for entry in runtime(conf).values():

@@ -320,11 +320,15 @@ def pool_line(state):
     parts = []
     for pool in state.get("pools") or []:
         cut = f" -{pool['capCut']}" if pool.get("capCut") else ""
-        parts.append(f"{pool['pool']} {pool['active']}/{pool['max']}{cut}")
+        held = f" held {len(pool['held'])}" if pool.get("held") else ""
+        parts.append(f"{pool['pool']} {pool['active']}/{pool['max']}{cut}{held}")
     return " · ".join(parts) or "no pool"
 
 
 def gateway_line(state):
+    for entry in state.get("health") or []:
+        if entry.get("onFallback"):
+            return f"{entry['profile']} on fallback {entry['fallback']}", theme.RED
     for entry in state.get("gateway") or []:
         text, style = pool_state(entry)
         if text != "ok":

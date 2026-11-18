@@ -100,7 +100,8 @@ def snapshot(roots=None):
         for lease in (pool.get("leases") or {}).values():
             lease["agentLabel"] = agent_label(lease.get("project"), lease.get("agent"), shorts)
     return {"time": datetime.now(timezone.utc).isoformat(), "host": host, "projects": projects,
-            "pools": found_pools, "gateway": top.gateway_health(), "gatewayErrors": errors, "events": events[-300:]}
+            "pools": found_pools, "gateway": top.gateway_health(), "health": top.health_state(), "gatewayErrors": errors,
+            "events": events[-300:]}
 
 
 def summary_counts(item):
@@ -134,10 +135,14 @@ def render_host(state):
     for pool in state["pools"]:
         holders = ", ".join(f"{p} {n}" for p, n in sorted(pool["projects"].items())) or "-"
         claims = f"  claims: {', '.join(pool['claims'])}" if pool["claims"] else ""
-        lines.append(f"{pool['pool']:<22} {pool['active']}/{pool['max']} working  {holders}{claims}")
+        held = f"  held: {', '.join(pool['held'])}" if pool.get("held") else ""
+        lines.append(f"{pool['pool']:<22} {pool['active']}/{pool['max']} working  {holders}{claims}{held}")
     if not state["pools"]:
         lines.append("no pools defined")
     lines += ["", "GATEWAY"]
+    for entry in state.get("health") or []:
+        if entry.get("onFallback") or entry.get("state") == "down":
+            lines.append(top.fallback_text(entry))
     for entry in state.get("gateway") or []:
         lines.append(f"{entry['pool']:<22} {top.gateway_text(entry)}")
     if not state.get("gateway"):

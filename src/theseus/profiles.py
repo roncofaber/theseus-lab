@@ -168,7 +168,7 @@ def model_context_limit(conf, model):
     return int(table[max(matches, key=len)]) if matches else None
 DEFAULT = "claude-code"
 OVERRIDABLE = set(PRESETS["claude-code"]) | {"preset", "fallback", "pool", "mcp_servers", "mcp_flags", "extra_args",
-                                             "capability"}
+                                             "capability", "health"}
 CAPABILITY = 1
 INTERACTIVE_KEYS = set(CLAUDE_INTERACTIVE) | {"launch", "resume"}
 THESEUS_MCP = {"command": "theseus", "args": ["mcp", "--role", "worker"]}
@@ -199,6 +199,24 @@ def problems(name, section):
     preset = section.get("preset")
     if preset is not None and preset not in PRESETS:
         found.append(f"preset {preset!r} is not a preset; presets: {', '.join(sorted(PRESETS))}")
+    fallback = section.get("fallback")
+    if fallback is not None and (not isinstance(fallback, str) or not fallback or fallback == name):
+        found.append("fallback must name another profile")
+    health = section.get("health")
+    if health is not None:
+        from . import health as hl
+        if not isinstance(health, dict):
+            found.append(f"health must be a table [workers.{name}.health] with {', '.join(hl.DEFAULTS)}")
+        else:
+            found += [f"unknown key health.{key}; known: {', '.join(hl.DEFAULTS)}" for key in health if key not in hl.DEFAULTS]
+            probe = health.get("probe")
+            if probe is not None and not (isinstance(probe, str) and probe.strip()) and \
+                    not (isinstance(probe, list) and probe and all(isinstance(item, str) for item in probe)):
+                found.append("health.probe must be a command string or a list of strings")
+            for key in ("probe_seconds", "recover_after", "down_errors", "down_window_minutes", "probe_timeout"):
+                value = health.get(key)
+                if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0):
+                    found.append(f"health.{key} must be a positive number")
     return found
 
 
@@ -428,7 +446,7 @@ def instance_env(conf, profile_name=None, agent=None):
     }
 
 
-RELAUNCH_FREE = ("name", "label", "notes", "verified", "capacity", "capability", "mcp_servers", "env")
+RELAUNCH_FREE = ("name", "label", "notes", "verified", "capacity", "capability", "mcp_servers", "env", "fallback", "health")
 
 
 def relaunch_compatible(conf, current, target):

@@ -289,11 +289,17 @@ def add(queue, task_id, role, owned, objective, contract, accept, depends=(), mi
 
 
 def provider_capacity(conf, provider):
+    """The profile's capacity, plus that of the profiles on fallback onto it (theseus.health)."""
+    from . import health
     from . import profiles
     try:
-        return profiles.resolve(conf, provider).get("capacity")
+        capacity = profiles.resolve(conf, provider).get("capacity")
     except profiles.ProfileError:
         return None
+    if capacity is None:
+        return None
+    extra = health.extra_capacity(conf, provider)
+    return None if extra is None else int(capacity) + extra
 
 
 def capacity_use(conf, tasks=None):

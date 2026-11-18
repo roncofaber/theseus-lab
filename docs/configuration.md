@@ -101,12 +101,12 @@ The scaffolded `theseus.toml` documents every key with comments. It sets `[worke
 
 | Section | Keys |
 | --- | --- |
-| `[workers.<name>]` | Host-wide agent profiles, the same fields as in `theseus.toml` (see [Agent profiles](agent-profiles.md)). A project section with the same name overrides only the keys it sets; `env` and `interactive` merge key by key |
-| `[pools.<name>]` | `max`, `priority` (see [Sharing agents between projects](#sharing-agents-between-projects)) |
+| `[workers.<name>]` | Host-wide agent profiles, the same fields as in `theseus.toml` (see [Agent profiles](agent-profiles.md)). A project section with the same name overrides only the keys it sets; `env` and `interactive` merge key by key. Two keys are read from the host file only, since every project must agree on them: `fallback` (another profile to move this profile's agents to while it is down) and `[workers.<name>.health]` (`probe`, `probe_seconds`, `recover_after`, `down_errors`, `down_window_minutes`, `probe_timeout`; see [Profile fallback](#profile-fallback)) |
+| `[pools.<name>]` | `max`, `priority` (see [Sharing agents between projects](#sharing-agents-between-projects)); `tokens_per_minute` (optional, no default: the shared key's token rate the working agents' estimate must stay under) and `turns_per_minute` (3: requests a working agent is assumed to send a minute, each the size of its context; see [Key-level rate limits](#key-level-rate-limits)) |
 | `[store]` | `[store.retention]` and `[store.backups]` (see [Host store](#host-store)) |
 | `[tools.paths]` | Tool locations on this machine, by tool name (see [External tools](#external-tools)) |
 | `[models]` | `context`, as in a project; the host table is the usual place for gateway models |
-| `[gateway]` | The host-wide gateway circuit breaker: `breaker_errors` (3 different agents), `breaker_window_minutes` (10), `strong_codes` (`[530]`, one such error pauses the pool); and the cap cut after a `429 parallel cap` (the shared key's `max_parallel_requests`): the pool's working cap drops by `parallel_cap_step` (1) for `parallel_cap_minutes` (10), host-wide, and such errors do not count toward the breaker |
+| `[gateway]` | The host-wide gateway circuit breaker: `breaker_errors` (3 different agents), `breaker_window_minutes` (10), `strong_codes` (`[530]`, one such error pauses the pool); and the cap cut after a key-level 429 (the shared key's `max_parallel_requests`, `Rate limit exceeded for api_key`, an account's per-minute rate limit): the pool's working cap drops by `parallel_cap_step` (1) and holds for `parallel_cap_minutes` (10) after the latest such error, then rises one slot every `cap_step_up_minutes` (10), host-wide; such errors never count toward the breaker or a profile's health (see [Key-level rate limits](#key-level-rate-limits)) |
 | `[supervisor]` | The private tmux server of supervised agents: `socket` (`theseus`, the `tmux -L` name; `THESEUS_TMUX_SOCKET` names another, `THESEUS_TMUX_PATH` a full socket path), `size` (`220x50`, the fixed agent screen; an attached client resizes it until it detaches, and the console's pane mirror sizes it to what the mirror shows while the mirror is open), `history_limit` (50000), `detach_key` (`C-q`), `max_agents` (12 sessions on the host), `env_passthrough` (names or glob patterns of variables the server passes to agents besides `HOME USER LOGNAME SHELL PATH LANG LC_* TMPDIR XDG_* THESEUS_*`), `launch_shell` (`exec`, or `login` to run the profile command through `$SHELL -lc`), `ready_seconds` (90), `[supervisor.restart]` `backoff_seconds` (`[5, 30, 120, 600]`), `max_crashes` (5), `window_minutes` (30) |
 | `[defaults]` | Values for project keys a project leaves unset: `workers.default`, `workers.retries`, `limits.heavy_runs`, `paths.data`, `paths.scratch`, `paths.worktrees`, `instances.idle_minutes`, `instances.handoff_settle_seconds`, `instances.send_verify_seconds`, `queue.interval`, `queue.send_budget_seconds`, `re.clients`, `agents.counts`, `agents.resume`, `agents.cwd`, and the `gateway.*` keys of the project table |
 
@@ -137,6 +137,36 @@ priority = ["laser-port", "game-port"]    # earlier projects win when the pool i
 ```
 
 A profile joins it with `pool = "gateway"` in `[workers.<profile>]`, usually in the host file too. Only agents working a task hold a slot; idle sessions cost nothing. When a project has ready work but the pool is full, it records a claim; lower-priority projects then start no new tasks, so their running tasks finish and the slots come back. `theseus pool` shows who holds each slot, and the console shows the pool on the PROJECT line. The slots themselves are kept in the host store.
+
+### Profile fallback
+
+Two profiles that reach different models through the same gateway can stand in for each other: the primary is used whenever it is available and the fallback only while the primary is down. In the host file:
+
+```toml
+[workers.model-a]
+pool = "gateway"
+fallback = "model-b"
+
+[workers.model-a.health]
+probe = "probe-model model-a"   # exit 0 means healthy; leave it out for passive health
+probe_seconds = 600             # how often a down profile is probed (default 600)
+recover_after = 3               # consecutive OK probes before switching back (default 3)
+
+[workers.model-b]
+pool = "gateway"
+```
+
+- Health is host state in the store, the same for every project. A profile goes down only on model-level failures, never on a 429: with a `probe` (a command string, split like a shell would with a leading `~` expanded, or a list), a 5xx, a connection lost or a server error mid-response from one of its agents makes the next queue tick on the host run the probe (at most once a minute), and a failed probe marks the profile down; without one, such errors from `down_errors` (2) different agents within `down_window_minutes` (10) do. A probe that prints a 429 or a rate limit, or cannot run, says nothing either way; one that does not answer within `probe_timeout` (60 s) failed. theseus knows nothing about the provider: the probe is any command that sends one small request to the model.
+- While the primary is down and its fallback is not, each project's supervisor moves the primary's count in `[agents.counts]` onto the fallback, keeping the project's number of agents (the `theseus agents scale` semantics): idle agents of the primary stop at once and fallback agents start; a working one finishes first, unless it sits on a gateway error, in which case the queue releases its task with the worktree kept and the next attempt's task message points at that worktree. A task that names the primary as its profile may run on the fallback, which also takes over the primary's `capacity`; a `minCapability` the fallback does not meet keeps the task waiting. Hand-made (unsupervised) agents of the primary get no new task meanwhile. A primary whose fallback is down too stays where it is, and once on its fallback it stays there even if the fallback fails as well.
+- Recovery: one process on the host probes the down profile every `probe_seconds` and switches back after `recover_after` consecutive OK probes (a failed probe starts the count over); a profile without a probe is retried after `recover_after` x `probe_seconds`. Agents drain back the same way: fallback agents beyond their own count finish their tasks first.
+- Every switch is one `fallback` event in each project that uses either profile, and `theseus queue wait` wakes for it. The console shows a red line naming the profile on fallback, since when and why, with the probe count; `theseus pool` prints the same.
+
+### Key-level rate limits
+
+Profiles that share one API key share its limits (requests in flight, requests and tokens a minute). Put them in one pool; a key-level 429 on any of its agents then acts on the whole pool, host-wide:
+
+- The pool is paused for the first backoff (no resends, reminders or new tasks), its working cap drops by `[gateway] parallel_cap_step`, holds for `parallel_cap_minutes` after the latest such error and then rises one slot every `cap_step_up_minutes`. While the cut is in force the newest working agents beyond the cap get nothing typed into them (no resend, reminder or restart prompt; `turn_held` and `turn_resumed` events, neither wakes the coordinator), so the oldest tasks finish first and the held agents resume one at a time as the cap rises. A working agent's own requests between theseus messages are not interrupted.
+- With `tokens_per_minute` set on the pool, each working agent is estimated at its context size (from its transcript, else the pane's hint) times `turns_per_minute` tokens a minute; the newest working agents beyond that budget are held the same way, and the pool starts no new task while any agent is held or while the new agent's estimate would not fit. The oldest working agent is never held. The console's pool line shows the estimate against the budget and the held agents.
 
 ## Host store
 

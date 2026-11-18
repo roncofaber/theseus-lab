@@ -30,7 +30,7 @@ STATE_COLOR = {"working": GREEN, "quiet": YELLOW, "busy": CYAN, "free": YELLOW, 
 KIND_COLOR = {"relaunched": YELLOW, "delivered": MAGENTA, "partial": YELLOW, "blocked": BLUE, "stalled": RED, "error": RED, "assigned": GREEN,
               "nudged": YELLOW, "compacted": BLUE, "cleared": CYAN, "merged": CYAN, "completed": GREEN,
               "reopened": YELLOW, "unmerged": YELLOW, "released": YELLOW, "gateway_error": RED, "resent": YELLOW, "send_failed": RED,
-              "gateway_paused": RED, "held": DIM}
+              "gateway_paused": RED, "held": DIM, "fallback": RED, "turn_held": YELLOW, "turn_resumed": GREEN}
 QUEUE_COLOR = {"review": MAGENTA, "merged": CYAN, "working": GREEN, "ready": YELLOW, "blocked": DIM, "held": DIM}
 ROWS = {"actions": 2, "waiting": 5, "events": 10}
 ROOM_COLOR = {"dirty": RED, "clean": GREEN}
@@ -356,6 +356,28 @@ def gateway_recent(attempts=None):
         return []
 
 
+def health_state():
+    from . import health
+    try:
+        return health.snapshot()
+    except Exception:
+        return []
+
+
+def fallback_text(entry, now=None):
+    """One line for a profile on fallback or down: since when, why and what brings it back."""
+    now = time.time() if now is None else now
+    since = f" for {duration(now - entry['since'])}" if entry.get("since") else ""
+    if entry.get("onFallback"):
+        text = f"profile {entry['profile']} ON FALLBACK {entry['fallback']}{since}: {entry.get('reason') or 'down'}"
+    else:
+        text = f"profile {entry['profile']} DOWN{since}: {entry.get('reason') or '-'} (fallback {entry.get('fallback') or 'none'})"
+    if entry.get("probe") and entry.get("nextProbe"):
+        when = local_clock(datetime.fromtimestamp(entry["nextProbe"], timezone.utc).isoformat())
+        text += f" · probes OK {entry.get('oks') or 0}/{entry.get('recoverAfter')}, next {when}"
+    return text
+
+
 def gateway_text(entry, now=None):
     """One line of gateway health: recent status codes, last error and success, and the pause in force."""
     now = time.time() if now is None else now
@@ -367,7 +389,8 @@ def gateway_text(entry, now=None):
         if entry.get("reason"):
             text += f" ({entry['reason']})"
     if entry.get("capCut"):
-        text += f" · cap -{entry['capCut']} until {local_clock(datetime.fromtimestamp(entry['capUntil'], timezone.utc).isoformat())}"
+        when = local_clock(datetime.fromtimestamp(entry["capUntil"], timezone.utc).isoformat()) if entry.get("capUntil") else "-"
+        text += f" · cap -{entry['capCut']}, next step up {when}"
     return text
 
 
@@ -491,7 +514,7 @@ def snapshot(conf, sample=False, host=None):
         "project": conf.name, "milestone": t.Queue(conf).milestone(), "time": datetime.now(timezone.utc).isoformat(),
         "host": host if host is not None else host_state(), "agents": states, "workers": other_workers(conf, states),
         "eligible": eligible, "gated": capability_gated(conf, states, eligible), "pools": pool_states(conf),
-        "gateway": gateway_health(),
+        "gateway": gateway_health(), "health": health_state(),
         "queue": {k: [x["id"] for x in v] for k, v in summary.items()},
         "rooms": {x["id"]: x.get("room") for v in summary.values() for x in v},
         "profiles": {x["id"]: x["profile"] for v in summary.values() for x in v if x.get("profile")},
@@ -607,9 +630,16 @@ def issues(state):
     for agent in state["agents"]:
         if agent["state"] in ("stalled", "offline", "blocked", "failed", "waiting"):
             found.append(f"{RED}●{R} {agent['name']} is {agent['state']}")
+    for entry in state.get("health") or []:
+        if entry.get("onFallback") or entry.get("state") == "down":
+            found.append(f"{RED}●{R} {fallback_text(entry)}")
     for entry in state.get("gateway") or []:
         if entry.get("pausedUntil"):
             found.append(f"{RED}●{R} gateway pool {entry['pool']} is paused: no new assignments or resends")
+    for pool in state.get("pools") or []:
+        if pool.get("held"):
+            found.append(f"{YELLOW}●{R} pool {pool['pool']} holds the turns of {len(pool['held'])} newest working agent(s): "
+                         f"{', '.join(pool['held'][:3])}")
     review = state["queue"]["review"]
     if review:
         found.append(f"{MAGENTA}●{R} {len(review)} delivery(ies) to review and merge: {', '.join(review[:3])}")
@@ -808,8 +838,10 @@ def render(state, width=120, height=None, ui=None):
         others = ", ".join(f"{p} {n}" for p, n in sorted(pool["projects"].items()) if p != state["project"])
         full = pool["max"] and pool["active"] >= pool["max"]
         claims = f" {DIM}·{R} {YELLOW}claims: {', '.join(pool['claims'])}{R}" if pool["claims"] else ""
+        budget = (f" {DIM}·{R} tokens {pool.get('estimate', 0):,}/{int(pool['budget']):,}/min" if pool.get("budget") else "")
+        held = f" {DIM}·{R} {YELLOW}held: {', '.join(pool['held'])}{R}" if pool.get("held") else ""
         frame.row(f"pool {B}{pool['pool']}{R} {RED if full else GREEN}{B}{pool['active']}/{pool['max']}{R} working "
-                  f"{DIM}·{R} this project {mine}" + (f" {DIM}·{R} {others}" if others else "") + claims)
+                  f"{DIM}·{R} this project {mine}" + (f" {DIM}·{R} {others}" if others else "") + claims + budget + held)
     for entry in state.get("gateway") or []:
         color = RED if entry.get("pausedUntil") else YELLOW
         frame.row(f"gateway {B}{entry['pool']}{R} {color}{gateway_text(entry)}{R}")

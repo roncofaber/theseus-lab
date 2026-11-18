@@ -233,14 +233,16 @@ def plan(count, members, holds=lambda n: False, started=lambda n: None, taken=la
 def standing(conf, regs, keep=()):
     """What reconcile keeps or starts, [{name, profile, slot, rooms, revive}]: per profile the live counted agents
     within the count, the names to start or revive and the agents down or disabled (left as they are), then
-    [[agents.extra]]. Live agents beyond the count are left out, so reconcile retires them."""
+    [[agents.extra]]. Live agents beyond the count are left out, so reconcile retires them. The counts are those of
+    health.effective_counts: a profile on fallback lends its count to its fallback."""
     pattern = template(conf)
     if "{n}" not in pattern:
         raise SupervisorError(f"[agents] name {pattern!r} must contain {{n}}")
     extras = [{"name": e["name"], "profile": e.get("profile") or profiles.default_name(conf), "slot": None,
                "rooms": e.get("rooms")} for e in section(conf).get("extra") or []]
     used = {e["name"] for e in extras}
-    wanted = counts(conf)
+    from . import health
+    wanted = health.effective_counts(counts(conf))
     names = list(wanted) + sorted({r["profile"] for r in regs.values()
                                    if r.get("managed") and r.get("slot") and r.get("profile") and r["profile"] not in wanted})
     found = []
