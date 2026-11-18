@@ -292,6 +292,40 @@ class TaskFlowTests(Sandbox):
         self.assertEqual("in_progress", self.record()["status"])
         self.assertEqual("", self.git("status", "--porcelain").stdout)
 
+    def test_in_place_copies_of_several_patches_merge_once_but_a_stale_copy_is_refused(self):
+        lines = "".join(f"line {n}\n" for n in range(1, 13))
+        self.write("shared.txt", lines)
+        self.write("config.txt", lines)
+        self.git("add", "shared.txt", "config.txt")
+        self.git("commit", "-q", "-m", "shared files")
+        self.add_task()
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        worktree = self.tmp / "worktrees/worker-1-a"
+        self.write("config.txt", lines.replace("line 1\n", "line 1 from a newer merge\n"))
+        self.git("commit", "-q", "-am", "newer merge")
+        self.deliver(worktree)
+        text = lines
+        for number, line in enumerate(("line 3", "line 6", "line 10"), 2):
+            text = text.replace(line + "\n", line + " patched\n")
+            self.write("shared.txt", text, root=worktree)
+            self.write(f".theseus/patches/0{number}-shared.patch", self.git("diff", "--", "shared.txt", cwd=worktree).stdout, root=worktree)
+            self.git("add", "shared.txt", cwd=worktree)
+        self.git("reset", "-q", cwd=worktree)
+        self.write("config.txt", lines.replace("line 10\n", "line 10 patched\n"), root=worktree)
+        self.write(".theseus/patches/05-config.patch", self.git("diff", "--", "config.txt", cwd=worktree).stdout, root=worktree)
+        self.write("config.txt", lines.replace("line 1\n", "line 1 from an older base\n").replace("line 10\n", "line 10 patched\n"), root=worktree)
+        refused = self.theseus("merge", TASK, check=False)
+        self.assertEqual(3, refused.returncode, refused.stdout + refused.stderr)
+        self.assertIn(f"git -C {worktree} checkout -- config.txt", refused.stderr)
+        self.assertNotIn("copies of shared.txt", refused.stderr)
+        self.git("checkout", "--", "config.txt", cwd=worktree)
+        merge = self.theseus("merge", TASK).stdout
+        self.assertIn("applying the patches once", merge)
+        self.assertEqual(text, (self.project / "shared.txt").read_text())
+        self.assertEqual(lines.replace("line 1\n", "line 1 from a newer merge\n").replace("line 10\n", "line 10 patched\n"),
+                         (self.project / "config.txt").read_text())
+        self.assertEqual("", self.git("status", "--porcelain").stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

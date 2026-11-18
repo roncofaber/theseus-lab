@@ -202,38 +202,48 @@ def worker_patches(worktree, skip=()):
     return [p for p in sorted(directory.glob("*.patch")) if p.name not in skip]
 
 
-def applied_patches(worktree, patches, outside):
-    """Shipped patches the worktree also applied: each touches an outside path and leaves every path it touches exactly
-    as the worktree has it. Returns (matched patches, the paths they cover, one line per patch that differs)."""
-    worktree, outside = Path(worktree), set(outside)
-    matched, covered, mismatches = [], set(), []
-    for patch in patches:
-        paths = sorted(set(patch_paths(patch.read_text(errors="replace"))))
-        if not outside.intersection(paths):
-            continue
-        with tempfile.TemporaryDirectory() as scratch:
-            patched = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "patched")}
-            actual = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "actual")}
-            g.git(worktree, "read-tree", "HEAD", env=patched)
-            applied = g.git(worktree, "apply", "--cached", str(patch), env=patched, check=False)
+def applied_patches(root, worktree, patches, foreign):
+    """Compare the worktree with the cumulative result of the shipped patches applied in order to its base, on the
+    outside-owned paths (foreign) that both the worktree and a patch change. Returns (the paths that equal that result,
+    one line per refusal). Patches applied to main are authoritative, so differing in-place copies are refused."""
+    worktree = Path(worktree)
+    touched = {patch: set(patch_paths(patch.read_text(errors="replace"))) for patch in patches}
+    paths = sorted(set(foreign) & set().union(*touched.values()))
+    if not paths:
+        return set(), []
+    with tempfile.TemporaryDirectory() as scratch:
+        patched = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "patched")}
+        actual = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "actual")}
+        g.git(worktree, "read-tree", "HEAD", env=patched)
+        includes = [f"--include={p}" for p in paths]
+        for patch in (patch for patch in patches if touched[patch].intersection(paths)):
+            applied = g.git(worktree, "apply", "--cached", *includes, str(patch), env=patched, check=False)
             if applied.returncode != 0:
-                mismatches.append(f"{patch.name} does not apply to the worktree base: {applied.stderr.strip()}")
-                continue
-            g.git(worktree, "read-tree", "HEAD", env=actual)
-            present = [p for p in paths if (worktree / p).exists() or (worktree / p).is_symlink()]
-            if present:
-                g.git(worktree, "--literal-pathspecs", "add", "-f", "--", *present, env=actual)
-            gone = [p for p in paths if p not in present]
-            if gone:
-                g.git(worktree, "--literal-pathspecs", "rm", "-q", "--cached", "--ignore-unmatch", "--", *gone, env=actual)
-            entries = lambda env: set(g.out(worktree, "--literal-pathspecs", "ls-files", "-s", "--", *paths, env=env).splitlines())
-            differ = sorted({line.split("\t", 1)[1] for line in entries(patched) ^ entries(actual)})
-        if differ:
-            mismatches.append(f"the worktree changes differ from what {patch.name} applies: {', '.join(differ)}")
-        else:
-            matched.append(patch)
-            covered.update(paths)
-    return matched, covered, mismatches
+                return set(), [f"{patch.name} does not apply to the worktree base after the patches before it: {applied.stderr.strip()}"]
+        g.git(worktree, "read-tree", "HEAD", env=actual)
+        present = [p for p in paths if (worktree / p).exists() or (worktree / p).is_symlink()]
+        if present:
+            g.git(worktree, "--literal-pathspecs", "add", "-f", "--", *present, env=actual)
+        gone = [p for p in paths if p not in present]
+        if gone:
+            g.git(worktree, "--literal-pathspecs", "rm", "-q", "--cached", "--ignore-unmatch", "--", *gone, env=actual)
+        entries = lambda env: set(g.out(worktree, "--literal-pathspecs", "ls-files", "-s", "--", *paths, env=env).splitlines())
+        differ = sorted({line.split("\t", 1)[1] for line in entries(patched) ^ entries(actual)})
+    if not differ:
+        return set(paths), []
+    names = ", ".join(patch.name for patch in patches if touched[patch].intersection(differ))
+    refusal = [f"the worktree copies of {', '.join(differ)} differ from what the shipped patches ({names}) apply in order "
+               "to the worktree base"]
+    base = g.out(worktree, "rev-parse", "HEAD")
+    if int(g.out(root, "rev-list", "--count", f"{base}..HEAD")):
+        tracked = [p for p in differ if g.git(worktree, "cat-file", "-e", f"HEAD:{p}", check=False).returncode == 0]
+        new = [p for p in differ if p not in tracked]
+        steps = [f"`git -C {worktree} checkout -- {' '.join(tracked)}`"] if tracked else []
+        steps += [f"delete {', '.join(new)} from the worktree"] if new else []
+        refusal.append(f"the worktree base {base[:12]} is older than HEAD, so in-place copies may carry stale content: "
+                       f"rely on the patches, which merge applies to current main, revert the in-place copies "
+                       f"({' and '.join(steps)}) and merge again")
+    return set(), refusal
 
 
 def apply_patches(root, patches, skip=()):
@@ -343,19 +353,20 @@ def merge(conf, task_id, subject=None, accept=(), skip_patches=(), commit=True, 
     rebased = adopt_rebase(conf, queue, task)
     lines, outside = t.check_delivery(queue, task_id, accept)
     patches = worker_patches(worktree, skip_patches)
-    covered = set()
-    if outside:
-        matched, covered, mismatches = applied_patches(worktree, patches, outside)
-        uncovered = [p for p in outside if p not in covered]
-        if uncovered or mismatches:
-            hint = ["changes outside ownedPaths; reject them, move them to a patch, or pass --accept PATH"] if uncovered else []
-            raise IntegrationError("\n".join(lines + mismatches + hint), EXIT_CONFLICT)
+    shipped = {p for patch in patches for p in patch_paths(patch.read_text(errors="replace"))}
+    foreign = [p for _, p in t.worktree_changes(worktree) if not t.is_owned(p, task["ownedPaths"])]
+    covered, mismatches = applied_patches(root, worktree, patches, foreign)
+    uncovered = [p for p in outside if p not in shipped]
+    if uncovered or mismatches:
+        hint = ["changes outside ownedPaths; reject them, move them to a patch, or pass --accept PATH"] if uncovered else []
+        raise IntegrationError("\n".join(lines + mismatches + hint), EXIT_CONFLICT)
+    if covered:
         lines, _ = t.check_delivery(queue, task_id, [*accept, *covered])
-        lines += [f"the worktree already holds {p.name} ({', '.join(sorted(set(patch_paths(p.read_text(errors='replace')))))}); "
-                  "applying it once" for p in matched]
+        lines.append(f"the worktree already holds what the shipped patches apply to {', '.join(sorted(covered))}; "
+                     "applying the patches once")
     if rebased:
         lines.insert(0, rebased)
-    diff = worktree_diff(worktree, covered)
+    diff = worktree_diff(worktree, sorted(p for p in shipped if not t.is_owned(p, task["ownedPaths"])))
     touched = set(patch_paths(diff))
     for patch in patches:
         touched.update(patch_paths(patch.read_text(errors="replace")))

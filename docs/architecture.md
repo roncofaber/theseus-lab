@@ -21,7 +21,7 @@ Decisions behind the package layout, for contributors. User documentation starts
 
 ## Integration
 
-- There is one integration path, `theseus merge`. It refuses: tracked changes in main other than the task file, a worker HEAD with commits not on the base branch (a HEAD moved only along it is a rebase and becomes the new base), paths outside ownership that no shipped patch accounts for exactly, untracked files the delivery would overwrite. On a failed apply or patch it resets only the touched paths and deletes only files it created.
+- There is one integration path, `theseus merge`. It refuses: tracked changes in main other than the task file, a worker HEAD with commits not on the base branch (a HEAD moved only along it is a rebase and becomes the new base), paths outside ownership that the shipped patches, applied in order to the worktree base, do not reproduce exactly (merge then applies the patches to main and never takes those paths from the worktree, whose copies carry the worker's possibly older base), untracked files the delivery would overwrite. On a failed apply or patch it resets only the touched paths and deletes only files it created.
 - The task file may be dirty at merge time because dispatch leaves the assignment uncommitted; merge commits it afterwards together with the merged status.
 
 ## Verification
