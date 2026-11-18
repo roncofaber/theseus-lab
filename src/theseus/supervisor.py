@@ -1380,6 +1380,17 @@ def pid_alive(pid):
 
 # the pane wrapper
 
+def credentials(conf, name, run):
+    """A run secret for this run in <data>/agents/NAME/credentials, and the environment naming it. Written at exec,
+    not in the launch spec, so drift never sees it; it stops authenticating when the run ends."""
+    from . import taskservice
+    with store.for_project(conf) as conn:
+        agent_id = run.get("agent_id") or store.agent_id(conn, conf.name, name)
+    if not agent_id:
+        return {}
+    return taskservice.grant(taskservice.QUEUE, agent_id, str(run["id"]), agent_dir(conf, name) / "credentials")
+
+
 def exec_agent(project, name, gen):
     """`theseus agents _exec`: become the agent of one run. Never returns on success."""
     conf = project_conf(project)
@@ -1398,6 +1409,7 @@ def exec_agent(project, name, gen):
     os.chmod(agent_dir(conf, name) / "runs.log", 0o600)
     os.environ.update(env)
     os.environ["THESEUS_AGENT"] = name
+    os.environ.update(credentials(conf, name, run))
     if str(settings().get("launch_shell") or "exec") == "login":
         shell = os.environ.get("SHELL") or "/bin/sh"
         os.execvp(shell, [shell, "-lc", "exec " + shlex.join(argv)])

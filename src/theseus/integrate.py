@@ -347,7 +347,7 @@ def move_previous_attempt(conf, queue, task_id, worktree, principal=None):
     g.git(conf.root, "worktree", "move", str(worktree), str(aside))
     if branch == own:
         g.git(conf.root, "branch", "-m", f"work/{worktree.name}", f"work/{worktree.name}-attempt{n}")
-    queue.service.relocate(t.as_coordinator(principal), task_id, worktree, aside,
+    queue.service.relocate(t.acting_principal(principal), task_id, worktree, aside,
                            f"work/{worktree.name}-attempt{n}" if branch == own else None)
     return aside
 
@@ -387,7 +387,7 @@ def assign(conf, task_id, name, provider, model, owner=None, commit=True, instan
     from . import rooms
     queue = t.Queue(conf)
     task = queue.get(task_id)
-    principal = t.as_coordinator(principal)
+    principal = t.acting_principal(principal)
     if instance:
         try:
             rooms.check_assignment(conf, task, instance)

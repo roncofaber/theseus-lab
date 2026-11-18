@@ -462,18 +462,20 @@ class TaskService:
                                 tasks_legacy={k: v for k, v in legacy.items() if v} or None)
         return {"milestone": name or None}
 
-    def note(self, p, task_id, text, *, question=False):
+    def note(self, p, task_id, text, *, question=False, on_behalf=False):
         """A worker's note or question on its own task; the coordinator's note sets the assignment note the worker
-        reads, and answers open questions."""
+        reads, and answers open questions. on_behalf: the coordinator writes a worker's note (a subagent of its own
+        session), which sets nothing."""
         allow(p, "coordinator", "worker")
         if not text.strip() or len(text) > NOTE_LIMIT:
             raise TaskError("invalid", f"a note needs 1 to {NOTE_LIMIT} characters")
         with self.unit() as (repo, project):
             task, attempts = self.load(repo, project, task_id)
             active = self.own(p, task, attempts)
-            if p.role == "worker":
+            if p.role == "worker" or on_behalf:
                 kind = "question" if question else "note"
-                repo.add_note(task["pk"], p.agent_id, kind, text, now(), attempt_id=active["id"])
+                repo.add_note(task["pk"], p.agent_id or "coordinator", kind, text, now(),
+                              attempt_id=active["id"] if active else None)
                 self.event(repo, p, task, kind, {"text": text[:200]}, queue=text[:200] if question else None,
                            attempt=active)
                 return {"task": task_id, "kind": kind}
@@ -855,13 +857,14 @@ class TaskService:
                         "id", "phase", "worktree", "base", "log_dir")}, "active": bool(active)}
 
     def deliver(self, p, task_id, *, handoff_path=None, result=None, handoff_text=None, observed_touches=(),
-                reason=None):
+                reason=None, source=None):
         """The worker's report (source command), or the queue's or coordinator's when they found the handoff
-        (source detected). result is the handoff's Result: delivered, partial, blocked or None (not stated)."""
+        (source detected; the coordinator reporting for its own subagent passes source command). result is the
+        handoff's Result: delivered, partial, blocked or None (not stated)."""
         allow(p, "coordinator", "worker", "queue")
         if result not in (None, "delivered", "partial", "blocked"):
             raise TaskError("invalid", f"unknown result {result}")
-        source = "command" if p.role == "worker" else "detected"
+        source = "command" if p.role == "worker" else (source or "detected")
         with self.unit() as (repo, project):
             task, attempts = self.load(repo, project, task_id)
             current = rec.current_attempt(attempts)
@@ -890,11 +893,11 @@ class TaskService:
                           kind, active["agent_id"], source)
         return {"task": task_id, "status": "verification", "result": kind, "source": source}
 
-    def blocked(self, p, task_id, reason, *, handoff_path=None, handoff_text=None):
+    def blocked(self, p, task_id, reason, *, handoff_path=None, handoff_text=None, source=None):
         if not reason.strip():
             raise TaskError("invalid", "say what blocks the task")
         return self.deliver(p, task_id, handoff_path=handoff_path, result="blocked", handoff_text=handoff_text,
-                            reason=reason)
+                            reason=reason, source=source)
 
     # records
 
@@ -1120,26 +1123,52 @@ def issue_credentials(p, agent_id, run_id, opener=taskrepo.opened):
     return secret
 
 
+def write_credentials(path, agent_id, run_id, secret):
+    """The credentials file an agent's theseus reads (THESEUS_CREDENTIALS): mode 0600, replaced atomically."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w") as handle:
+        json.dump({"agent_id": agent_id, "run_id": run_id, "run_secret": secret}, handle)
+    os.replace(temporary, path)
+    return path
+
+
+def grant(p, agent_id, run_id, path, opener=taskrepo.opened):
+    """Issue a run secret for agent_id and write its credentials file; returns the environment that names them."""
+    write_credentials(path, agent_id, run_id, issue_credentials(p, agent_id, run_id, opener))
+    return {"THESEUS_AGENT_ID": agent_id, "THESEUS_CREDENTIALS": str(path)}
+
+
 def revoke_credentials(p, agent_id, run_id, opener=taskrepo.opened):
     allow(p, "coordinator", "queue")
     with opener() as repo, repo.transaction():
         return repo.revoke_credential(agent_id, run_id)
 
 
-def authenticate(credentials, *, via="cli", opener=taskrepo.opened):
+def facts(opener, readonly):
+    """A repo for identity checks: read-only for a read command, and None before any store exists (then no agent,
+    credentials or worktree exist either)."""
+    if not store.path().exists():
+        return contextlib.nullcontext()
+    return opener(readonly=True) if readonly else opener()
+
+
+def authenticate(credentials, *, via="cli", opener=taskrepo.opened, readonly=False):
     """The worker principal of credentials {agent_id, run_secret} when the secret matches an unrevoked run of that
     agent. The role never comes from the caller: credentials only ever make a worker."""
     agent_id, secret = (credentials or {}).get("agent_id"), (credentials or {}).get("run_secret")
     if isinstance(agent_id, str) and isinstance(secret, str):
-        with opener() as repo:
-            hashes = repo.credential_hashes(agent_id)
+        with facts(opener, readonly) as repo:
+            hashes = repo.credential_hashes(agent_id) if repo else []
         if any(hmac.compare_digest(sha256(secret), stored) for stored in hashes):
             return Principal("worker", agent_id, via)
     raise TaskError("unauthenticated", "these credentials match no running agent (a restarted or ended run, or a "
                                        "copied file)")
 
 
-def principal(env=None, cwd=None, *, via="cli", opener=taskrepo.opened):
+def principal(env=None, cwd=None, *, via="cli", opener=taskrepo.opened, readonly=False):
     """Who is calling, deny by default: credentials (THESEUS_CREDENTIALS) make a worker; the coordinator is a caller
     with neither THESEUS_AGENT_ID nor THESEUS_CREDENTIALS, not in a hand-made agent's tmux pane (TMUX_PANE, which only
     ever denies), whose working directory is not a task worktree. Anything else is refused, never promoted. Reads do
@@ -1152,27 +1181,29 @@ def principal(env=None, cwd=None, *, via="cli", opener=taskrepo.opened):
             credentials = json.loads(Path(path).read_text())
         except (OSError, ValueError) as error:
             raise TaskError("unauthenticated", f"cannot read the credentials file {path}: {error}") from error
-        return authenticate(credentials, via=via, opener=opener)
+        return authenticate(credentials, via=via, opener=opener, readonly=readonly)
     if env.get("THESEUS_AGENT_ID"):
         raise TaskError("unauthenticated", "THESEUS_AGENT_ID is set without credentials; an agent is never the coordinator")
     if env.get("TMUX_PANE"):
-        with opener() as repo:
-            agent = repo.hand_made_agent(env["TMUX_PANE"])
+        with facts(opener, readonly) as repo:
+            agent = repo.hand_made_agent(env["TMUX_PANE"]) if repo else None
         if agent:
             raise TaskError("unauthenticated", f"this pane ({env['TMUX_PANE']}) is the registered agent {agent}; an agent "
                                                f"is never the coordinator")
-    worktree = task_worktree(cwd, opener)
+    worktree = task_worktree(cwd, opener, readonly)
     if worktree:
         raise TaskError("unauthenticated", f"{cwd} is inside the task worktree {worktree}; the coordinator works from "
                                            f"the main checkout")
     return Principal("coordinator", via=via)
 
 
-def task_worktree(cwd, opener=taskrepo.opened):
+def task_worktree(cwd, opener=taskrepo.opened, readonly=False):
     """The worktree of an unfinished task (any project) that holds cwd, or None. A task assigned in place, in its
     project's own checkout, does not make that checkout a worktree."""
     candidates = {cwd, cwd.resolve()}
-    with opener() as repo:
+    with facts(opener, readonly) as repo:
+        if repo is None:
+            return None
         for directory in [*candidates, *(parent for c in candidates for parent in c.parents)]:
             for attempt in repo.attempts_at(str(directory)):
                 roots = {Path(root).resolve() for root in (attempt["project_root"], attempt["tasks_root"]) if root}

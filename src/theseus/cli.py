@@ -2,6 +2,7 @@
 console (`theseus console`, also `theseus top`)."""
 import argparse
 import contextlib
+import io
 import json
 import os
 import subprocess
@@ -216,11 +217,113 @@ def queue_locked(conf):
     return workqueue.locked(conf, announce=True)
 
 
+TASK_READS = ("list", "ls", "ready", "show", "prompt", "check-delivery", "consumers", "stats")
+
+
+def coordinator_principal():
+    """The caller, who must be the coordinator: an agent (credentials, THESEUS_AGENT_ID, a hand-made agent's pane, a
+    task worktree) is refused, with the commands it may use."""
+    from . import taskservice
+    principal = taskservice.principal(via="cli")
+    if principal.role != "coordinator":
+        raise taskservice.TaskError("forbidden", "this command is the coordinator's; a worker reports through "
+                                                 "`theseus task show|note|done|blocked TASK`")
+    return principal
+
+
+def as_coordinator(function):
+    """Run a command that changes task state as the coordinator, refusing any other caller."""
+    def wrapper(args):
+        from . import tasks as t
+        with t.acting(coordinator_principal()):
+            return function(args)
+    return wrapper
+
+
+def json_reply(function):
+    """With --json, print one object instead of text: {"ok": true, "data": ...} (a command's JSON output, else its
+    lines) or {"ok": false, "error": {"code", "message"}}; exit codes keep their meaning (1 refused, 3 conflict)."""
+    def wrapper(args):
+        if not getattr(args, "json", False):
+            return function(args)
+        from . import integrate, tasks
+        buffer, code, error = io.StringIO(), 0, None
+        try:
+            with contextlib.redirect_stdout(buffer):
+                function(args)
+        except SystemExit as stop:
+            if isinstance(stop.code, str):
+                code, error = 1, ("refused", stop.code.removeprefix("theseus: "))
+            else:
+                code = stop.code or 0
+        except tasks.TaskError as failure:
+            kind = getattr(failure, "code", "refused")
+            code, error = (3 if kind == "conflict" else 1), (kind, str(failure))
+        except integrate.IntegrationError as failure:
+            code, error = failure.code, ("conflict" if failure.code == 3 else "refused", str(failure))
+        if error:
+            print(json.dumps({"ok": False, "error": {"code": error[0], "message": error[1]}}, ensure_ascii=False))
+        else:
+            text = buffer.getvalue()
+            try:
+                data = json.loads(text)
+            except ValueError:
+                data = {"lines": text.splitlines()}
+            print(json.dumps({"ok": True, "data": data}, ensure_ascii=False))
+        if code:
+            sys.exit(code)
+    return wrapper
+
+
 def cmd_tasks(args):
     from . import tasks as t
     conf = load()
-    with queue_locked(conf) if args.task_action in TASK_LOCKED else contextlib.nullcontext():
+    acting = contextlib.nullcontext() if args.task_action in TASK_READS else t.acting(coordinator_principal())
+    with acting, queue_locked(conf) if args.task_action in TASK_LOCKED else contextlib.nullcontext():
         tasks_action(conf, t.Queue(conf), args)
+
+
+def cmd_task(args):
+    """A worker's own task, named by the worker (the stale-context check): the coordinator may act for a subagent of
+    its own session."""
+    from . import tasks as t, taskservice
+    conf = load()
+    action = args.task_command
+    principal = taskservice.principal(via="cli", readonly=action == "show")
+    svc = taskservice.open(conf)
+    if action == "show":
+        shown = svc.show(principal, args.id)
+        data = shown["task"].get(args.field) if args.field else {
+            "task": shown["task"], "notes": shown["notes"], "attempt": shown["attempt"]}
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+    elif action == "note":
+        noted = svc.note(principal, args.id, args.text, question=args.question,
+                         on_behalf=principal.role == "coordinator")
+        print(f"{args.id}: {noted['kind']} recorded")
+    else:
+        handoff = Path(args.handoff).resolve() if args.handoff else None
+        text = handoff.read_text(errors="replace") if handoff and handoff.is_file() else None
+        if action == "done" and text is None:
+            sys.exit(f"theseus: no handoff at {handoff}; write it first (see the worker skill)")
+        worktree = handoff.parent.parent if handoff and handoff.parent.name == cfg.WORKER_LOG else None
+        touches = observed_touches(worktree) if worktree else []
+        if action == "done":
+            done = svc.deliver(principal, args.id, handoff_path=str(handoff), result=t.handoff_result(handoff),
+                               handoff_text=text, observed_touches=touches, source="command")
+        else:
+            done = svc.blocked(principal, args.id, args.reason, handoff_path=str(handoff) if handoff else None,
+                               handoff_text=text, source="command")
+        print(f"{args.id} is already delivered" if done.get("already") else
+              f"{args.id} -> verification ({done['result']}); the coordinator reviews it next")
+
+
+def observed_touches(worktree):
+    """Paths the worker's patches under .theseus/patches/ change (shared files it touches outside its ownership)."""
+    from . import integrate
+    found = set()
+    for patch in sorted((Path(worktree) / cfg.WORKER_LOG / "patches").glob("*.patch")):
+        found.update(integrate.patch_paths(patch.read_text(errors="replace")))
+    return sorted(found)
 
 
 def tasks_action(conf, queue, args):
@@ -250,7 +353,7 @@ def tasks_action(conf, queue, args):
     elif action in ("export", "archive"):
         emit(t.export(queue))
     elif action == "adopt":
-        adopted = queue.service.adopt(t.as_coordinator(None))
+        adopted = queue.service.adopt(t.acting_principal(None))
         emit(f"{adopted['project']}'s tasks now belong to {adopted['root']} (was {adopted['previous'] or 'unset'})")
     elif action == "ready":
         ids = t.ready(queue, args.include_paused, args.any_milestone)
@@ -259,7 +362,7 @@ def tasks_action(conf, queue, args):
             sys.exit(1)
     elif action == "show":
         if args.history:
-            found = queue.service.get(t.as_coordinator(None), args.id, history=True)
+            found = queue.service.get(t.acting_principal(None), args.id, history=True)
             print(json.dumps({"task": found["task"], "notes": found["notes"], "history": found["history"]}, indent=2,
                              ensure_ascii=False))
             return
@@ -330,6 +433,8 @@ def cmd_instance(args):
     if args.instance_action == "assign":
         from . import integrate
         from . import profiles
+        from . import tasks as t
+        t.ACTING.set(coordinator_principal())
         provider = args.provider or profiles.default_name(conf)
         name = f"{args.instance}-{args.suffix}"
         owner = f"{provider}:{args.instance}:{name}"
@@ -900,6 +1005,8 @@ def cmd_queue(args):
     from . import workqueue
     conf = load()
     action = args.action
+    if action in ("tick", "run") or (action == "wait" and not args.no_drive):
+        coordinator_principal()
     if action == "tick":
         for record in workqueue.tick(conf, assign=not args.no_assign):
             print(f"{record['kind']:<10} {record['agent'] or '-':<18} {record['task'] or '-'} {record['detail']}")
@@ -920,6 +1027,10 @@ def cmd_queue(args):
         print("paused" if workqueue.paused(conf) else "running")
         for task in groups["blocked"][:8]:
             print(f"  {task['id']}: {'; '.join(task['reasons'])}")
+        from . import tasks as t
+        for question in t.Queue(conf).service.questions(t.acting_principal()):
+            print(f"question {question['task']}: {question['text']} (answer with `theseus tasks note "
+                  f"{question['task']} TEXT`)")
 
 
 def cmd_top(args):
@@ -1209,7 +1320,28 @@ def build_parser():
     ts.add_parser("archive", help="move completed tasks to tasks-archive.jsonl and commit the two files")
     p = ts.add_parser("milestone", help="print or set currentMilestone ('' clears it)")
     p.add_argument("value", nargs="?")
-    tasks.set_defaults(func=guarded(cmd_tasks))
+    tasks.set_defaults(func=guarded(json_reply(cmd_tasks)))
+    for subparser in ts.choices.values():
+        subparser.add_argument("--json", action="store_true", help="print one JSON object")
+    task = sub.add_parser("task", help="a worker's own task (name it from your assignment): show, note, done, blocked")
+    tk = task.add_subparsers(dest="task_command", required=True)
+    p = tk.add_parser("show", help="your task: the record, notes and worktree")
+    p.add_argument("id")
+    p.add_argument("--field")
+    p = tk.add_parser("note", help="a progress note the coordinator reads (--question also wakes it)")
+    p.add_argument("id")
+    p.add_argument("text")
+    p.add_argument("--question", action="store_true", help="a question that waits for the coordinator's answer")
+    p = tk.add_parser("done", help="report the delivery: reads the handoff's Result and your patch targets")
+    p.add_argument("id")
+    p.add_argument("--handoff", default=f"{cfg.WORKER_LOG}/handoff.md")
+    p = tk.add_parser("blocked", help="report that the task cannot go on, and why")
+    p.add_argument("id")
+    p.add_argument("reason")
+    p.add_argument("--handoff")
+    for subparser in tk.choices.values():
+        subparser.add_argument("--json", action="store_true", help="print one JSON object")
+    task.set_defaults(func=guarded(json_reply(cmd_task)))
 
     inst = sub.add_parser("instance", help="persistent worker sessions in tmux panes")
     ins = inst.add_subparsers(dest="instance_action", required=True)
@@ -1247,7 +1379,7 @@ def build_parser():
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--resume-paused", action="store_true")
     p.add_argument("--no-commit", action="store_true", help="no effect (kept for scripts): an assignment commits nothing")
-    p.set_defaults(func=guarded(cmd_dispatch))
+    p.set_defaults(func=guarded(as_coordinator(cmd_dispatch)))
 
     p = sub.add_parser("merge", help="integrate a delivered task: ownership check, three-way apply, patches, indexes, commit")
     p.add_argument("task")
@@ -1256,7 +1388,7 @@ def build_parser():
     p.add_argument("--skip-patch", action="append", help="a worker patch file name to skip; repeatable")
     p.add_argument("--no-commit", action="store_true", help="apply without committing")
     p.add_argument("--no-index", action="store_true", help="do not regenerate the docs indexes")
-    p.set_defaults(func=guarded(cmd_merge))
+    p.set_defaults(func=guarded(as_coordinator(cmd_merge)))
 
     for name, script_name, text in (("status", "status.sh", "dispatched workers and every other worktree"),
                                     ("stop", "stop.sh", "stop a dispatched shell worker and its slice: stop NAME"),

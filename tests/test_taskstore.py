@@ -339,7 +339,7 @@ class AuthorizationTests(TaskStoreCase):
         return path
 
     def test_the_role_comes_from_credentials_and_anything_unproven_is_refused(self):
-        path = self.credentials("agent-a", "run-1", role="coordinator")
+        path = self.credentials("agent-a", "agent-a", role="coordinator")
         worker = ts.principal({"THESEUS_CREDENTIALS": str(path)}, self.tmp)
         self.assertEqual(("worker", "agent-a"), (worker.role, worker.agent_id))
         self.assertEqual("unauthenticated", self.code(ts.principal, {"THESEUS_AGENT_ID": "agent-a"}, self.tmp))
@@ -356,14 +356,24 @@ class AuthorizationTests(TaskStoreCase):
             store.upsert_agent(conn, "demo", "by-hand", pane="%7")
         self.assertEqual("unauthenticated", self.code(ts.principal, {"TMUX_PANE": "%7"}, self.tmp))
         self.assertEqual("coordinator", ts.principal({"TMUX_PANE": "%8"}, self.tmp).role)
-        ts.revoke_credentials(COORDINATOR, "agent-a", "run-1")
+        ts.revoke_credentials(COORDINATOR, "agent-a", "agent-a")
         self.assertEqual("unauthenticated", self.code(ts.principal, {"THESEUS_CREDENTIALS": str(path)}, self.tmp))
         forged = self.tmp / "forged.json"
         forged.write_text(json.dumps({"agent_id": "agent-a", "run_secret": "guess"}))
         self.assertEqual("unauthenticated", self.code(ts.principal, {"THESEUS_CREDENTIALS": str(forged)}, self.tmp))
 
+    def test_a_supervised_run_s_credentials_end_with_the_run(self):
+        with store.opened() as conn:
+            agent_id = store.upsert_agent(conn, "demo", "w-1", pane="%3")
+            run = store.add_run(conn, "demo", "w-1", "start")
+        path = self.credentials(agent_id, str(run["id"]))
+        self.assertEqual(agent_id, ts.principal({"THESEUS_CREDENTIALS": str(path)}, self.tmp).agent_id)
+        with store.opened() as conn:
+            store.close_run(conn, run["id"], "exited")
+        self.assertEqual("unauthenticated", self.code(ts.principal, {"THESEUS_CREDENTIALS": str(path)}, self.tmp))
+
     def test_a_worker_acts_only_on_its_own_active_task(self):
-        worker = ts.principal({"THESEUS_CREDENTIALS": str(self.credentials("agent-a", "run-2"))}, self.tmp)
+        worker = ts.principal({"THESEUS_CREDENTIALS": str(self.credentials("agent-a", "agent-a"))}, self.tmp)
         self.assertEqual("mine", self.svc.show(worker, "mine")["task"]["id"])
         self.assertEqual("theirs", self.svc.get(worker, "theirs")["task"]["id"], "reads need no ownership")
         self.assertEqual("not-your-task", self.code(self.svc.show, worker, "theirs"))

@@ -36,6 +36,9 @@ def isolate_session():
         "THESEUS_TMUX_PATH": str(short_dir() / "s"),
     })
     os.environ.pop("THESEUS_TMUX_SOCKET", None)
+    # The caller's own tmux pane could match a test's fake hand-made agent, which is never the coordinator.
+    for key in ("TMUX", "TMUX_PANE"):
+        os.environ.pop(key, None)
     import atexit
     import shutil
     atexit.register(shutil.rmtree, session, True)
@@ -76,7 +79,7 @@ if "THESEUS_DB_GUARD" not in os.environ:
 
 def base_env(root):
     env = {key: value for key, value in os.environ.items()
-           if not key.startswith(("THESEUS_", "GIT_")) and key not in ("JAVA_HOME", "GHIDRA_INSTALL_DIR", "COLUMNS", "LINES")}
+           if not key.startswith(("THESEUS_", "GIT_")) and key not in ("JAVA_HOME", "GHIDRA_INSTALL_DIR", "COLUMNS", "LINES", "TMUX", "TMUX_PANE")}
     env.update({
         "THESEUS_DB_GUARD": os.environ["THESEUS_DB_GUARD"],
         "THESEUS_TMUX_GUARD": "1",

@@ -7,6 +7,8 @@ integrated the code; dependents may start once the merge commit is in their assi
 against acceptance; archivable). Runtime observation and user testing are recorded separately under `evidence`, because
 merged, observed at runtime and user-tested are different claims.
 """
+import contextlib
+import contextvars
 import datetime
 import hashlib
 import json
@@ -66,9 +68,23 @@ def service(conf):
     return taskservice.open(conf)
 
 
-def as_coordinator(principal):
+ACTING = contextvars.ContextVar("theseus_acting_principal", default=None)
+
+
+def acting_principal(principal=None):
+    """principal, else the one a command resolved (acting), else the coordinator (in-process callers on the host)."""
     from . import taskservice
-    return principal or taskservice.COORDINATOR
+    return principal or ACTING.get() or taskservice.COORDINATOR
+
+
+@contextlib.contextmanager
+def acting(principal):
+    """Run the task calls inside as principal, the caller the CLI identified."""
+    token = ACTING.set(principal)
+    try:
+        yield principal
+    finally:
+        ACTING.reset(token)
 
 
 class Queue:
@@ -84,19 +100,19 @@ class Queue:
         return service(self.conf)
 
     def load(self):
-        return self.service.document(as_coordinator(None))
+        return self.service.document(acting_principal(None))
 
     def archived(self):
         return [task for task in self.all() if task["status"] == "completed"]
 
     def all(self):
-        return self.service.list(as_coordinator(None), include_completed=True)
+        return self.service.list(acting_principal(None), include_completed=True)
 
     def index(self):
         return {task["id"]: task for task in self.all()}
 
     def get(self, task_id):
-        return self.service.get(as_coordinator(None), task_id)["task"]
+        return self.service.get(acting_principal(None), task_id)["task"]
 
     def milestone(self):
         return self.load().get("currentMilestone")
@@ -197,7 +213,7 @@ def list_tasks(queue, status=None, include_archive=False, show_evidence=False):
 
 
 def ready(queue, include_paused=False, any_milestone=False):
-    return queue.service.ready(as_coordinator(None), include_paused=include_paused, any_milestone=any_milestone,
+    return queue.service.ready(acting_principal(None), include_paused=include_paused, any_milestone=any_milestone,
                                reach=merge_reach(queue.conf))
 
 
@@ -209,7 +225,7 @@ def add(queue, task_id, role, owned, objective, contract, accept, depends=(), mi
         profile=None, min_capability=0):
     if int(min_capability or 0) < 0:
         raise TaskError("--min-capability must be 0 or more")
-    added = queue.service.add(as_coordinator(None), {
+    added = queue.service.add(acting_principal(None), {
         "id": task_id, "role": role, "owned": list(owned), "objective": objective, "contract": contract,
         "accept": list(accept), "depends": list(depends), "milestone": milestone, "room": room, "priority": priority,
         "profile": profile, "min_capability": min_capability})
@@ -251,7 +267,7 @@ def active_by_provider(tasks):
 
 def assign(queue, task_id, owner, provider, model, worktree, base, log_dir, force=False, owner_id=None, principal=None):
     """Record an assignment to a worktree that already exists (claim, then activate at once)."""
-    svc, principal = queue.service, as_coordinator(principal)
+    svc, principal = queue.service, acting_principal(principal)
     owner_id = owner_id or owner_id_of(queue.conf, {"owner": owner, "execution": {"model": model}})
     claim = svc.claim(principal, task_id, owner_id, owner=owner, provider=provider, model=model, force=force,
                       capacity=provider_capacity(queue.conf, provider),
@@ -278,7 +294,7 @@ def kept_worktree(queue, task_id, worktree):
 
 
 def release(queue, task_id, reason, principal=None):
-    released = queue.service.release(as_coordinator(principal), task_id, reason)
+    released = queue.service.release(acting_principal(principal), task_id, reason)
     return (f"{task_id} -> pending (attempt recorded in previousAttempts)"
             + kept_worktree(queue, task_id, released["worktree"]))
 
@@ -302,7 +318,7 @@ def deliver(queue, task_id, handoff, principal=None):
         text = Path(handoff).read_text(errors="replace")
     except OSError:
         text = None
-    delivered = queue.service.deliver(as_coordinator(principal), task_id, handoff_path=str(handoff),
+    delivered = queue.service.deliver(acting_principal(principal), task_id, handoff_path=str(handoff),
                                       result=handoff_result(handoff), handoff_text=text)
     if delivered.get("already"):
         return f"{task_id} is already delivered"
@@ -313,7 +329,7 @@ def reopen(queue, task_id, reason):
     """Undo a premature delivery: verification back to in_progress, keeping the note in previousAttempts."""
     task = queue.get(task_id)
     aside = set_aside_handoff(task) if task["status"] == "verification" else None
-    reopened = queue.service.reopen(as_coordinator(None), task_id, reason, handoff=aside)
+    reopened = queue.service.reopen(acting_principal(None), task_id, reason, handoff=aside)
     return busy_suffix(task, reopened, f"{task_id} -> in_progress again ({reason})")
 
 
@@ -343,7 +359,7 @@ def unmerge(queue, task_id, reason, revert_commit=None):
     """Merged back to in_progress after the merge was reverted; owner and worktree stay for a redelivery."""
     task = queue.get(task_id)
     aside = set_aside_handoff(task) if task["status"] == "merged" else None
-    unmerged = queue.service.unmerge(as_coordinator(None), task_id, reason, revert_commit, handoff=aside)
+    unmerged = queue.service.unmerge(acting_principal(None), task_id, reason, revert_commit, handoff=aside)
     if unmerged.get("busy_with"):
         return busy_suffix(task, unmerged, f"{task_id} unmerged")
     return (f"{task_id} -> in_progress again; redeliver in {task.get('worktree')} and merge as usual, or release it"
@@ -352,17 +368,17 @@ def unmerge(queue, task_id, reason, revert_commit=None):
 
 def rebase(queue, task_id, base):
     """Record a new base after the worker moved its worktree HEAD along the base branch."""
-    rebased = queue.service.rebase(as_coordinator(None), task_id, base)
+    rebased = queue.service.rebase(acting_principal(None), task_id, base)
     return f"{task_id}: worktree rebased, base {rebased['previous']} -> {base}"
 
 
 def mark_merged(queue, task_id, commit):
-    queue.service.mark_merged(as_coordinator(None), task_id, commit)
+    queue.service.mark_merged(acting_principal(None), task_id, commit)
     return f"{task_id} -> merged in {commit}; record runtime evidence with `theseus tasks observe` and verify before completing"
 
 
 def observe(queue, task_id, how, level="observed"):
-    queue.service.observe(as_coordinator(None), task_id, how, level)
+    queue.service.observe(acting_principal(None), task_id, how, level)
     return f"{task_id}: {level} recorded"
 
 
@@ -453,7 +469,7 @@ def complete(queue, task_id, summary, commit=None, checks=(), log=None, limits=(
         missing = unintegrated_files(worktree, queue.root, (task.get("merge") or {}).get("commit") or "HEAD")
         if missing:
             raise TaskError(f"{task_id} delivered files that main never committed: {', '.join(missing)}; integrate them or pass --force")
-    queue.service.complete(as_coordinator(None), task_id, summary, commit, checks, log, limits, force=force)
+    queue.service.complete(acting_principal(None), task_id, summary, commit, checks, log, limits, force=force)
     return f"{task_id} -> completed; commit the record with `theseus tasks export`"
 
 
@@ -641,7 +657,7 @@ def export(queue, head=None):
     """Write the store's tasks into the working tree as tasks.json, tasks-archive.jsonl and tasks-history.jsonl. Never
     commits."""
     from . import taskrecords
-    snap = queue.service.export(as_coordinator(None), head=head)
+    snap = queue.service.export(acting_principal(None), head=head)
     taskrecords.write(snap, queue.root)
     doc, archived, history = snap.documents()
     return (f"exported {len(doc['tasks'])} open and {len(archived)} archived task(s) and {len(history)} history line(s) "
@@ -653,7 +669,7 @@ def import_(queue, replace=False, new_id=False):
     from . import store, taskrecords
     with store.opened() as conn:
         backup = store.backup(conn, label="pre-import")["path"]
-    report = queue.service.import_(as_coordinator(None), taskrecords.read(queue.root), replace=replace, new_id=new_id)
+    report = queue.service.import_(acting_principal(None), taskrecords.read(queue.root), replace=replace, new_id=new_id)
     lines = [f"imported {report['open']} open and {report['archived']} archived task(s) of {report['project']} "
              f"(id {report['id']}) in {report['seconds']} s; the store was backed up to {backup}"]
     if report["saved"]:
@@ -663,25 +679,25 @@ def import_(queue, replace=False, new_id=False):
 
 def note(queue, task_id, text):
     """Set the coordinator's assignment note, which task messages and prompts carry to the worker."""
-    queue.service.note(as_coordinator(None), task_id, text)
+    queue.service.note(acting_principal(None), task_id, text)
     return f"{task_id}: note set"
 
 
 def edit(queue, task_id, changes, force=False):
-    edited = queue.service.edit(as_coordinator(None), task_id, changes, force=force)
+    edited = queue.service.edit(acting_principal(None), task_id, changes, force=force)
     lines = [f"{task_id}: edited ({', '.join(sorted(changes))}), revision {edited['rev']}"]
     return "\n".join(lines + [f"warning: {warning}" for warning in edited["warnings"]])
 
 
 def set_priority(queue, task_id, priority):
     """Higher priority is assigned first among ready tasks; equal priorities keep task-file order."""
-    queue.service.edit(as_coordinator(None), task_id, {"priority": int(priority)}, force=True)
+    queue.service.edit(acting_principal(None), task_id, {"priority": int(priority)}, force=True)
     return f"{task_id}: priority {int(priority)}"
 
 
 def set_profile(queue, task_id, profile):
     """The agent profile a task needs (only its agents, or ones the queue can relaunch onto it, take it); empty: any."""
-    queue.service.edit(as_coordinator(None), task_id, {"profile": profile or None}, force=True)
+    queue.service.edit(acting_principal(None), task_id, {"profile": profile or None}, force=True)
     return f"{task_id}: {f'needs profile {profile}' if profile else 'any profile'}"
 
 
@@ -690,17 +706,17 @@ def set_min_capability(queue, task_id, level):
     level = int(level)
     if level < 0:
         raise TaskError("the minimum capability must be 0 or more")
-    queue.service.edit(as_coordinator(None), task_id, {"min_capability": level}, force=True)
+    queue.service.edit(acting_principal(None), task_id, {"min_capability": level}, force=True)
     return f"{task_id}: {f'needs capability >= {level}' if level else 'any capability'}"
 
 
 def hold(queue, task_id, held):
-    queue.service.hold(as_coordinator(None), task_id, held)
+    queue.service.hold(acting_principal(None), task_id, held)
     return f"{task_id}: {'held, the queue will not assign it' if held else 'released to the queue'}"
 
 
 def set_milestone(queue, milestone):
-    queue.service.set_milestone(as_coordinator(None), milestone)
+    queue.service.set_milestone(acting_principal(None), milestone)
     return f"current milestone: {milestone or 'none'}"
 
 

@@ -404,3 +404,29 @@ Locking and edits:
 - The queue lock is narrowed as section 4 describes. Of the task commands, only `rebase`, `unmerge`, `reopen` (which moves the handoff the tick reads), `retire` and `import` take it. `tasks priority`, `edit`, `note` and the rest no longer wait for a tick.
 - `tasks priority`, `profile` and `capability` are aliases of `edit --force`. They still work on in-progress tasks, now with an edit note, and are refused on delivered or merged ones.
 - The history keeps each delivery's attempt number, result, source, reason and handoff hash, and an import restores the attempt's result and source from it (section 16).
+
+## 20. Phase 3 implementation notes
+
+Phase 3 makes the CLI identify its caller.
+
+Credentials:
+
+- A supervised run's credentials file, `<data>/agents/NAME/credentials` (mode 0600), is written by `agents _exec` just before it execs the agent. `THESEUS_AGENT_ID` and `THESEUS_CREDENTIALS` are set in that process only. The secret is in no launch spec, pane command, tmux environment or `runs.log`, and the launch hash is unchanged, so no agent reports drift.
+- A dispatch worker's file is `<data>/workers/NAME/credentials`, under the id minted for its attempt.
+- Credentials are valid only while their run is open (`agent_runs.ended` is null) or, for a dispatch worker, while its attempt is claimed or active. This is checked when authenticating, so a run that ends any way at all (crash, stop, lost server) stops authenticating without a revocation step. `revoke_credentials` remains for explicit use.
+
+Who may run what:
+
+- Commands that change task state resolve the caller with `taskservice.principal()` and require the coordinator: `tasks` (all but the reads), `merge`, `dispatch`, `instance assign`, and `queue tick`, `run` and `wait` when it drives. Anything else is refused with the worker commands' names. Reads (`tasks list|ls|ready|show|prompt|check-delivery|consumers|stats`) resolve no one.
+- `theseus task show|note|done|blocked TASK` take the worker's credentials, and the task must be the worker's active attempt; otherwise `not-your-task`.
+  - `task show` resolves the caller read-only.
+  - `task done` reads the handoff's `Result` and passes the patch targets under `.theseus/patches/` as observed touches.
+  - The coordinator may run them for a subagent of its own session: a note is then a worker note, and the delivery has source `command`.
+- `task note --question` wakes `queue wait` (a `question` event) until the coordinator answers with `tasks note ID` or an edit. `queue status` lists open questions.
+
+Output and assignment:
+
+- `--json` applies to every `tasks` and `task` subcommand: one object, `{"ok": true, "data": ...}` (the command's JSON output, else its lines) or `{"ok": false, "error": {"code", "message"}}`, with exit codes 0, 1 refused, 3 conflict. Other commands do not take it yet.
+- The task message is a pointer line. A supervised agent is told to run `theseus task show ID` and to report with `task done` or `task blocked`. A hand-made pane is told to use `theseus tasks show ID` and to write its handoff, which the permanent fallback picks up. No record text is typed.
+
+Tests strip `TMUX` and `TMUX_PANE` from their environment, since the developer's own pane could match a fake hand-made agent's pane id.

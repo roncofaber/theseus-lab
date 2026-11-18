@@ -56,7 +56,7 @@ from . import store
 from . import tasks as t
 from . import upgrade
 
-ATTENTION = {"delivered", "partial", "blocked", "stalled", "error", "fallback"}
+ATTENTION = {"delivered", "partial", "blocked", "stalled", "error", "fallback", "question"}
 
 
 def queue_dir(conf):
@@ -259,11 +259,7 @@ def assign_and_send(conf, agent, task):
                                          owner=f"{provider}:{agent['name']}:{name}", instance=agent["name"],
                                          owner_id=agent.get("id"), principal=queue_principal())
     try:
-        record = (f"Owned paths: {', '.join(task['ownedPaths'])}. Objective: {task['objective']} "
-                  f"Contract: {task.get('generalContract') or 'not recorded'} Acceptance: {' | '.join(task['acceptance'])}.")
-        record += f" Log directory (handoff.md, changed.sha256): {worktree}/{cfg.WORKER_LOG}."
-        if task.get("assignmentNote"):
-            record += f" Coordinator notes: {task['assignmentNote']}"
+        record = pointer(task["id"], worktree, agent)
         record += kept_work_note(task)
         record += rooms.message(conf, task)
         deadline = conf.section("queue").get("deadline") or ""
@@ -334,6 +330,18 @@ def roll_back(conf, task_id, name, worktree, base, reason):
     else:
         what = f"its worktree kept at {worktree} (it holds changes)"
     return f"{reason}; {task_id} released, {what}"
+
+
+def pointer(task_id, worktree, agent):
+    """Where the task lives: the record, notes and how to report come from the task commands, so the typed message
+    stays short and carries no record text. A hand-made pane has no credentials: it reads with `theseus tasks show`
+    and its handoff is picked up when it settles."""
+    handoff = f"{worktree}/{cfg.WORKER_LOG}/handoff.md"
+    if not agent.get("managed"):
+        return (f"Read the record with `theseus tasks show {task_id}`; write the handoff to {handoff} when you finish "
+                f"(theseus picks it up).")
+    return (f"Run `theseus task show {task_id}` for the record and notes; when you finish, write {handoff} and run "
+            f"`theseus task done {task_id} --handoff {handoff}` (or `theseus task blocked {task_id} REASON`).")
 
 
 def task_message(conf, task_id, worktree, record, deadline="", profile=None):
@@ -940,7 +948,10 @@ def run(conf, interval=30, once=False):
 
 
 def still_open(conf, record):
-    """A delivery the coordinator already merged (theseus merge records the delivery itself) needs no wake-up."""
+    """A delivery the coordinator already merged (theseus merge records the delivery itself), or a question it already
+    answered, needs no wake-up."""
+    if record["kind"] == "question" and record.get("task"):
+        return bool(t.Queue(conf).service.questions(t.acting_principal(), record["task"]))
     if record["kind"] not in ("delivered", "partial", "blocked") or not record.get("task"):
         return True
     task = t.Queue(conf).index().get(record["task"])

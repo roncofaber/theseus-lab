@@ -87,9 +87,10 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
         return lines
     record_dir.mkdir(parents=True, exist_ok=True)
     (record_dir / "prompt.md").write_text(prompt + "\n")
-    principal = t.as_coordinator(None)
+    principal = t.acting_principal(None)
     # A one-shot worker registers no agent, so its attempt carries an id minted for this dispatch.
-    claim = queue.service.claim(principal, task_id, store.new_id(), owner=f"{provider}:{model}:{name}",
+    worker_id = store.new_id()
+    claim = queue.service.claim(principal, task_id, worker_id, owner=f"{provider}:{model}:{name}",
                                 provider=provider, model=model, force=resume_paused,
                                 capacity=None if resume_paused else t.provider_capacity(conf, provider),
                                 reach=None if resume_paused else t.merge_reach(conf, base))
@@ -118,6 +119,8 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
         return lines
     (record_dir / "stderr.log").write_text("")
     env = integrate.worker_environment(conf, worktree)
+    from . import taskservice
+    env.update(taskservice.grant(taskservice.QUEUE, worker_id, worker_id, record_dir / "credentials"))
     env.update({"THESEUS_RETRY": "1" if profile.get("retry") and resume else "0",
                 "THESEUS_RESUME_JSON": json.dumps(resume) if resume else ""})
     process = subprocess.Popen(

@@ -436,6 +436,46 @@ class TaskFlowTests(Sandbox):
         from theseus import agents, config as cfg
         self.assertEqual("second-task", agents.current_task(cfg.load(root=self.project), "worker-1")["id"])
 
+    def test_a_worker_reports_through_its_task_commands_and_nothing_else(self):
+        from theseus import config as cfg, taskservice as ts, tasks as t
+        self.add_task()
+        self.add_task("other-task", owned=("docs/investigations/other-task.md",))
+        self.theseus("agents", "add", "worker-1", "%9")
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        worktree = self.tmp / "worktrees/worker-1-a"
+        agent_id = self.record()["ownerId"]
+        grant = ts.grant(ts.QUEUE, agent_id, agent_id, self.tmp / "credentials")
+        worker = {**self.env, **grant}
+        run = lambda *args, **kw: self.theseus(*args, cwd=worktree, env=worker, check=False, **kw)
+
+        shown = json.loads(run("task", "show", TASK, "--json").stdout)
+        self.assertEqual((True, str(worktree)), (shown["ok"], shown["data"]["attempt"]["worktree"]))
+        stale = json.loads(run("task", "show", "other-task", "--json").stdout)
+        self.assertEqual("not-your-task", stale["error"]["code"])
+        refused = run("tasks", "hold", TASK)
+        self.assertEqual(1, refused.returncode)
+        self.assertIn("theseus task show|note|done|blocked", refused.stderr)
+        self.assertIn("task worktree", self.theseus("tasks", "hold", TASK, cwd=worktree, check=False).stderr,
+                      "no credentials inside a task worktree is not the coordinator either")
+
+        run("task", "note", TASK, "Which header version first?", "--question")
+        self.assertIn("question parse-capture-header: Which header version first?",
+                      self.theseus("queue", "status").stdout)
+        self.theseus("tasks", "note", TASK, "Version 2 first.")
+        self.assertNotIn("question", self.theseus("queue", "status").stdout)
+
+        self.deliver(worktree)
+        done = run("task", "done", TASK)
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertEqual("verification", self.record()["status"])
+        conf = cfg.load(root=self.project)
+        with t.acting(ts.COORDINATOR):
+            history = t.Queue(conf).service.get(ts.COORDINATOR, TASK, history=True)["history"]
+        delivered = next(e for e in history if e["kind"] == "delivered")
+        self.assertEqual(("command", 1), (delivered["detail"]["source"], len([e for e in history if e["kind"] == "delivered"])))
+        self.assertEqual("unauthenticated", json.loads(run("task", "show", TASK, "--json").stdout)["error"]["code"],
+                         "a dispatch-style credential ends with its attempt")
+
     def test_reassigning_to_the_same_agent_moves_the_previous_worktree_aside(self):
         self.add_task()
         self.theseus("instance", "assign", TASK, "worker-1", "a")

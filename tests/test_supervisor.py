@@ -247,6 +247,12 @@ class SupervisorTests(Sandbox):
         self.assertIn("env FAKE_SECRET", runs_log)
         self.assertNotIn("s3cret", runs_log)
         self.assertEqual(0o600, (self.tmp / "data/agents/demo-fake-1/runs.log").stat().st_mode & 0o777)
+        from theseus import taskservice
+        credentials = self.tmp / "data/agents/demo-fake-1/credentials"
+        self.assertEqual(0o600, credentials.stat().st_mode & 0o777)
+        granted = json.loads(credentials.read_text())
+        self.assertNotIn(granted["run_secret"], runs_log + start_command + environment)
+        self.assertEqual("worker", taskservice.authenticate(granted).role, "an open run's credentials authenticate")
         listed = self.theseus("agents", "ls").stdout
         self.assertRegex(listed, r"demo-fake-1\s+free\s+fake\s+gen 1")
         self.assertRegex(self.theseus("agents").stdout, r"demo-fake-1\s+=demo--demo-fake-1:\s+free")
@@ -257,6 +263,8 @@ class SupervisorTests(Sandbox):
         self.wait_for(lambda: self.runs("demo-fake-1")[-1].get("ended"), message="the pane-died hook to close the run")
         crashed = self.runs("demo-fake-1")[-1]
         self.assertEqual("crash", crashed["stop_reason"])
+        with self.assertRaises(taskservice.TaskError):
+            taskservice.authenticate(granted)
         self.assertTrue(crashed["exit_signal"] or crashed["exit_status"] is not None)
         self.wait_for(lambda: len(self.runs("demo-fake-1")) == 2, message="the hook to restart the agent")
         self.assertEqual(1, len(self.runs("demo-fake-2")))

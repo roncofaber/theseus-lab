@@ -315,8 +315,14 @@ class SqliteRepo:
                              VALUES (?, ?, ?, ?)""", (agent_id, run_id, secret_hash, store.iso()))
 
     def credential_hashes(self, agent_id):
+        """Secret hashes of agent_id's live credentials: unrevoked, and either of a supervised run that has not ended
+        or (run_id equal to agent_id) of a dispatch worker whose attempt is still claimed or active."""
         return [row[0] for row in self.conn.execute(
-            "SELECT secret_hash FROM agent_credentials WHERE agent_id = ? AND revoked IS NULL", (agent_id,))]
+            """SELECT c.secret_hash FROM agent_credentials c WHERE c.agent_id = ? AND c.revoked IS NULL AND (
+                   EXISTS (SELECT 1 FROM agent_runs r WHERE CAST(r.id AS TEXT) = c.run_id AND r.agent_id = c.agent_id
+                           AND r.ended IS NULL)
+                   OR (c.run_id = c.agent_id AND EXISTS (SELECT 1 FROM task_attempts a WHERE a.agent_id = c.agent_id
+                                                         AND a.phase IN ('claimed', 'active'))))""", (agent_id,))]
 
     def hand_made_agent(self, pane):
         """The name of a registered agent the user launched by hand (not supervised) in pane, or None."""
