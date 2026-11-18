@@ -369,6 +369,8 @@ class TaskFlowTests(Sandbox):
         self.assertIn(f"Revert the {TASK} merge {first}", self.git("log", "-1", "--format=%B", attempt["revertCommit"]).stdout)
         from theseus import config as cfg, workqueue
         self.assertEqual(1, len(workqueue.events(cfg.load(root=self.project), task=TASK, kinds=["unmerged"])))
+        self.assertFalse((worktree / ".theseus/handoff.md").exists(), "the old handoff would read as a new delivery")
+        self.assertEqual(str(worktree / ".theseus/handoff.attempt1.md"), attempt["handoff"])
 
         self.write("src/capture/header.py", "def parse(data):\n    return bytes(data[:4])\n", root=worktree)
         self.theseus("merge", TASK)
@@ -383,6 +385,18 @@ class TaskFlowTests(Sandbox):
         self.theseus("tasks", "unmerge", TASK, "--no-revert", "--reason", "reverted by hand")
         self.assertEqual("in_progress", self.record()["status"])
         self.assertEqual("", self.git("status", "--porcelain").stdout)
+
+    def test_reopen_refuses_while_the_agent_works_on_another_task(self):
+        self.add_task()
+        self.add_task("second-task", owned=("docs/investigations/second-task.md",))
+        self.git("commit", "-q", "-am", "queue two")
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        self.deliver(self.tmp / "worktrees/worker-1-a")
+        self.theseus("tasks", "deliver", TASK, "--handoff", self.tmp / "worktrees/worker-1-a/.theseus/handoff.md")
+        self.theseus("instance", "assign", "second-task", "worker-1", "b")
+        refused = self.theseus("tasks", "reopen", TASK, "--reason", "premature", check=False)
+        self.assertIn("worker-1, which held parse-capture-header, now works on second-task", refused.stderr)
+        self.assertEqual("verification", self.record()["status"])
 
     def test_reassigning_to_the_same_agent_moves_the_previous_worktree_aside(self):
         self.add_task()

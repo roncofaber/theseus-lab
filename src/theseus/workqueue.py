@@ -201,6 +201,9 @@ def next_task(conf, agent, info, claimed):
 
 
 def reset(conf, agent, kind):
+    prompt = ag.pane_prompt(conf, agent, launched(conf, agent))
+    if prompt:
+        return False, f"not typed: the pane shows a prompt that needs a human ({prompt[:80]})"
     args = [agent["pane"], "--clear"] if kind == "clear" else [agent["pane"]]
     result = run_script(conf, "instance-compact.sh", args, agent)
     if result.returncode != 0:

@@ -1114,8 +1114,10 @@ def kill_pane(srv, rec, grace=10):
 def at_prompt(conf, rec, info):
     """Whether typing the exit command reaches the agent's prompt: the profile has one, the agent is ready and its CLI
     does not say it waits for an answer. A startup dialog or a permission prompt would take the keystrokes as an answer, so those are killed."""
-    from . import workqueue
+    from . import agents, workqueue
     if (record(conf, rec["name"]) or rec).get("phase") != "ready":
+        return False
+    if agents.pane_prompt(conf, rec, workqueue.launched(conf, rec)):
         return False
     if not profiles.interactive(conf, workqueue.launched(conf, rec)).get("exit"):
         return False

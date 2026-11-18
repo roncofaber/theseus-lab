@@ -40,7 +40,7 @@ These files belong to theseus: `theseus upgrade` refreshes them from the install
 | `tools/Supervisor/` | Tests that enforce the project rules (`theseus check`) |
 | `tools/git-hooks/pre-push` | Refuses pushes that break the rules or contain unverified code |
 
-Original software, decompiled code, captures, logs and worktrees live in the data folder (`~/.local/share/<project>` by default), never in Git.
+Original software, decompiled code, captures, logs and worktrees live in the data folder (`$XDG_DATA_HOME/<project>` by default, `~/.local/share/<project>` when `XDG_DATA_HOME` is unset), never in Git.
 
 ## Life of a task
 

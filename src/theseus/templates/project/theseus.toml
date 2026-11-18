@@ -10,7 +10,7 @@ prefix = "{{PREFIX}}"
 
 [paths]
 # Durable, Git-excluded artifacts: evidence, logs, decompiled corpus, worker records.
-data = "~/.local/share/${THESEUS_PROJECT}"
+data = "${XDG_DATA_HOME:-~/.local/share}/${THESEUS_PROJECT}"
 # Builds, run directories and temporary worktrees; safe to prune.
 scratch = "${TMPDIR:-/tmp}/${THESEUS_PROJECT}"
 worktrees = "${THESEUS_DATA}/worktrees"

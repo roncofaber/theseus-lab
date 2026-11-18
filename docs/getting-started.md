@@ -49,7 +49,7 @@ Point theseus at the original software, outside the repository, in the Git-ignor
 original = ["~/legacy/original-install"]
 ```
 
-Durable artifacts (evidence, decompiled corpus, captures, worker records) go under the data root, `~/.local/share/my-port` by default, never in Git.
+Durable artifacts (evidence, decompiled corpus, captures, worker records) go under the data root, `$XDG_DATA_HOME/my-port` by default (`~/.local/share/my-port` when `XDG_DATA_HOME` is unset), never in Git.
 
 ## 4. Configure
 

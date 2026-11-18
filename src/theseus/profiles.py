@@ -13,7 +13,8 @@ A profile describes one agent CLI:
   coordinator) and, for agents theseus supervises itself (theseus.supervisor), the exit command, the flag that
   preassigns a session ID, a status command that lists sessions as JSON (Claude Code: `claude agents --json`), the
   screen text of a ready prompt, the startup dialogs that need a human and the placeholder the input line shows for a
-  long paste.
+  long paste; prompt_patterns (regular expressions) recognize a question on screen that needs a human, such as a
+  permission prompt, which theseus never types into.
 
 Placeholders: {command} {prompt} {message} {session} {model} {permission_mode} {keep} {agent}; an item "{model_args}" expands to
 [model_flag, model] when a model is set and to nothing otherwise. Presets marked verified: false follow the CLI's
@@ -62,6 +63,7 @@ CLAUDE_INTERACTIVE = {
     "startup_dialogs": ["Is this a project you created or one you trust", "Yes, I trust this folder",
                         "New MCP server found"],
     "paste_placeholder": r"\[Pasted text #\d+",
+    "prompt_patterns": [r"Do you want to (?:proceed|make this edit|create|allow|run|use)\b", r"^\s*[>\u276f]\s*1\.\s*Yes\b"],
 }
 
 PRESETS = {

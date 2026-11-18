@@ -9,7 +9,7 @@
 # [defaults]
 # workers.default = "gateway"
 # limits.heavy_runs = 2
-# paths.data = "~/.local/share/${THESEUS_PROJECT}"
+# paths.data = "${XDG_DATA_HOME:-~/.local/share}/${THESEUS_PROJECT}"
 
 # Agent profiles available to every project, same fields as [workers.<name>] in theseus.toml (see
 # docs/agent-profiles.md). A project selects one with [workers] default = "gateway" or `--profile gateway`; a project

@@ -841,6 +841,7 @@ def unmerge(conf, task_id, reason, revert=True):
     task = queue.get(task_id)
     if task["status"] != "merged":
         raise IntegrationError(f"{task_id} is {task['status']}; only a merged task can be unmerged")
+    t.refuse_second_task(queue.load(), task)
     recorded = (task.get("merge") or {}).get("commit")
     if not recorded:
         raise IntegrationError(f"{task_id} records no merge commit")

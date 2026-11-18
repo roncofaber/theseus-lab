@@ -208,6 +208,18 @@ class QueueTests(Sandbox):
         self.assertEqual(0, process.returncode)
         self.assertEqual(3, json.loads(self.theseus("tasks", "show", "locked-task").stdout)["priority"])
 
+    def test_a_hand_made_pane_at_a_permission_prompt_is_waiting_and_never_typed_into(self):
+        self.add("prompt-task")
+        (self.state / "screen-%1").write_text(" Do you want to proceed?\n \u276f 1. Yes\n   2. No\n")
+        out = self.theseus("queue", "tick").stdout
+        self.assertNotIn("assigned", out)
+        self.assertEqual("", self.typed())
+        self.assertEqual("pending", json.loads(self.theseus("tasks", "show", "prompt-task").stdout)["status"])
+        self.assertRegex(self.theseus("agents").stdout, r"worker-a\s+%1\s+waiting")
+        refused = self.theseus("instance", "restart", "worker-a", check=False)
+        self.assertIn("shows a prompt that needs a human", refused.stderr)
+        self.assertEqual("", self.typed())
+
 
 class WakeTests(Sandbox):
     """`theseus queue wait` sleeps until the earlier of its interval and the next pending wake time, so a gateway resend

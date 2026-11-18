@@ -45,6 +45,14 @@ class ConfigTests(Sandbox):
             cfg.load(root=self.project)
 
 
+    def test_the_scaffolded_data_root_follows_xdg_data_home(self):
+        from unittest import mock
+        self.scaffold()
+        with mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(self.tmp / "xdg")}):
+            os.environ.pop("THESEUS_DATA", None)
+            self.assertEqual(self.tmp / "xdg/demo-port", cfg.load(root=self.project).data)
+
+
 class OwnershipTests(unittest.TestCase):
     def test_directories_own_their_contents_with_or_without_a_slash(self):
         self.assertTrue(t.is_owned("scripts/Campaign/FlickRuntime/World.cs", ["scripts/Campaign/FlickRuntime"]))

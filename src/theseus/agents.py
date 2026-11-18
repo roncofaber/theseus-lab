@@ -249,6 +249,23 @@ def pane_stall(conf, pane, profile=None, screen=None, server=None):
     return next((pattern for pattern in patterns if pattern in text), None)
 
 
+PROMPT_LINES = 15
+
+
+def pane_prompt(conf, pane, profile=None, screen=None, server=None):
+    """The screen line of a question that needs a human (a permission prompt or a startup dialog of the profile:
+    interactive.prompt_patterns, interactive.startup_dialogs) among the last lines of the pane, or None. Text typed
+    into such a pane would answer it, so nothing is typed while one shows."""
+    from . import profiles
+    settings = profiles.interactive(conf, profile)
+    patterns = [re.compile(p) for p in settings.get("prompt_patterns") or []]
+    patterns += [re.compile(re.escape(text)) for text in settings.get("startup_dialogs") or []]
+    if not patterns:
+        return None
+    lines = (pane_screen(pane, server) if screen is None else screen)[-PROMPT_LINES:]
+    return next((line.strip() for line in lines if any(p.search(line) for p in patterns)), None)
+
+
 def send_settings(conf):
     """(timeout, poll) in seconds for verified sends: instances.send_verify_seconds, THESEUS_SEND_VERIFY and
     THESEUS_SEND_POLL override them (tests)."""
@@ -432,6 +449,12 @@ def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, 
     does them for all its sends together: the result is (True, "typed; verifying") and kind with extra says what to do
     once it resolves (workqueue.settle_send)."""
     ctx = send_context(conf, agent, profile)
+    prompt = pane_prompt(conf, ctx["pane"], ctx["profile"], server=ctx["server"])
+    if prompt:
+        detail = f"not typed: the pane shows a prompt that needs a human ({prompt[:80]})"
+        if record:
+            record_send_failed(conf, agent["name"], task, text, detail)
+        return False, detail
     current = batch()
     verified = not expect_busy or bool(ctx["busy"])
     error = type_text(ctx, text, sleep, enter=current is None or not verified)
@@ -567,6 +590,8 @@ def state(conf, agent):
             busy = status.get("status") == "busy" or busy
             if status.get("status") == "waiting":
                 waiting = status.get("waitingFor") or "input"
+    if not waiting and (prompt := pane_prompt(conf, pane, agent.get("provider"), screen)):
+        waiting, busy = f"a prompt on screen: {prompt[:80]}", False
     info["busy"] = busy
     info["contextTokens"] = gateway.context_tokens(conf, agent.get("provider"), screen)
     transcript = session_transcript(conf, agent)

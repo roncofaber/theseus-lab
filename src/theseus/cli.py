@@ -338,6 +338,11 @@ def cmd_instance(args):
                 ok, detail = supervisor.restart(conf, named["name"])
             print(f"{named['name']}: {detail}", file=sys.stdout if ok else sys.stderr)
             sys.exit(0 if ok else 1)
+        from . import profiles
+        prompt = agents.pane_prompt(conf, args.pane, (named or {}).get("provider") or profiles.default_name(conf))
+        if prompt:
+            sys.exit(f"theseus: {args.pane} shows a prompt that needs a human ({prompt[:80]}); answer it in the pane "
+                     f"first, since typed text would answer it")
     if args.instance_action == "restart":
         sys.exit(run_script("instance-restart.sh", [args.pane, *(["--dry-run"] if args.dry_run else [])], conf, args.pane))
     if args.instance_action == "compact":

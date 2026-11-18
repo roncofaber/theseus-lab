@@ -403,12 +403,42 @@ def reopen(queue, task_id, reason):
         raise TaskError(f"{task_id} is merged; take it back with `theseus tasks unmerge {task_id}`")
     if task["status"] != "verification":
         raise TaskError(f"{task_id} is {task['status']}, not verification")
+    refuse_second_task(document, task)
     task["status"] = "in_progress"
-    handoff = (task.get("execution") or {}).pop("handoff", None)
-    task.setdefault("previousAttempts", []).append({"reopenedAt": now(), "reason": reason, "handoff": handoff})
+    task.setdefault("previousAttempts", []).append({"reopenedAt": now(), "reason": reason, "handoff": set_aside_handoff(task)})
     queue.save(document)
     record(queue, "reopened", task, reason)
     return f"{task_id} -> in_progress again ({reason})"
+
+
+def second_task(document, task):
+    """Another in_progress task held by the agent that holds task, or None: an agent works one task at a time."""
+    agent = agent_of(task)
+    for other in document["tasks"] if agent else []:
+        if (other["id"] != task["id"] and other["status"] == "in_progress" and agent_of(other) == agent
+                and not (task.get("ownerId") and other.get("ownerId") and task["ownerId"] != other["ownerId"])):
+            return other
+    return None
+
+
+def refuse_second_task(document, task):
+    other = second_task(document, task)
+    if other:
+        raise TaskError(f"{agent_of(task)}, which held {task['id']}, now works on {other['id']}; release one of them first "
+                        f"(`theseus tasks release ID`), so the agent never holds two tasks in progress")
+
+
+def set_aside_handoff(task):
+    """Move the delivered handoff.md to handoff.attemptN.md, so the queue does not take it for a new delivery once the
+    task is back in progress. Returns where the handoff now is."""
+    execution = task.get("execution") or {}
+    recorded = execution.pop("handoff", None)
+    path = Path(recorded) if recorded else (Path(execution["logDir"]) / "handoff.md" if execution.get("logDir") else None)
+    if not path or not path.is_file():
+        return recorded
+    aside = path.with_name(f"handoff.attempt{len(task.get('previousAttempts') or []) + 1}.md")
+    os.replace(path, aside)
+    return str(aside)
 
 
 def unmerge(queue, task_id, reason, revert_commit=None):
@@ -417,8 +447,8 @@ def unmerge(queue, task_id, reason, revert_commit=None):
     task = queue.open_task(document, task_id)
     if task["status"] != "merged":
         raise TaskError(f"{task_id} is {task['status']}, not merged")
-    attempt = {"merge": task.pop("merge", None), "unmergedAt": now(), "reason": reason,
-               "handoff": (task.get("execution") or {}).pop("handoff", None)}
+    refuse_second_task(document, task)
+    attempt = {"merge": task.pop("merge", None), "unmergedAt": now(), "reason": reason, "handoff": set_aside_handoff(task)}
     if revert_commit:
         attempt["revertCommit"] = revert_commit
     if task.get("evidence"):
