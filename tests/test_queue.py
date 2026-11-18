@@ -245,8 +245,9 @@ class CodeChangeTests(Sandbox):
         self.addCleanup(os.chdir, os.getcwd())
         os.chdir(self.project)
         argv = ["queue", "wait", "--interval", "1", "--timeout", "5"]
-        with mock.patch.object(upgrade, "code_stamp", side_effect=[(1, 1), (1, 2)]), \
-                mock.patch("os.execv") as execv, mock.patch("sys.argv", ["/bin/theseus"]):
+        stamps = [(1, 1), (1, 2), (1, 2)]
+        with mock.patch.object(upgrade, "code_stamp", side_effect=stamps), mock.patch("os.execv") as execv, \
+                mock.patch("sys.argv", ["/bin/theseus"]):
             cli.main(argv)
         execv.assert_called_once()
         self.assertEqual(["/bin/theseus", *argv], execv.call_args[0][1][1:])

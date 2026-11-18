@@ -44,9 +44,33 @@ class CodeChanged(Exception):
 
 
 def code_stamp():
-    """(file count, newest mtime) of the theseus package's Python sources, which any reinstall or edit changes."""
-    files = list(Path(__file__).resolve().parent.rglob("*.py"))
-    return len(files), max((f.stat().st_mtime_ns for f in files), default=0)
+    """(file count, newest mtime) of the theseus package's Python sources, which any reinstall or edit changes; None
+    while files come and go under an install."""
+    try:
+        files = list(Path(__file__).resolve().parent.rglob("*.py"))
+        return len(files), max((f.stat().st_mtime_ns for f in files), default=0)
+    except OSError:
+        return None
+
+
+class CodeWatch:
+    """Compares the code on disk with the code at start; check() raises CodeChanged once the same changed stamp is seen
+    twice in a row, so a restart never lands in a tree an install is still writing."""
+
+    def __init__(self):
+        self.start = code_stamp()
+        self.pending = None
+
+    def check(self):
+        stamp = code_stamp()
+        if self.start is None:
+            self.start = stamp
+        if stamp is None or stamp == self.start:
+            self.pending = None
+        elif stamp == self.pending:
+            raise CodeChanged()
+        else:
+            self.pending = stamp
 
 
 def restart(argv, execv=None):

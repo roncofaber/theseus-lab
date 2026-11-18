@@ -721,18 +721,12 @@ def reloaded(conf, seen):
         return conf, current
 
 
-def same_code(stamp):
-    """Raise upgrade.CodeChanged when the theseus code on disk is no longer the code this loop started with."""
-    if upgrade.code_stamp() != stamp:
-        raise upgrade.CodeChanged()
-
-
 def run(conf, interval=30, once=False):
     started = time.time()
     seen = None
-    code = upgrade.code_stamp()
+    code = upgrade.CodeWatch()
     while True:
-        same_code(code)
+        code.check()
         conf, seen = reloaded(conf, seen)
         for record in tick(conf):
             print(f"{record['time']} {record['kind']:<10} {record['agent'] or '-':<18} {record['task'] or '-'} {record['detail']}")
@@ -783,9 +777,9 @@ def wait(conf, timeout=10800, interval=30, drive=True, clock=time.time, sleep=ti
     started = clock()
     deadline = started + timeout
     seen = None
-    code = upgrade.code_stamp()
+    code = upgrade.CodeWatch()
     while clock() < deadline:
-        same_code(code)
+        code.check()
         conf, seen = reloaded(conf, seen)
         if drive:
             tick(conf)

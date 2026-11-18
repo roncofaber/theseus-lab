@@ -122,7 +122,7 @@ class TaskIdTests(Sandbox):
         self.assign()
         document = self.queue.load()
         document["tasks"][-1].pop("ownerId")
-        stale = dict(document["tasks"][-1], execution={"assignedAt": "2000-01-01T00:00:00Z"})
+        stale = dict(document["tasks"][-1], execution={"model": "persistent-instance", "assignedAt": "2000-01-01T00:00:00Z"})
         document["tasks"][-1]["previousAttempts"] = [stale]
         self.queue.save(document)
         self.assertIn("1 task(s), agentId on 0 attempt(s)", self.theseus("tasks", "migrate-ids").stdout)
@@ -131,7 +131,15 @@ class TaskIdTests(Sandbox):
         self.assertEqual(self.agent_id(), task["ownerId"])
         self.assertNotIn("agentId", task["previousAttempts"][0])
 
-    def test_json_views_carry_the_id(self):
-        self.assertTrue(self.agent_id())
-        states = json.loads(self.theseus("agents", "ls", "--json").stdout)
-        self.assertEqual(self.agent_id(), states["unmanaged"][0]["id"])
+    def test_json_views_carry_the_id_and_plain_views_do_not(self):
+        fake = self.tmp / "bin"
+        fake.mkdir()
+        (fake / "tmux").write_text("#!/bin/sh\nexit 1\n")
+        (fake / "tmux").chmod(0o755)
+        env = {**self.env, "PATH": f"{fake}:{self.env['PATH']}"}
+        agent = self.agent_id()
+        self.assertTrue(agent)
+        states = json.loads(self.theseus("agents", "ls", "--json", env=env).stdout)
+        self.assertEqual(agent, states["unmanaged"][0]["id"])
+        self.assertEqual(agent, json.loads(self.theseus("top", "--once", "--json", env=env).stdout)["agents"][0]["id"])
+        self.assertNotIn(agent, self.theseus("agents", "ls", env=env).stdout + self.theseus("agents", env=env).stdout)
