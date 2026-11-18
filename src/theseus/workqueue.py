@@ -252,7 +252,7 @@ def assign_and_send(conf, agent, task):
     from . import integrate
     from . import profiles
     provider = agent.get("provider") or profiles.default_name(conf)
-    suffix = task["id"][:24]
+    suffix = task["id"][:24].rstrip("-.")
     name = f"{agent['name']}-{suffix}"
     worktree, base, _ = integrate.assign(conf, task["id"], name, provider, "persistent-instance",
                                          owner=f"{provider}:{agent['name']}:{name}", instance=agent["name"],

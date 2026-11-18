@@ -90,6 +90,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- A worktree name truncated from a long task id no longer ends in a hyphen or dot (a trailing hyphen next to the path separator confused a client's permission path matching).
+
 - A task whose dependency is merged now waits until that merge commit is in the assignment base (`[git] base`, normally `origin/main`; local `HEAD` for in-place assignment) before the queue tick, `theseus instance assign` or `theseus dispatch` assigns it, so its worktree no longer starts without the dependency's change while the merge is still local and unpushed. `theseus tasks list`, `theseus queue status` and the console show the reason (`waiting for A's merge 2ab13fb to reach origin/main`), and the queue records one `held` event, which does not wake `queue wait`. A dependency completed without a merge commit, or whose recorded commit no longer resolves, counts as satisfied as before.
 
 - `theseus queue run` and `queue wait` read the project and host configuration again when one of its files changes, and reconcile retires an agent only when the current files no longer configure it, so an older watcher no longer stops an agent that `theseus agents scale` just added.
