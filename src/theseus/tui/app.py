@@ -628,6 +628,8 @@ class TopApp(App):
         self.pending_open = None
         self.title = f"theseus · {len(snap['projects'])} project(s) · updated {top.local_clock(snap['time'])}"
         self.redraw()
+        if isinstance(self.screen, popups.AgentScreen):
+            self.screen.refresh_body()
         if self.greet and snap["projects"]:
             self.greet = False
             self.call_after_refresh(self.focus_first_card)
@@ -891,6 +893,15 @@ class TopApp(App):
             restart=(lambda: cli("agents", "restart", name)) if supervised else None,
             stop=(lambda: cli("agents", "down", name)) if supervised else None,
             start=(lambda: cli("agents", "up", name)) if supervised else None)
+        def live_body():
+            current = next((a for a in view.panes.values() if a.get("name") == name), None)
+            if current is None:
+                return None
+            snapshot = view.item["snapshot"]
+            current_task = (snapshot.get("tasks") or {}).get(current.get("task"))
+            return R.agent_text(current, current_task, (snapshot.get("host") or {}).get("memTotal") or 0)
+        actions.body = live_body
+        actions.events = lambda: R.agent_events(view.item["snapshot"]["events"], name)
         self.push_screen(popups.AgentScreen(f"agent {agent.get('display') or name}", body, pane, actions,
                                             poll=self.mirror_seconds))
 

@@ -233,6 +233,13 @@ class AgentScreen(Dialog):
 
     COMMANDS = {commands.AgentCommands}
 
+    def refresh_body(self):
+        body = getattr(self.actions, "body", None)
+        text = body() if body else None
+        if text is not None:
+            self.body = text
+            self.query_one("#text", Static).update(text)
+
     BINDINGS = [Binding("escape", "close", "Close the popup"),
                 Binding("i", "type_through", "Type into the pane (Esc Esc or Ctrl-] leaves)"),
                 Binding("enter", "attach", "Attach to the pane here (C-q detaches)"),
