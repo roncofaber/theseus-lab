@@ -123,12 +123,12 @@ class TaskFlowTests(Sandbox):
         self.theseus("tasks", "complete", TASK, "--from-log", log, "--summary", "header reader merged and verified")
         self.assertEqual("completed", self.record()["status"])
         self.assertIn("archived 1", self.theseus("tasks", "archive").stdout)
+        self.assertEqual("", self.git("status", "--porcelain", "--untracked-files=no").stdout)
         self.assertEqual([], json.loads((self.project / "docs/project/tasks.json").read_text())["tasks"])
         self.assertEqual("completed", self.record()["status"])
         self.theseus("tasks", "retire", TASK)
         self.assertFalse(worktree.exists())
         self.assertNotIn("work/worker-1-a", self.git("branch").stdout)
-        self.git("commit", "-q", "-am", "archive")
         self.theseus("check")
         self.theseus("docs", "check")
 
@@ -293,6 +293,23 @@ class TaskFlowTests(Sandbox):
         commit = self.record()["merge"]["commit"]
         self.assertIn("README.md", self.git("show", "--name-only", "--format=", commit).stdout.split())
         self.assertEqual("", self.git("status", "--porcelain").stdout)
+
+    def test_bookkeeping_commits_leave_the_coordinators_staged_changes_staged(self):
+        self.add_task()
+        self.write("docs/project/tasks-archive.jsonl", '{"id": "staged-by-hand"}\n')
+        self.git("add", "docs/project/tasks-archive.jsonl")
+        staged = lambda: self.git("diff", "--cached", "--name-only").stdout.split()
+        changed = lambda: self.git("show", "--name-only", "--format=", "HEAD").stdout.split()
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        self.assertEqual(["docs/project/tasks.json"], changed())
+        self.deliver(self.tmp / "worktrees/worker-1-a")
+        self.theseus("merge", TASK)
+        self.assertEqual(["docs/project/tasks.json"], changed())
+        self.assertNotIn("docs/project/tasks-archive.jsonl", self.git("show", "--name-only", "--format=", "HEAD~1").stdout)
+        self.theseus("tasks", "unmerge", TASK, "--reason", "smoke failed")
+        self.assertEqual(["docs/project/tasks.json"], changed())
+        self.assertNotIn("docs/project/tasks-archive.jsonl", self.git("show", "--name-only", "--format=", "HEAD~1").stdout)
+        self.assertEqual(["docs/project/tasks-archive.jsonl"], staged())
 
     def test_unmerge_reverts_the_merge_and_a_redelivery_merges_again(self):
         self.add_task()

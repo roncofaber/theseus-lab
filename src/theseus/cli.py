@@ -276,7 +276,12 @@ def cmd_tasks(args):
     elif action == "stats":
         emit(t.stats(conf, args.since))
     elif action == "archive":
-        emit(t.archive(queue))
+        message = t.archive(queue)
+        if message.startswith("archived"):
+            from . import gitutil
+            gitutil.commit_paths(conf.root, f"chore: {message}", [cfg.TASKS, cfg.ARCHIVE])
+            message += "; committed"
+        emit(message)
     elif action == "milestone":
         if args.value is None:
             print(queue.milestone() or "none")
@@ -1063,7 +1068,7 @@ def build_parser():
     p.add_argument("--force", action="store_true")
     p = ts.add_parser("stats", help="per provider and model: runs, results, minutes to handoff, follow-ups")
     p.add_argument("--since")
-    ts.add_parser("archive", help="move completed tasks to tasks-archive.jsonl")
+    ts.add_parser("archive", help="move completed tasks to tasks-archive.jsonl and commit the two files")
     p = ts.add_parser("milestone", help="print or set currentMilestone ('' clears it)")
     p.add_argument("value", nargs="?")
     tasks.set_defaults(func=guarded(cmd_tasks))

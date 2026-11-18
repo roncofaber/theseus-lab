@@ -37,10 +37,8 @@ def base_commit(conf):
 
 
 def commit_record(conf, message):
-    if g.git(conf.root, "diff", "--quiet", "HEAD", "--", cfg.TASKS, cfg.ARCHIVE, check=False).returncode == 0:
-        return False
-    g.git(conf.root, "commit", "-q", "-m", message, "--", cfg.TASKS, cfg.ARCHIVE)
-    return True
+    """Commit tasks.json alone: the archive and anything else staged are the coordinator's to commit."""
+    return g.commit_paths(conf.root, message, [cfg.TASKS])
 
 
 def record_committed(conf, task_id, base):
@@ -756,15 +754,8 @@ def merge(conf, task_id, subject=None, accept=(), skip_patches=(), commit=True, 
         return None, report
     if not paths:
         raise IntegrationError("nothing to merge: the delivery changes no files")
-    g.git(root, "add", "-A", "--", *paths)
-    if g.git(root, "diff", "--cached", "--quiet", "--", *paths, check=False).returncode == 0:
+    if not g.commit_paths(root, f"{subject or task['objective']}\n\nDelivered by {task_id}.", [*paths, *deleted]):
         raise IntegrationError("nothing to merge: main already holds this delivery")
-    staged = set(g.out(root, "diff", "--cached", "--name-only").split())
-    stray = sorted(staged - set(paths) - set(deleted))
-    if stray:
-        g.git(root, "reset", "-q", "--", *stray)
-    # A pathspec commit takes paths from the working tree and drops deleted files, so commit the staged index instead.
-    g.git(root, "commit", "-q", "-m", f"{subject or task['objective']}\n\nDelivered by {task_id}.")
     sha = g.out(root, "rev-parse", "--short=12", "HEAD")
     report.append(t.mark_merged(queue, task_id, sha))
     commit_record(conf, f"chore: {task_id} merged in {sha}")
@@ -821,7 +812,6 @@ def unmerge(conf, task_id, reason, revert=True):
     if dirty:
         raise IntegrationError("the main checkout has uncommitted changes to tracked files (" + ", ".join(dirty)
                                + "); commit or set them aside first", 2)
-    g.git(root, "reset", "-q", "--", cfg.TASKS, cfg.ARCHIVE, check=False)
     generated = docs.generated_paths(conf)
     names = g.out(root, "diff-tree", "--root", "--no-commit-id", "-r", "--name-only", "--no-renames", commit).splitlines()
     touched = sorted(set(names) | set(generated))
@@ -847,10 +837,9 @@ def unmerge(conf, task_id, reason, revert=True):
         g.git(root, "add", "-A", "--", *paths)
     if g.out(root, "diff", "--name-only", "--diff-filter=U"):
         refuse("unresolved paths remain after regenerating the indexes")
-    if g.git(root, "diff", "--cached", "--quiet", check=False).returncode == 0:
-        refuse(f"HEAD no longer holds {recorded}; if it was reverted by hand, pass --no-revert")
-    g.git(root, "commit", "-q", "-m", f"Revert the {task_id} merge {recorded}\n\n{reason}")
     g.git(root, "revert", "--quit", check=False)
+    if not g.commit_paths(root, f"Revert the {task_id} merge {recorded}\n\n{reason}", sorted(set(names) | set(paths))):
+        refuse(f"HEAD no longer holds {recorded}; if it was reverted by hand, pass --no-revert")
     sha = g.out(root, "rev-parse", "--short=12", "HEAD")
     message = t.unmerge(queue, task_id, reason, sha)
     commit_record(conf, f"chore: {task_id} unmerged in {sha}")
