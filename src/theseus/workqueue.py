@@ -9,10 +9,11 @@ A tick looks at every registered agent and acts on its state:
 - gateway_error (an idle pane shows a gateway error of its profile): retried with backoff, a fresh context when needed
   and a host-wide circuit breaker (theseus.gateway); a `stalled` event once the resends run out, an `error` event at
   once for a fatal error;
-- free (enabled, no open task, its gateway pool not paused): if a ready task fits its room, the agent is reset (a full
+- free (enabled, not stopped by `theseus agents down`, no open task, its gateway pool not paused): if a ready task fits its room, the agent is reset (a full
   /clear when it carries dirty context into clean work, a /compact otherwise), the task is assigned on a fresh
-  worktree, and its message is sent. A task whose assignment fails gets an `error` event and is skipped for
-  queue.assign_backoff_seconds (default 300) while the queue keeps driving other work.
+  worktree, and its message is sent. A task message that cannot be typed (the pane is gone) rolls the assignment back:
+  the task is released and its untouched worktree removed. A task whose assignment fails gets an `error` event and is
+  skipped for queue.assign_backoff_seconds (default 300) while the queue keeps driving other work.
 A task with "minCapability" goes only to agents whose profile capability ([workers.<name>] capability, default 1) is at
 least that, unless they are registered with exactly the task's profile.
 A task with a "profile" goes only to agents registered with that profile, or to agents whose profile differs from it only in
@@ -250,12 +251,33 @@ def assign_and_send(conf, agent, task):
     text = task_message(conf, task["id"], worktree, record, deadline, launched(conf, agent))
     ok, detail = ag.send_verified(conf, agent, text, task["id"], kind="task")
     if not ok:
-        return False, f"task message not submitted: {detail}"
+        return False, roll_back(conf, task["id"], name, worktree, base, f"task message not submitted: {detail}")
     state = runtime(conf)
     state.setdefault(agent["name"], {}).update({"last_task": task["id"], "assigned": ag.now(), "nudged": None,
                                                 "thrashing": None})
     save_runtime(conf, state)
     return True, str(worktree)
+
+
+def roll_back(conf, task_id, name, worktree, base, reason):
+    """Undo an assignment whose task message never reached the agent: release the task, remove its worktree and
+    work/<name> branch when they hold nothing beyond what assignment wrote, and commit the record. Returns the detail
+    for the error event."""
+    from . import gitutil as g
+    from . import integrate
+    t.release(t.Queue(conf), task_id, reason)
+    status = g.git(worktree, "status", "--porcelain", check=False)
+    changed = [line for line in status.stdout.splitlines()
+               if line[3:].rstrip("/") not in (cfg.WORKER_LOG, cfg.LOCAL_NAME)]
+    head = g.out(worktree, "rev-parse", "HEAD", check=False)
+    if status.returncode == 0 and not changed and head.startswith(base[:12]):
+        g.git(conf.root, "worktree", "remove", "--force", str(worktree), check=False)
+        g.git(conf.root, "branch", "-D", f"work/{name}", check=False)
+        what = "its worktree removed"
+    else:
+        what = f"its worktree kept at {worktree} (it holds changes)"
+    integrate.commit_record(conf, f"chore: release {task_id} ({reason[:60]})")
+    return f"{reason}; {task_id} released, {what}"
 
 
 def task_message(conf, task_id, worktree, record, deadline="", profile=None):
@@ -370,6 +392,8 @@ def tick(conf, assign=True):
                     gateway.observe(conf, agent, info)
                 samples.append((name, info["state"], info["task"]))
                 if info["state"] != "free" or not assign or paused(conf):
+                    continue
+                if agent.get("managed") and agent.get("desired") in ("down", "retire"):
                     continue
                 if gateway.paused_until(gateway.pool_key(conf, launched(conf, agent))):
                     continue

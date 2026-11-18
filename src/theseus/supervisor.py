@@ -1115,6 +1115,7 @@ def set_paused(conf, value):
 def down(conf, names=None, force=False, now=False):
     """Stop managed agents and keep them stopped (desired = down); without names every agent stops and supervision
     pauses until `theseus agents up`. Returns [(name, action, detail)]."""
+    from . import workqueue
     regs = records(conf)
     chosen = names or [n for n, r in regs.items() if r.get("managed")]
     results = []
@@ -1126,13 +1127,17 @@ def down(conf, names=None, force=False, now=False):
         if not rec or not rec.get("managed"):
             results.append((name, "skipped", "not a supervised agent"))
             continue
-        task = current_task(conf, name)
-        if task and not force:
-            results.append((name, "refused", f"holds task {task['id']}; --force stops it anyway (the task stays assigned)"))
-            continue
+        # Marked down under the queue lock before the pane stops, so no tick assigns to it in between.
+        with workqueue.locked(conf):
+            task = current_task(conf, name)
+            if task and not force:
+                results.append((name, "refused", f"holds task {task['id']}; --force stops it anyway (the task stays assigned)"))
+                continue
+            update(conf, name, desired="down")
         graceful = not now and not (force and busy(conf, rec))
         ok, detail = stop(conf, rec, graceful=graceful, reason="down", grace=5 if force else 10)
         if not ok:
+            update(conf, name, desired=rec.get("desired"))
             results.append((name, "refused", detail))
             continue
         server_of(rec).kill_session(rec["target"])

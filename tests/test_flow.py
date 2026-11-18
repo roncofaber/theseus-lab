@@ -374,6 +374,7 @@ class TaskFlowTests(Sandbox):
         record = self.record()
         self.assertEqual(("in_progress", str(worktree)), (record["status"], record["worktree"]))
         self.assertEqual(str(aside), record["previousAttempts"][-1]["worktree"])
+        self.assertEqual("work/worker-1-a-attempt1", record["previousAttempts"][-1]["branch"])
         self.assertEqual(str(aside / ".theseus"), record["previousAttempts"][-1]["execution"]["logDir"])
         self.assertEqual("work/worker-1-a", self.git("branch", "--show-current", cwd=worktree).stdout.strip())
         self.assertEqual("work/worker-1-a-attempt1", self.git("branch", "--show-current", cwd=aside).stdout.strip())

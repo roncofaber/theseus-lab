@@ -344,7 +344,8 @@ def check_previous_attempt(conf, task, worktree):
 
 def move_previous_attempt(conf, queue, task_id, worktree):
     """Move the worktree a previous attempt of task_id left at worktree, and its work/<name> branch, aside to
-    <worktree>-attemptN and record the new path on that attempt. Returns the new path, or None when worktree is free."""
+    <worktree>-attemptN and work/<name>-attemptN and record both on that attempt. Returns the new path, or None when
+    worktree is free."""
     worktree = Path(worktree)
     if not worktree.exists():
         return None
@@ -365,6 +366,8 @@ def move_previous_attempt(conf, queue, task_id, worktree):
     old = str(worktree)
     for record in records:
         record["worktree"] = str(aside)
+        if branch == own:
+            record["branch"] = f"work/{worktree.name}-attempt{n}"
         execution = record.get("execution") or {}
         for key in ("logDir", "handoff"):
             if isinstance(execution.get(key), str) and execution[key].startswith(old + os.sep):

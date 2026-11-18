@@ -11,7 +11,8 @@ case "$1" in
     display) case " $FAKE_PANES " in *" $4 "*) echo 1 ;; *) exit 1 ;; esac ;;
     capture-pane) cat "$FAKE_STATE/screen-$4" 2>/dev/null || echo "> "
         if [ -e "$FAKE_STATE/busy-$4" ]; then echo "working (esc to interrupt)"; rm -f "$FAKE_STATE/busy-$4"; fi ;;
-    send-keys) printf '%s\\n' "$*" >> "$FAKE_STATE/typed"
+    send-keys) if [ -e "$FAKE_STATE/gone-$3" ]; then echo "can't find session: $3" >&2; exit 1; fi
+        printf '%s\\n' "$*" >> "$FAKE_STATE/typed"
         if [ "${!#}" = Enter ] && [ ! -e "$FAKE_STATE/stuck-$3" ]; then touch "$FAKE_STATE/busy-$3"; fi ;;
 esac
 """
@@ -164,6 +165,21 @@ class QueueTests(Sandbox):
         from theseus import config as cfg, workqueue
         self.assertEqual(1, len(workqueue.events(cfg.load(root=self.project), kinds=["error"])))
         self.assertEqual("pending", json.loads(self.theseus("tasks", "show", "blocked-task").stdout)["status"])
+
+    def test_a_task_message_that_cannot_be_typed_rolls_the_assignment_back(self):
+        self.add("lost-task")
+        from theseus import config as cfg, workqueue
+        workqueue.save_runtime(cfg.load(root=self.project), {"worker-a": {"needs_reset": False}})
+        (self.state / "gone-%1").write_text("")
+        out = self.theseus("queue", "tick").stdout
+        self.assertRegex(out, r"error\s+worker-a\s+lost-task task message not submitted: .*can't find session")
+        self.assertIn("lost-task released, its worktree removed", out)
+        record = json.loads(self.theseus("tasks", "show", "lost-task").stdout)
+        self.assertEqual("pending", record["status"])
+        self.assertIn("task message not submitted", record["previousAttempts"][-1]["reason"])
+        self.assertFalse((self.tmp / "worktrees/worker-a-lost-task").exists())
+        self.assertNotIn("work/worker-a-lost-task", self.git("branch").stdout)
+        self.assertEqual("", self.git("status", "--porcelain", "--untracked-files=no").stdout)
 
 
 class WakeTests(Sandbox):
