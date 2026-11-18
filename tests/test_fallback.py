@@ -136,6 +136,17 @@ class FallbackTests(FallbackCase):
         self.assertIn("healthy again", found[0]["detail"])
         self.assertEqual([], health.notify(self.conf))
 
+    def test_errors_stay_out_of_the_breaker_only_while_a_probe_is_pending_or_the_profile_down(self):
+        from theseus import gateway, health
+        for n, agent in enumerate(("worker-a", "worker-b", "worker-c")):
+            gateway.handle(self.conf, {"name": agent, "pane": f"%{n + 1}"}, self.info(screen(ERROR_500)), now=T0 + n)
+        self.assertIsNone(gateway.paused_until("shared", T0 + 3), "three agents' 500s wait for the probe's verdict")
+        health.host_tick(T0 + 5, self.probe(("ok", "primary ok")))
+        self.assertEqual("up", health.state("claude-code")["state"])
+        kinds = [e["kind"] for e in gateway.handle(self.conf, {"name": "worker-d", "pane": "%4"},
+                                                     self.info(screen(ERROR_500)), now=T0 + 70)]
+        self.assertIn("gateway_paused", kinds, "the probe found the model healthy, so the errors trip the breaker again")
+
     def test_probe_results_from_the_command(self):
         from theseus import health
         self.assertEqual("ok", health.run_probe(["sh", "-c", "echo primary ok"], 5)[0])
@@ -188,11 +199,11 @@ class KeyRateTests(FallbackCase):
     def test_the_token_budget_holds_the_newest_agents_and_new_tasks(self):
         from theseus import pools
         project = self.conf.name
-        self.host.write_text(HOST + "tokens_per_minute = 1000000\n")
+        self.host.write_text(HOST + "turns_per_minute = 3\ntokens_per_minute = 1000000\n")
         self.assertEqual([f"{project}/agent-d", f"{project}/worker-a"], self.held(T0),
                          "three turns a minute of 150K and 120K contexts fill most of 1M; the 100K one would overflow")
         self.assertFalse(pools.may_add_turn("shared", 10000, T0)[0])
-        self.host.write_text(HOST + "tokens_per_minute = 2000000\n")
+        self.host.write_text(HOST + "turns_per_minute = 3\ntokens_per_minute = 2000000\n")
         self.assertEqual([], self.held(T0))
         allowed, why = pools.may_add_turn("shared", 300000, T0)
         self.assertFalse(allowed)
@@ -223,6 +234,36 @@ class TickTests(FallbackCase):
         kinds = [e["kind"] for e in wq.tick(conf, assign=False)]
         self.assertEqual((0, 1), (kinds.count("fallback"), kinds.count("turn_held")))
         self.assertEqual([], [e for e in wq.tick(conf, assign=False) if e["kind"] in ("fallback", "turn_held")])
+        from theseus import top
+        banner = [line for line in top.issues({"agents": [], "health": health.snapshot(), "gateway": [], "pools": [],
+                                                "queue": {"review": [], "merged": [], "ready": []},
+                                                "verification": {"limit": 0, "unverified": 0}, "project": conf.name})]
+        self.assertTrue(any("profile claude-code ON FALLBACK backup" in line and "probe failed" in line for line in banner),
+                        banner)
+
+    def test_a_tick_releases_a_supervised_agent_stuck_on_a_gateway_error_and_retries_a_hand_made_one(self):
+        import time
+        from theseus import config as cfg
+        from theseus import gateway, health, store, tasks
+        from theseus import workqueue as wq
+        self.write("theseus.local.toml", "")
+        conf = cfg.load(root=self.project)
+        with store.opened() as conn, store.transaction(conn):
+            health.write(conn, "claude-code", {**health.STATE, "state": "down", "since": time.time(), "reason": "probe failed",
+                                               "on_fallback": True, "fallback": "backup", "switches": 1})
+        error = self.info(screen(ERROR_500))["gateway"]
+        supervised = {**self.agent, "managed": True, "phase": "ready", "desired": "retire"}
+        hand_made = {"name": "worker-b", "pane": "%2", "enabled": True}
+        states = {"worker-a": {"name": "worker-a", "state": "gateway_error", "task": "slow-task", "gateway": error},
+                  "worker-b": {"name": "worker-b", "state": "gateway_error", "task": "other-task", "gateway": error}}
+        handled = []
+        with mock.patch.object(wq.ag, "agents", return_value=[supervised, hand_made]), \
+                mock.patch.object(wq.ag, "state", side_effect=lambda c, a: dict(states[a["name"]])), \
+                mock.patch.object(gateway, "handle", side_effect=lambda c, a, i, now=None: handled.append(a["name"]) or []):
+            recorded = wq.tick(conf, assign=False)
+        self.assertIn(("released", "slow-task"), [(e["kind"], e["task"]) for e in recorded])
+        self.assertEqual("pending", tasks.Queue(conf).get("slow-task")["status"])
+        self.assertEqual(["worker-b"], handled, "a hand-made agent keeps its gateway retries")
 
 
 if __name__ == "__main__":

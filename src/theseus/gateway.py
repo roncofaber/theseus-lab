@@ -35,9 +35,10 @@ for parallel_cap_minutes, then raised one slot every cap_step_up_minutes (pools.
 is in force the newest working agents of the pool beyond the cap get no input at all (theseus.pools.turn_plan). It never
 counts toward the breaker or a profile's health. Model capacity 429s and 529s back off per agent and feed the breaker.
 
-Model-level errors (any 5xx, a connection lost or server error mid-response) of a profile with a fallback
-([workers.<name>] fallback in the host file) go to its health instead of the breaker (theseus.health): they can mark it
-down and move its agents to the fallback.
+Model-level errors (any 5xx, a connection lost or server error mid-response) of a profile with health settings
+([workers.<name>] fallback or [workers.<name>.health] in the host file) go to its health (theseus.health): they can mark
+it down and move its agents to the fallback. While such a profile with a fallback is down or waiting for its probe, its
+errors stay out of the breaker; once a probe finds it healthy they count again.
 """
 import re
 import time
@@ -459,7 +460,7 @@ def handle(conf, agent, info, now=None):
     recorded = []
     scope = error.get("scope") or scope_of(code, error.get("kind"), error.get("subtype"))
     key_level = scope == "key"
-    to_health = scope == "model" and health.has_fallback(profile)
+    to_health = scope == "model" and health.spec(profile) is not None
     strong = code is not None and code in [int(x) for x in hostconfig.gateway().get("strong_codes") or []]
     with store.for_project(conf) as conn:
         if code == 429 and section["stagger_seconds"]:
@@ -475,10 +476,11 @@ def handle(conf, agent, info, now=None):
         store.put_gateway_retry(conn, conf.name, name, now=now, task=task_id, pool=pool, code=code, phase="waiting",
                                 attempt=attempt, errors=errors, retry_after=error.get("retry_after"),
                                 next_epoch=now + wait, signature=error["signature"], recovered=0)
-    down = health.record_error(conf.name, profile, name, error.get("label") or str(code or "?"), now=now) if to_health else None
+    down, suspect = (health.record_error(conf.name, profile, name, error.get("label") or str(code or "?"), now=now)
+                     if to_health else (None, False))
+    spared = to_health and suspect and health.has_fallback(profile) and not strong
     with store.for_project(conf) as conn:
-        tripped = paused if key_level else (None if to_health and not strong else
-                                            breaker(conf, conn, pool, code, error.get("retry_after"), now))
+        tripped = paused if key_level else (None if spared else breaker(conf, conn, pool, code, error.get("retry_after"), now))
     after = f", retry_after {error['retry_after']:g}s" if error.get("retry_after") else ""
     recorded.append(workqueue.event(conf, "gateway_error", name, task_id,
                                     f"code {code or '?'} attempt {attempt + 1}/{attempts}, next retry at "

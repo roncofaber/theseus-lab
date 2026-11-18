@@ -19,7 +19,7 @@ Turns: every tick also records each working agent of the project in the host sto
 was assigned and the context its transcript adapter last reported). turn_plan() orders the working agents of the pool,
 host-wide, by assignment time and lets the oldest take turns while they fit both the working cap (only while a key-level
 429 has cut it, theseus.gateway) and, when the pool sets tokens_per_minute, the token budget: each agent is estimated at
-its context size times turns_per_minute (3 by default) tokens a minute. The newest working agents beyond either limit are
+its context size times turns_per_minute (6 by default) tokens a minute. The newest working agents beyond either limit are
 held: the queue types nothing into them (no resend, nudge or restart prompt) and starts no new task in the pool, until
 the cap rises again one slot at a time or the estimate falls. The oldest working agent is never held.
 """
@@ -32,7 +32,7 @@ from . import hostconfig, store
 
 CLAIM_TTL = store.CLAIM_TTL
 LEASE_TTL = store.LEASE_TTL
-TURNS_PER_MINUTE = 3.0
+TURNS_PER_MINUTE = 6.0
 
 
 def state_dir():

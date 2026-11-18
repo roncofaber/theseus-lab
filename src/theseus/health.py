@@ -14,7 +14,8 @@ health is checked:
 Health is host state in the store (meta health:<profile>), so every project sees one verdict. A profile goes down on
 model-level failures only, never on a 429 (rate, not health): with a probe, a model-level error from one of its agents
 (any 5xx, a connection lost or server error mid-response, theseus.gateway.scope_of) makes the next queue tick on the
-host probe it at once (at most once a minute) and a failed probe marks it down; without a probe, errors from
+host probe it at once (at most once a minute, and once per probe_seconds after an OK probe, while the errors count
+toward the gateway breaker again) and a failed probe marks it down; without a probe, errors from
 down_errors different agents within down_window_minutes do. A probe whose output shows a 429 or a rate limit says
 nothing either way.
 
@@ -119,11 +120,12 @@ def mark_up(data, reason, now):
 
 
 def record_error(project, profile, agent, label, now=None):
-    """A model-level error of an agent running profile. Returns the reason when it marks the profile down."""
+    """A model-level error of an agent running profile. Returns (reason it marked the profile down or None, whether
+    the profile is now down or waiting for a probe, so its errors stay out of the gateway breaker)."""
     now = time.time() if now is None else now
     found = spec(profile)
     if found is None:
-        return None
+        return None, False
     window = found["down_window_minutes"] * 60
     reason = None
     with store.for_host() as conn, store.transaction(conn):
@@ -132,8 +134,9 @@ def record_error(project, profile, agent, label, now=None):
         data["errors"].append({"project": project, "agent": agent, "epoch": now, "label": label})
         if data["state"] == "up":
             if found["probe"]:
-                last = (data.get("last_probe") or {}).get("epoch") or 0
-                if data["next_probe"] is None and now - last >= PROBE_AFTER_ERROR:
+                last = data.get("last_probe") or {}
+                spacing = found["probe_seconds"] if last.get("result") == "ok" else PROBE_AFTER_ERROR
+                if data["next_probe"] is None and now - (last.get("epoch") or 0) >= spacing:
                     data["next_probe"] = now
             else:
                 agents = {(e["project"], e["agent"]) for e in data["errors"]}
@@ -141,16 +144,22 @@ def record_error(project, profile, agent, label, now=None):
                     reason = f"{label} from {len(agents)} agents within {found['down_window_minutes']:g} min"
                     mark_down(data, reason, now, found)
         write(conn, profile, data)
-    return reason
+    return reason, suspect(data)
+
+
+def suspect(data):
+    return data["state"] == "down" or data["next_probe"] is not None
 
 
 def error_agents(conn, since):
-    """(project, agent) pairs whose model-level errors since an epoch went to a profile with a fallback, which the
-    gateway breaker leaves out."""
+    """(project, agent) pairs whose model-level errors since an epoch went to a profile with a fallback that is down or
+    waiting for a probe, which the gateway breaker leaves out. Once a probe has found the profile healthy, its errors
+    count toward the breaker again."""
     found = set()
     for profile, settings in specs().items():
-        if settings["fallback"]:
-            found |= {(e["project"], e["agent"]) for e in read(conn, profile)["errors"] if e.get("epoch", 0) >= since}
+        data = read(conn, profile)
+        if settings["fallback"] and suspect(data):
+            found |= {(e["project"], e["agent"]) for e in data["errors"] if e.get("epoch", 0) >= since}
     return found
 
 
@@ -253,7 +262,8 @@ def host_tick(now=None, runner=None):
 def fallbacks():
     """{profile: fallback} of the profiles on fallback now (read again at most once a second: the queue asks for every
     agent and task of a tick)."""
-    cached = _cache.get("fallbacks")
+    cache_key = ("fallbacks", str(store.path()))
+    cached = _cache.get(cache_key)
     if cached and time.monotonic() - cached[0] < CACHE_SECONDS:
         return dict(cached[1])
     found = {}
@@ -264,7 +274,7 @@ def fallbacks():
                 data = read(conn, profile)
                 if data["on_fallback"] and data["fallback"]:
                     found[profile] = data["fallback"]
-    _cache["fallbacks"] = (time.monotonic(), found)
+    _cache[cache_key] = (time.monotonic(), found)
     return dict(found)
 
 
