@@ -313,6 +313,9 @@ def handoff_result(path):
 def deliver(queue, task_id, handoff):
     document = queue.load()
     task = queue.open_task(document, task_id)
+    if task["status"] == "verification":
+        # A queue tick can record the delivery between merge's first read and this call.
+        return f"{task_id} is already delivered"
     if task["status"] != "in_progress":
         raise TaskError(f"{task_id} is {task['status']}, not in_progress")
     task["status"] = "verification"

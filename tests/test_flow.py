@@ -131,6 +131,19 @@ class TaskFlowTests(Sandbox):
         self.theseus("check")
         self.theseus("docs", "check")
 
+    def test_a_second_delivery_of_the_same_handoff_is_a_no_op(self):
+        self.write("theseus.local.toml", "[paths]\noriginal = []\n")
+        self.add_task()
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        worktree = self.tmp / "worktrees/worker-1-a"
+        self.deliver(worktree)
+        handoff = worktree / ".theseus/handoff.md"
+        from theseus import config as cfg, tasks as t
+        queue = t.Queue(cfg.load(root=self.project))
+        t.deliver(queue, TASK, handoff)
+        self.assertIn("already delivered", t.deliver(queue, TASK, handoff))
+        self.assertEqual("verification", self.record()["status"])
+
     def test_conflicting_delivery_restores_main_and_commits_nothing(self):
         self.add_task()
         self.theseus("instance", "assign", TASK, "worker-1", "a")
