@@ -2,7 +2,8 @@
 
 Everything specific to one user or machine lives here rather than in the package or a project: host-wide agent profiles
 ([workers.<name>]), pools ([pools.<name>]), host store retention and backups ([store]), the gateway circuit breaker
-([gateway]), the private tmux server of supervised agents ([supervisor]), tool locations ([tools.paths])
+([gateway]), the private tmux server of supervised agents ([supervisor]) and its key and style settings ([tmux]),
+tool locations ([tools.paths])
 and host defaults for project keys a project leaves unset ([defaults]). Layers, lowest to highest: package presets and
 defaults, this file, the project's theseus.toml, its theseus.local.toml, then THESEUS_* variables and command line flags.
 
@@ -15,19 +16,21 @@ import tomllib
 from pathlib import Path
 
 NAME = "config.toml"
-SECTIONS = ("workers", "pools", "store", "tools", "defaults", "gateway", "supervisor", "models", "attention")
+SECTIONS = ("workers", "pools", "store", "tools", "defaults", "gateway", "supervisor", "models", "attention", "tmux")
 DEFAULT_KEYS = ("workers.default", "workers.retries", "limits.heavy_runs", "paths.data", "paths.scratch", "paths.worktrees",
                 "instances.idle_minutes", "instances.handoff_settle_seconds", "instances.send_verify_seconds", "queue.interval", "queue.send_budget_seconds",
                 "re.clients", "gateway.attempts", "gateway.backoff", "gateway.slow_codes", "gateway.slow_factor",
                 "gateway.resend", "gateway.clear_tokens", "gateway.fresh_after_errors", "gateway.screen_lines",
                 "gateway.stagger_seconds", "gateway.recovery_seconds", "agents.counts", "agents.resume", "agents.cwd",
-                "attention.notify", "attention.remind_minutes", "attention.escalate_minutes")
+                "attention.notify", "attention.remind_minutes", "attention.escalate_minutes", "coordinator.profile",
+                "coordinator.autostart")
 TABLE_KEYS = ("agents.counts",)
 SUPERVISOR_DEFAULTS = {"socket": "theseus", "size": "220x50", "history_limit": 50000, "detach_key": "C-q", "max_agents": 12,
                        "env_passthrough": [], "launch_shell": "exec", "ready_seconds": 90,
                        "restart": {"backoff_seconds": [5, 30, 120, 600], "max_crashes": 5, "window_minutes": 30}}
 GATEWAY_DEFAULTS = {"breaker_errors": 3, "breaker_window_minutes": 10, "strong_codes": [530], "parallel_cap_step": 1,
                     "parallel_cap_minutes": 10, "cap_step_up_minutes": 10}
+TMUX_DEFAULTS = {"prefix": "C-b", "extra_conf": ""}
 ATTENTION_KEYS = ("escalate_command",)
 POOL_KEYS = ("max", "priority", "tokens_per_minute", "turns_per_minute")
 STORE_KEYS = {"retention": ("samples_days", "events_days", "deliveries_days", "runs_days", "gateway_days"), "backups": ("directory", "daily", "weekly")}
@@ -155,6 +158,12 @@ def attention():
     return {"escalate_command": "", **(read().get("attention") or {})}
 
 
+def tmux():
+    """The host's [tmux] table over TMUX_DEFAULTS: the private server's prefix key and a file of personal additions
+    sourced last on that server only (extra_conf)."""
+    return {**TMUX_DEFAULTS, **(read().get("tmux") or {})}
+
+
 def flatten(table, prefix=""):
     """Dotted keys of a nested table; a table named in TABLE_KEYS stays one value."""
     items = {}
@@ -240,6 +249,10 @@ def validate(data, file, profile_problems, tool_names=None):
                           f"escalate_minutes go in a project's [attention] or under [defaults] attention.<key>)")
         elif not isinstance(value, (str, list)) or (isinstance(value, list) and not all(isinstance(x, str) for x in value)):
             errors.append(f"{file}: [attention] escalate_command must be a command line or a list of arguments")
+    from . import tmuxconf
+    found, notes = tmuxconf.problems(host=data.get("tmux") if isinstance(data.get("tmux"), dict) else {})
+    errors += [f"{file}: {line}" for line in found]
+    warnings += [f"{file}: {line}" for line in notes]
     for key in flatten(data.get("defaults") or {}):
         if key not in DEFAULT_KEYS:
             warnings.append(f"{file}: [defaults] {key} is not a host default and is ignored; known: {', '.join(DEFAULT_KEYS)}")

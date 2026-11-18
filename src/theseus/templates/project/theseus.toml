@@ -7,6 +7,9 @@
 [project]
 name = "{{PROJECT}}"
 prefix = "{{PREFIX}}"
+# The project's color on theseus's private tmux server (status bar, active pane border) and in the console: #rrggbb or
+# steel, olive, tan, rose, teal, violet, gold, sea, orange, lavender. Unset: one derived from the name.
+# color = "teal"
 
 [paths]
 # Durable, Git-excluded artifacts: evidence, logs, decompiled corpus, worker records.

@@ -186,7 +186,13 @@ def config_check():
             conf.consumer_patterns()
             for name in profiles.names(conf):
                 profiles.resolve(conf, name)
-            from . import supervisor
+            from . import coordinator, supervisor, tmuxconf
+            errors += tmuxconf.problems(project=conf.section("project"))[0]
+            if conf.section("coordinator").get("profile"):
+                try:
+                    coordinator.profile_name(conf)
+                except coordinator.CoordinatorError as error:
+                    errors.append(str(error))
             if conf.section("agents").get("managed") or conf.section("agents").get("counts"):
                 found, notes = supervisor.problems(conf)
                 errors += found
@@ -826,7 +832,7 @@ def cmd_supervised(args):
                 if not supervisor.managed(conf):
                     from . import agents
                     if not args.all_projects and not names and agents.agents(conf):
-                        print_actions([supervisor.start_driver(conf, dry_run=args.dry_run)])
+                        print_actions([supervisor.start_driver(conf, dry_run=args.dry_run), *autostart(conf, args.dry_run)])
                         sys.exit(0)
                     sys.exit(f"theseus: {conf.name} does not supervise its agents; set [agents] managed = true and "
                              f"[agents.counts] in {cfg.LOCAL_NAME}")
@@ -847,7 +853,7 @@ def cmd_supervised(args):
                     rows = supervisor.reconcile(conf, names or None, wait=not args.dry_run, dry_run=args.dry_run,
                                                 reset=args.reset)
                 if not names:
-                    rows = [*(rows or []), supervisor.start_driver(conf, dry_run=args.dry_run)]
+                    rows = [*(rows or []), supervisor.start_driver(conf, dry_run=args.dry_run), *autostart(conf, args.dry_run)]
                 if len(confs) > 1:
                     print(f"# {conf.name}")
                 print_actions(rows or [("-", "none", "no agents configured ([agents.counts])")])
@@ -933,6 +939,19 @@ def cmd_supervised(args):
                       f"`theseus agents logs {args.name} --transcript` names the conversation file)", file=sys.stderr)
     except supervisor.SupervisorError as error:
         sys.exit(f"theseus: {error}")
+
+
+def autostart(conf, dry_run=False):
+    """agents up: the coordinator's row when [coordinator] autostart is on."""
+    from . import coordinator
+    if not coordinator.autostart(conf):
+        return []
+    if dry_run:
+        return [(coordinator.NAME, "would start", f"session {coordinator.session(conf)} unless it runs")]
+    try:
+        return [(coordinator.NAME, *coordinator.up(conf))]
+    except (coordinator.CoordinatorError, *supervisor_errors()) as error:
+        return [(coordinator.NAME, "error", str(error))]
 
 
 def drifted_agents(conf):
@@ -1106,28 +1125,108 @@ def cmd_attention(args):
 
 
 def cmd_coordinator(args):
-    from . import attention
-    conf = load()
-    if args.action in ("register", "unregister"):
+    from . import attention, coordinator
+    if args.action == "_exec":
+        if len(args.args) != 2:
+            sys.exit("usage: theseus coordinator _exec PROJECT GEN")
+        sys.exit(coordinator.exec_coordinator(*args.args))
+    conf = load(record=args.action not in ("status", "attach"))
+    if args.action in ("register", "unregister", "up", "down", "restart"):
         coordinator_principal()
+    if args.action in ("down", "restart") and coordinator.inside(conf):
+        sys.exit(f"theseus: this runs inside the coordinator session, which `coordinator {args.action}` would end; run it "
+                 f"from another terminal")
     try:
         if args.action == "register":
-            print(attention.register(conf, args.pane, args.profile))
+            print(attention.register(conf, (args.args or [None])[0], args.profile))
         elif args.action == "unregister":
             print(attention.unregister(conf))
+        elif args.action == "up":
+            print_actions([(coordinator.NAME, *coordinator.up(conf, args.profile, wait=not args.no_wait))])
+            if attention.settings(conf)["notify"] != "pane":
+                print("note: push is off; set [attention] notify = \"pane\" in theseus.local.toml for the queue driver to "
+                      "type attention lines into the session")
+        elif args.action == "down":
+            print_actions([(coordinator.NAME, *coordinator.down(conf))])
+        elif args.action == "restart":
+            ok, detail = coordinator.restart(conf, fresh=args.fresh, profile=args.profile, wait=not args.no_wait)
+            print_actions([(coordinator.NAME, "restarted" if ok else "failed", detail)])
+            sys.exit(0 if ok else 1)
+        elif args.action == "attach":
+            if not coordinator.server().has_session(coordinator.session(conf)):
+                sys.exit(f"theseus: no coordinator session for {conf.name} (theseus coordinator up)")
+            argv = coordinator.attach_argv(conf, read_only=args.read_only)
+            os.execvp(argv[0], argv)
         else:
+            for line in coordinator.status_lines(conf):
+                print(line)
             record = attention.coordinator(conf)
-            if record is None:
-                print("no coordinator pane registered (theseus coordinator register [PANE])")
-                return
-            problem = attention.pane_problem(record)
-            s = attention.settings(conf)
-            print(f"pane {record['pane']} (pid {record.get('pane_pid')}, profile {record.get('profile')}), registered "
-                  f"{record.get('registered')}: {problem or 'live'}; push {'on' if s['notify'] == 'pane' else 'off'}")
-            book = attention.bookkeeping(conf)
-            if book.get("last"):
-                print(f"last push: {book['last']}")
+            if record is not None and record.get("pane") != coordinator.address(conf):
+                problem = attention.pane_problem(record)
+                print(f"hand-registered pane {record['pane']} (pid {record.get('pane_pid')}, profile "
+                      f"{record.get('profile')}), registered {record.get('registered')}: {problem or 'live'}")
     except attention.AttentionError as error:
+        sys.exit(f"theseus: {error}")
+    except coordinator.CoordinatorError as error:
+        sys.exit(f"theseus: {error}")
+    except supervisor_errors() as error:
+        sys.exit(f"theseus: {error}")
+
+
+def supervisor_errors():
+    from . import supervisor, tmux, tmuxconf
+    return (supervisor.SupervisorError, tmux.TmuxError, tmuxconf.TmuxConfError)
+
+
+def cmd_tmux(args):
+    from . import supervisor, tmux as tm, tmuxconf
+    if args.socket and Path(args.socket).resolve() != tm.socket_path(*tm.configured()).resolve():
+        sys.exit(f"theseus: {args.socket} is not theseus's private tmux server; nothing here runs on another server")
+    try:
+        if args.action == "status":
+            if args.file is not None:
+                path = args.file
+            else:
+                path = tmuxconf.status_path(args.project or load(record=False).name)
+            if args.json:
+                try:
+                    print(Path(path).read_text().strip())
+                except OSError:
+                    print("{}")
+            elif args.left or args.right:
+                print(tmuxconf.render(path, "left" if args.left else "right", args.agent))
+            else:
+                print(tmuxconf.describe(path))
+        elif args.action == "apply":
+            srv = tm.Server("-S", args.socket) if args.socket else supervisor.server()
+            if not srv.alive():
+                path, _ = tmuxconf.write_conf()
+                print(f"the private tmux server is not running; {path} applies when it starts")
+                return
+            path, sessions = tmuxconf.apply(srv)
+            message = f"theseus: applied {path} to {len(sessions)} session(s)"
+            if args.client:
+                srv.run("display-message", "-c", args.client, message)
+            else:
+                print(message)
+        elif args.action == "conf":
+            path, _ = tmuxconf.write_conf()
+            print(path.read_text() if args.print_text else path)
+        elif args.action == "_popup":
+            what = args.what or "attention"
+            command = [*supervisor.theseus_argv(), "console" if what == "console" else "attention"]
+            if what == "console":
+                os.execvp(command[0], command)
+            subprocess.run(command)
+            try:
+                input("\n(Enter closes) ")
+            except EOFError:
+                pass
+        elif args.action == "_goto":
+            message = tmuxconf.goto(args.socket, args.client, args.session, args.what or "coordinator")
+            if message:
+                tm.Server("-S", args.socket).run("display-message", "-c", args.client, message)
+    except supervisor_errors() as error:
         sys.exit(f"theseus: {error}")
 
 
@@ -1667,15 +1766,45 @@ def build_parser():
     p.add_argument("--follow", action="store_true", help="print one line per change; never exits")
     p.add_argument("--interval", type=float, default=10.0, help="--follow: seconds between checks (default 10)")
     p.set_defaults(func=guarded(cmd_attention))
-    p = sub.add_parser("coordinator", help="the coordinator's tmux pane, which the queue driver types attention lines into "
-                                           "([attention] notify = \"pane\"): register [PANE], unregister, status",
-                       description="register records the pane ($TMUX_PANE by default) and the pid it runs, like a hand-made "
-                                   "agent; a pane that later runs another process counts as gone.")
-    p.add_argument("action", nargs="?", default="status", choices=("status", "register", "unregister"))
-    p.add_argument("pane", nargs="?", help="register: the pane id (default $TMUX_PANE)")
-    p.add_argument("--profile", help="register: the agent profile the coordinator runs (its busy marker, input line and "
-                                     "prompt patterns; default [workers] default)")
+    p = sub.add_parser("coordinator", help="the project's coordinator: up, down, restart, attach and status of its "
+                                           "supervised tmux session, or register a pane of your own for the attention "
+                                           "push",
+                       description="up starts the agent of [coordinator] profile (no default: you choose it) in session "
+                                   "PROJECT--coordinator of the private tmux server, in the project root, supervised "
+                                   "like an agent (a crash resumes its conversation) and registered for the attention "
+                                   "push; a new conversation gets the project's start prompt. attach shows it in this "
+                                   "terminal, nested in your own tmux too (detach with the prefix and d, or C-q). "
+                                   "register records a pane you run yourself ($TMUX_PANE by default) instead.")
+    p.add_argument("action", nargs="?", default="status",
+                   choices=("status", "up", "down", "restart", "attach", "register", "unregister", "_exec"),
+                   metavar="ACTION", help="status, up, down, restart, attach, register [PANE], unregister")
+    p.add_argument("args", nargs="*", metavar="PANE", help="register: the pane id (default $TMUX_PANE)")
+    p.add_argument("--profile", help="up, restart: the coordinator's agent profile instead of [coordinator] profile; "
+                                     "register: the profile of the pane's agent (default [workers] default)")
+    p.add_argument("--fresh", action="store_true", help="restart: a new conversation")
+    p.add_argument("--read-only", action="store_true", help="attach: look without typing")
+    p.add_argument("--no-wait", action="store_true", help="up, restart: return once started, not ready")
     p.set_defaults(func=guarded(cmd_coordinator))
+    p = sub.add_parser("tmux", help="theseus's private tmux server: status (the status line's cache), apply (the "
+                                    "generated configuration to the running server), conf",
+                       description="The private server (tmux -L theseus) runs with a configuration theseus generates "
+                                   "(never your ~/.tmux.conf); [tmux] prefix and extra_conf in the host config adjust "
+                                   "it. status prints the cache the queue driver writes after each tick (--left and "
+                                   "--right are the status line's parts).")
+    p.add_argument("action", choices=("status", "apply", "conf", "_popup", "_goto"), metavar="ACTION",
+                   help="status, apply, conf")
+    p.add_argument("what", nargs="?", help=argparse.SUPPRESS)
+    p.add_argument("--file", help="status: the cache file (default: the current project's)")
+    p.add_argument("--project", help="status: the project whose cache to read")
+    p.add_argument("--left", action="store_true", help="status: the left part (the agent's task)")
+    p.add_argument("--right", action="store_true", help="status: the right part (attention, working/max, gateway)")
+    p.add_argument("--agent", help="status --left: the agent")
+    p.add_argument("--json", action="store_true", help="status: the cache as JSON")
+    p.add_argument("--print", dest="print_text", action="store_true", help="conf: print the file instead of its path")
+    p.add_argument("--socket", help=argparse.SUPPRESS)
+    p.add_argument("--client", help=argparse.SUPPRESS)
+    p.add_argument("--session", help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_tmux)
     p = sub.add_parser("console", aliases=["top"], help="the control console of every project on this host (also `theseus` "
                                                         "alone on a terminal): agents, coordinator, queue, pools, events "
                                                         "and actions; --once and --json print one frame for scripts")
@@ -1725,6 +1854,12 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if not argv and sys.stdin.isatty() and sys.stdout.isatty():
         argv = ["console"]
+    if tuple(argv[:2]) == ("tmux", "status") and "--file" in argv and ("--left" in argv or "--right" in argv):
+        # The status line runs this every few seconds: skip the parser and the imports it needs.
+        from . import tmuxconf
+        value = dict(zip(argv, argv[1:]))
+        print(tmuxconf.render(value.get("--file"), "left" if "--left" in argv else "right", value.get("--agent")))
+        return
     if argv == ["--schema-version"]:
         from . import store
         print(store.SCHEMA_VERSION)

@@ -33,6 +33,10 @@ STATE = KIND = QUEUE = ROOM = REASON = SERIES = {}
 PROJECTS = ()
 MODE = "rgb"
 GENERATION = 0
+COLORS = {}
+BACKGROUND = None
+DARK = True
+_FITTED = {}
 SERIES_LABEL = {"assigned": "assigned", "delivered": "delivered", "partial": "partial", "blocked": "blocked",
                 "merged": "merged/completed", "errors": "errors/stalled"}
 STRONG_KINDS = {"delivered", "partial", "blocked", "stalled", "error", "completed"}
@@ -120,10 +124,12 @@ def rgb_styles(dark, variables):
 def apply(variables=None, dark=True, ansi=False, color_system="truecolor"):
     """Recompute every style for a theme's CSS variables (App.theme_variables) and the terminal's color system."""
     global RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, GOLD, NEUTRAL, STATE, KIND, QUEUE, ROOM, REASON, SERIES
-    global PROJECTS, MODE, GENERATION
+    global PROJECTS, MODE, GENERATION, BACKGROUND, DARK
     GENERATION += 1
     if variables is None:
         variables = BUILTIN_THEMES["textual-dark"].to_color_system().generate()
+    BACKGROUND, DARK = Color.parse(variables["background"]).rgb, dark
+    _FITTED.clear()
     if ansi or color_system in ("standard", "windows"):
         MODE = "ansi" if ansi else "standard"
         styles, PROJECTS = ansi_styles(dark, ansi, variables)
@@ -146,7 +152,15 @@ def apply(variables=None, dark=True, ansi=False, color_system="truecolor"):
 
 
 def project_color(name):
-    """Stable accent color of a project, chosen from the current project palette by a hash of its name."""
+    """Stable accent color of a project: with true color its tmux color (theseus.tmuxconf: [project] color or one
+    derived from the name, in COLORS from the snapshot) made readable on the theme's background; with ANSI colors one
+    of the current project palette, chosen by a hash of its name."""
+    if MODE == "rgb" and BACKGROUND is not None:
+        from .. import tmuxconf
+        value = COLORS.get(name) or tmuxconf.derived(name)
+        if value not in _FITTED:
+            _FITTED[value] = fit(value, BACKGROUND, DARK)
+        return _FITTED[value]
     return PROJECTS[int(hashlib.sha1(str(name).encode()).hexdigest(), 16) % len(PROJECTS)]
 
 

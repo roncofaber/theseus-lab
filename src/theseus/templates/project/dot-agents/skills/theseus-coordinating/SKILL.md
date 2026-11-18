@@ -11,10 +11,10 @@ You own the task records, the queue, integration (`theseus merge`), verification
 
 1. Read `AGENTS.md` and `docs/project/STATE.md`; `MANIFEST.md` and `ROADMAP.md` once per session. A user instruction recorded in STATE.md (such as "workers paused") overrides the MANIFEST: while paused, no dispatch and no new tasks, only review, planning and verification.
 2. `git status`, `git log -5 --oneline`, `git worktree list`.
-3. `theseus attention` (what needs you, each with a command), `theseus console --once`. As needed: `theseus tasks list --evidence`, `theseus agents ls`, `theseus queue status`, `theseus queue log`, `theseus status` (headless workers and other worktrees), `theseus verify --debt`.
+3. `theseus attention` (what needs you, each with a command), `theseus console --once`. As needed: `theseus tasks list --evidence`, `theseus agents ls`, `theseus queue status`, `theseus queue log`, `theseus status` (headless workers), `theseus verify --debt`.
 4. Finish what is waiting before starting anything new: tasks in `verification` are unreviewed deliveries (section 3); `merged` tasks owe verification and completion.
-5. With agents registered, `theseus agents up` runs the supervised queue driver (assigns, nudges, retries); `attention` lists it when down. Register your tmux pane once, `theseus coordinator register`: with `[attention] notify = "pane"` the driver types a line into it when something new needs you. No pane: stream `theseus attention --follow`. Rely on these, not on re-arming `queue wait` (`references/events.md`).
-6. Tell the user in a few lines what you found and what you will do next.
+5. With agents registered, `theseus agents up` runs the supervised queue driver (assigns, nudges, retries); `attention` lists it when down. As the supervised session (`theseus coordinator up`) you are registered: with `[attention] notify = "pane"` the driver types a `theseus:` line into it when something new needs you. Otherwise `theseus coordinator register` your tmux pane, or stream `theseus attention --follow`. Rely on these, not on re-arming `queue wait` (`references/events.md`).
+6. Tell the user briefly what you found and will do next.
 
 Never read `tasks-archive.jsonl` or `docs/project/archive/` whole; use `theseus tasks show ID`.
 
@@ -73,7 +73,7 @@ Stop and ask when: a plan or milestone gate needs approval; a permission prompt 
 
 ## References
 
-- `references/events.md`: every event and failure path step by step: partial and blocked send-backs, stalls, permission prompts, gateway errors, merge refusals and conflicts, failed verification.
+- `references/events.md`: every event and failure path: send-backs, stalls, permission prompts, gateway errors, merge refusals and conflicts, failed verification.
 - `references/workers.md`: headless, subagent and persistent workers; supervised agent commands; manual instance rounds.
 - `references/task-records.md`: writing and changing records, rooms, profiles, capability.
 - `references/maintenance.md`: docs folding, cleanup, the host store and backups, upgrades.

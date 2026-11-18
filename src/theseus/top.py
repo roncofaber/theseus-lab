@@ -450,11 +450,57 @@ def profile_facts(conf, states):
             info["worktree"] = (tasks.get(info["task"]) or {}).get("worktree")
 
 
+def supervised_coordinator(conf):
+    """The supervised coordinator session (theseus.coordinator) as coordinator_state describes it, plus supervised,
+    profile and phase; None when theseus does not run one for the project."""
+    from . import adapters, coordinator, profiles, supervisor
+    try:
+        st = coordinator.state(conf)
+    except Exception:
+        return None
+    if not st:
+        return None
+    srv = supervisor.server()
+    info = coordinator.pane(srv, conf)
+    alive = bool(info) and info.get("pane_dead") == "0"
+    if not alive and st.get("desired") != "up":
+        return None
+    found = {"name": coordinator.NAME, "state": "offline", "pane": coordinator.address(conf) if info else None,
+             "session": st.get("session_id"), "pid": None, "context": None, "lastActivity": None, "waiting": None,
+             "supervised": True, "profile": st.get("profile"), "phase": st.get("phase")}
+    if not alive:
+        found["state"] = "failed" if st.get("phase") == "failed" else "offline"
+        return found
+    found["pid"] = int(info["pane_pid"]) if info.get("pane_pid", "").isdigit() else None
+    entry = supervisor.status_of(conf, st.get("profile"), info.get("pane_pid"))
+    if entry:
+        found.update(state=entry.get("status") or "unknown", waiting=entry.get("waitingFor"),
+                     session=entry.get("sessionId") or found["session"])
+    elif st.get("phase") in ("starting", "blocked"):
+        found["state"] = "waiting" if st["phase"] == "blocked" else "starting"
+    else:
+        found["state"] = "busy" if ag.pane_busy(conf, found["pane"], st.get("profile"), server=srv) else "idle"
+    settings = profiles.interactive(conf, st.get("profile"))
+    adapter = adapters.load(adapters.name_of(settings)) if settings else None
+    path = adapter.session_file(conf, settings, found["session"], str(conf.root)) if adapter and found["session"] else None
+    if path:
+        try:
+            state = adapter.read(path)
+            found["lastActivity"] = path.stat().st_mtime
+        except OSError:
+            state = None
+        found["context"] = ag.context_use(conf, None, state, None)
+    return found
+
+
 def coordinator_state(conf):
-    """The coordinator session ([instances] coordinator, a Claude Code session name) as its CLI reports it: state,
-    session id, pid, the tmux pane on the user's server that runs it, context use and last activity from its
-    transcript. None when the project names no coordinator."""
+    """The coordinator session as its CLI reports it: the supervised session when theseus runs one, else the one
+    named by [instances] coordinator (a Claude Code session name): state, session id, pid, the tmux pane on the
+    user's server that runs it, context use and last activity from its transcript. None when there is neither."""
     from . import adapters, profiles, supervisor
+    supervised = supervised_coordinator(conf)
+    if supervised is not None:
+        return supervised
     name = conf.section("instances").get("coordinator") or ""
     if not name:
         return None

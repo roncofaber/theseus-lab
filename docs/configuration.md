@@ -75,7 +75,7 @@ capacity = 2       # everything else comes from the host profile
 
 | Section | Keys |
 | --- | --- |
-| `[project]` | `name`, `prefix` (used in folder and process names) |
+| `[project]` | `name`, `prefix` (used in folder and process names), `color` (the project's color on the private tmux server and in the console: `#rrggbb` or one of `steel`, `olive`, `tan`, `rose`, `teal`, `violet`, `gold`, `sea`, `orange`, `lavender`; unset, one is derived from the name; see [The private tmux server](#the-private-tmux-server)) |
 | `[paths]` | `data` (evidence, logs, decompiled code, worker records), `scratch` (builds, temporary files), `worktrees`, `original` (read-only original software) |
 | `[commands]` | `build`, `smoke`, `verify`, `smoke_timeout`. Each is a list of shell commands; `$THESEUS_BUILD_DIR` is a build folder unique to each checkout |
 | `[limits]` | `heavy_runs`: how many builds and verifications may run at once on this machine |
@@ -84,6 +84,7 @@ capacity = 2       # everything else comes from the host profile
 | `[agents]` | Supervised agents (see [Supervised agents](workflow.md#supervised-agents)): `managed` (false; true makes theseus start and supervise them), `name` (`"{project}-{profile}-{n}"`; `{project}`, `{profile}` and `{n}`, which is required), `cwd` (`root`, the main checkout; `data`; or a path), `resume` (`task`: resume the conversation after a crash or reboot only for an agent that holds a task; `always`; `never`), `[agents.counts]` (live agents per profile, usually in `theseus.local.toml`; down or disabled agents do not count, a downed name is never reused automatically and names need not be contiguous), `[[agents.extra]]` (`name`, `profile`, `rooms`: named agents outside the counted slots) |
 | `[queue]` | `interval` (30 seconds between ticks of `queue run` and `queue wait`), `nudge` (the idle reminder text), `deadline` (added to task messages), `send_budget_seconds` (25: how long one tick waits for its verified sends together; a send still unresolved is finished by the next tick), `assign_backoff_seconds` (300: how long the queue skips a task whose assignment failed, after its `error` event; a failure that outlasts it becomes an attention item), `driver` (true: `theseus agents up` starts and supervises the `queue run` driver; false leaves it to you) |
 | `[attention]` | The attention list's push into the coordinator (see [Attention](workflow.md#attention)): `notify` (empty: off; `"pane"`: after each tick the queue driver types one line into the pane `theseus coordinator register` recorded whenever items were added), `remind_minutes` (30: one reminder for items still open that long after a push; 0 turns it off), `escalate_minutes` (60: an item open that long, or the coordinator pane gone or stuck that long, shows a red ESCALATED line in the console and runs the host's `escalate_command`; 0 turns escalation off) |
+| `[coordinator]` | The supervised coordinator session (see [Coordinator session](workflow.md#coordinator-session)): `profile` (no default: the agent profile it runs, which needs interactive settings; usually set in `theseus.local.toml` or the host's `[defaults] coordinator.profile`), `autostart` (false; true makes `theseus agents up` also run `theseus coordinator up`), `prompt` (`.agents/skills/theseus-coordinating/session-prompt.md`: the project-owned template of a new conversation's first prompt, with `{project}`, `{root}` and `{session}`; the packaged one when the file is missing) |
 | `[models]` | `context`: model ids (or `prefix*`) to context windows in tokens, for the console's context use (see [Model context windows](#model-context-windows)) |
 | `[gateway]` | Gateway error recovery in persistent panes: `attempts` (3), `backoff` (`[120, 240, 480]` seconds), `slow_codes` (`[530]`) and `slow_factor` (2), `stagger_seconds` (30, spacing of 429 resends across a pool), `resend` (the continue text), `clear_tokens` (120000), `fresh_after_errors` (2), `screen_lines` (15, bottom lines searched for an error), `recovery_seconds` (900: a resent agent counts as recovered, and its attempts start over, once its worktree changed after the resend or after this long) |
 | `[git]` | `base` (`HEAD`, or `origin/main` to fetch first; workers then start from the remote, so task record changes the queue commits locally, such as a release or a new profile, must be pushed before the task is assigned again), `remote`, `branch` |
@@ -109,8 +110,9 @@ The scaffolded `theseus.toml` documents every key with comments. It sets `[worke
 | `[models]` | `context`, as in a project; the host table is the usual place for gateway models |
 | `[gateway]` | The host-wide gateway circuit breaker: `breaker_errors` (3 different agents), `breaker_window_minutes` (10), `strong_codes` (`[530]`, one such error pauses the pool); and the cap cut after a key-level 429 (the shared key's `max_parallel_requests`, `Rate limit exceeded for api_key`, an account's per-minute rate limit): the pool's working cap drops by `parallel_cap_step` (1) and holds for `parallel_cap_minutes` (10) after the latest such error, then rises one slot every `cap_step_up_minutes` (10), host-wide; such errors never count toward the breaker or a profile's health (see [Key-level rate limits](#key-level-rate-limits)) |
 | `[supervisor]` | The private tmux server of supervised agents: `socket` (`theseus`, the `tmux -L` name; `THESEUS_TMUX_SOCKET` names another, `THESEUS_TMUX_PATH` a full socket path), `size` (`220x50`, the fixed agent screen; an attached client resizes it until it detaches, and the console's pane mirror sizes it to what the mirror shows while the mirror is open), `history_limit` (50000), `detach_key` (`C-q`), `max_agents` (12 sessions on the host), `env_passthrough` (names or glob patterns of variables the server passes to agents besides `HOME USER LOGNAME SHELL PATH LANG LC_* TMPDIR XDG_* THESEUS_*`), `launch_shell` (`exec`, or `login` to run the profile command through `$SHELL -lc`), `ready_seconds` (90), `[supervisor.restart]` `backoff_seconds` (`[5, 30, 120, 600]`), `max_crashes` (5), `window_minutes` (30) |
+| `[tmux]` | The private tmux server's keys and personal additions (see [The private tmux server](#the-private-tmux-server)): `prefix` (`C-b`), `extra_conf` (empty: a file sourced last on the private server only) |
 | `[attention]` | `escalate_command` (empty by default): a command line (run with `sh -c`) or argument list, run once when an attention item stays open past `escalate_minutes` or the coordinator pane is gone or stuck, with the summary on stdin; for example a desktop notification command. Nothing else runs it |
-| `[defaults]` | Values for project keys a project leaves unset: `workers.default`, `workers.retries`, `limits.heavy_runs`, `paths.data`, `paths.scratch`, `paths.worktrees`, `instances.idle_minutes`, `instances.handoff_settle_seconds`, `instances.send_verify_seconds`, `queue.interval`, `queue.send_budget_seconds`, `re.clients`, `agents.counts`, `agents.resume`, `agents.cwd`, `attention.notify`, `attention.remind_minutes`, `attention.escalate_minutes`, and the `gateway.*` keys of the project table |
+| `[defaults]` | Values for project keys a project leaves unset: `workers.default`, `workers.retries`, `limits.heavy_runs`, `paths.data`, `paths.scratch`, `paths.worktrees`, `instances.idle_minutes`, `instances.handoff_settle_seconds`, `instances.send_verify_seconds`, `queue.interval`, `queue.send_budget_seconds`, `re.clients`, `agents.counts`, `agents.resume`, `agents.cwd`, `attention.notify`, `attention.remind_minutes`, `attention.escalate_minutes`, `coordinator.profile`, `coordinator.autostart`, and the `gateway.*` keys of the project table |
 
 `theseus config check` reports an unknown section, an unknown profile key, pool key or store key as an error naming the file and the key, and an unknown `[defaults]` key as a warning (it is ignored). A host file that does not parse makes every command that reads it (anything that loads a project, `theseus pool`, the host store settings) stop with that message; the console leaves the pools out. An unknown top-level section, in the host file or in a project's `theseus.toml` or `theseus.local.toml`, is ignored by every other command with a warning on stderr, printed once per process, so a long-running `theseus queue wait` or `queue run` keeps going when a newer release adds a section.
 
@@ -123,6 +125,35 @@ theseus setup host --import-project PATH    # move it
 ```
 
 `--import-project` copies the project's `[workers.<name>]` tables (from `theseus.toml`, and from `theseus.local.toml` for profiles not already in `theseus.toml`) and the `[tools.paths]` table of its `theseus.local.toml` into the host file, comments included: into a new starter file, or appended to an existing host file, refusing a profile or table the host file already has. It never edits the project files; it prints the line ranges you can remove from them once `theseus config check` passes. Keep project-specific keys such as `capacity` in the project.
+
+## The private tmux server
+
+Supervised agents, the queue driver and the coordinator session run on theseus's own tmux server (`tmux -L theseus`), with a configuration theseus generates (`theseus tmux conf` prints its path, `--print` its text) and applies to that server only. It never touches your own tmux server and never sources your `~/.tmux.conf`, whose session-persistence plugins (tmux-resurrect, tmux-continuum) must not see theseus sessions. Applying it (`theseus tmux apply`, prefix `r`, and automatically when an older theseus started the server) only sets options and key bindings, so running agents keep their size, process and pane-died hook.
+
+The configuration: `tmux-256color` with true color, OSC 8 hyperlinks passed through, extended keys, `escape-time` 0, focus events, `set-clipboard`, a 50000-line history (`[supervisor] history_limit`), windows and panes numbered from 1, `window-size latest`, the mouse on with the wheel entering copy mode, and vi copy mode (`v` selects, `y` copies and leaves copy mode, since keys typed into a pane in copy mode never reach the agent; theseus also leaves copy mode itself before it types into a pane).
+
+| Key | Does |
+| --- | --- |
+| prefix `a` | a popup of `theseus attention` |
+| prefix `T` | a popup of the console |
+| prefix `C` | switch to the project's coordinator session |
+| prefix `n`, `p` | the next or previous coordinator or agent session of the same project |
+| prefix `w` | choose-tree of every theseus session, sorted by name and so grouped by project, with role and task |
+| prefix `d`, or `C-q` | detach (`[supervisor] detach_key`, without the prefix) |
+| prefix `r` | regenerate and apply the configuration |
+| prefix prefix | send the prefix key itself to the agent |
+
+**Prefix and nesting.** The prefix is `[tmux] prefix` in the host config, `C-b` by default. Attaching from inside your own tmux nests a second client (theseus unsets `TMUX` for it), so the two prefixes must differ: with an outer prefix of `C-a`, `C-b` reaches the theseus client and `C-a` stays with your own tmux. With the same prefix on both, press it twice to reach the inner one (and bind `send-prefix` on the outer one). The agents themselves see the prefix key only when it is pressed twice (Claude Code uses `C-b` to send a command to the background; press `C-b C-b`).
+
+**Colors and status bar.** Each project has a stable color, `[project] color` or one derived from its name from a palette of ten readable colors; its sessions' status bar and active pane border take it, and the console uses it as the project's accent. The status bar shows, on the left, the project, the session's role (`coordinator`, the agent's short name, `queue driver`) and the agent's current task; on the right, the attention count (red when nonzero), the pool's working agents over its slots, a gateway pause or cap cut, `queue paused` and the time:
+
+```text
+ demo | claude-code-1 | T-0042               [ 2 attention ] | working 2/3 | [ gateway paused ] | 14:05
+```
+
+It refreshes every 5 seconds from a small JSON cache the queue driver rewrites after each tick (`theseus tmux status` prints it; `--json` the file), so the status line never runs a query; with no driver it says so, and a cache older than three minutes is marked `driver stale`. The terminal title (`set-titles`) shows the project, role and task too.
+
+**Personal additions.** `[tmux] extra_conf = "~/.config/theseus/tmux.conf"` in the host config sources that file last, on the private server only, for your own bindings or styles. It must never load a session-persistence plugin or source your `~/.tmux.conf`; `theseus config check` warns when it mentions one.
 
 ### Deprecated host files
 

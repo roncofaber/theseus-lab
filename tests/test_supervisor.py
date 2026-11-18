@@ -315,6 +315,104 @@ class SupervisorTests(Sandbox):
         self.assertRegex(self.theseus("agents", "down", "--all").stdout, r"queue-driver\s+stopped")
         self.assertFalse(self.tmux("has-session", "-t", "=demo--queue").returncode == 0)
 
+    def test_coordinator_up_runs_a_registered_coordinator_session_that_the_hook_resumes(self):
+        self.replace_config("fake = 2", "fake = 0")
+        self.replace_config('env = { FAKE_SECRET = "s3cret-value" }',
+                            'env = { FAKE_SECRET = "s3cret-value" }\nmcp_servers = ["theseus"]')
+        self.set_config('[coordinator]\nprofile = "fake"\n\n[attention]\nnotify = "pane"\n')
+        self.git("commit", "-q", "-am", "a supervised coordinator")
+        out = self.theseus("coordinator", "up", timeout=60).stdout
+        self.assertRegex(out, r"coordinator\s+started\s+session demo--coordinator, new conversation; ready")
+        self.assertIn("coordinator _exec demo 1",
+                      self.tmux("display", "-p", "-t", "=demo--coordinator:", "#{pane_start_command}").stdout)
+        self.assertEqual("coordinator",
+                         self.tmux("show-options", "-v", "-t", "=demo--coordinator:", "@theseus_kind").stdout.strip())
+        start = [line for line in self.log().splitlines() if line.startswith("start name=demo-coordinator")]
+        self.assertRegex(start[0], r"session=[0-9a-f-]{36} resume= ")
+        pid = int(self.tmux("display", "-p", "-t", "=demo--coordinator:", "#{pane_pid}").stdout)
+        environment = dict(item.split("=", 1) for item in Path(f"/proc/{pid}/environ").read_text().split("\0")
+                           if "=" in item)
+        for key in ("THESEUS_AGENT", "THESEUS_AGENT_ID", "THESEUS_CREDENTIALS"):
+            self.assertNotIn(key, environment, "the coordinator never gets worker credentials or variables")
+        from theseus import taskservice
+        self.assertEqual("coordinator", taskservice.principal(env=environment, cwd=self.project).role)
+        mcp = json.loads((self.tmp / "data/mcp/fake/coordinator.json").read_text())["mcpServers"]["theseus"]
+        self.assertEqual(["mcp", "--role", "coordinator"], mcp["args"])
+        self.assertNotIn("env", mcp)
+        self.wait_for(lambda: "input demo-coordinator: You are the coordinator of the theseus project demo" in self.log(),
+                      message="the start prompt")
+        self.assertIn("theseus-coordinating", self.log())
+        runs = self.runs("coordinator")
+        self.assertEqual([("start", 0)], [(r["intent"], r["resume"]) for r in runs])
+        from theseus import attention, store
+        record = attention.coordinator(self.conf())
+        self.assertEqual(("=demo--coordinator:", f"path:{self.socket}", pid),
+                         (record["pane"], record["server"], record["pane_pid"]))
+        with store.opened() as conn:
+            self.assertEqual(1, len(store.sessions(conn, "demo", active=True)))
+        os.kill(pid, 9)
+        self.wait_for(lambda: len(self.runs("coordinator")) == 2, message="the pane-died hook to restart the coordinator")
+        self.assertEqual("crash", self.runs("coordinator")[1]["stop_reason"])
+        resumed = self.runs("coordinator")[0]
+        self.assertEqual((1, runs[0]["session_id"]), (resumed["resume"], resumed["session_id"]))
+        self.wait_for(lambda: f"resume={runs[0]['session_id']}" in self.log(), message="the resumed conversation")
+        self.wait_for(lambda: attention.pane_problem(attention.coordinator(self.conf())) is None,
+                      message="the registration to follow the new pane")
+        self.assertEqual(1, self.log().count("input demo-coordinator: You are"), "a resumed conversation gets no prompt")
+        snapshot = json.loads(self.theseus("console", "--json").stdout)
+        self.assertTrue(snapshot["coordinator"]["supervised"])
+        from theseus.tui import rows, theme
+        theme.apply()
+        key, cells, _ = rows.agent_rows(snapshot)[0]
+        self.assertEqual(("coordinator:coordinator", 16), (key, len(cells)))
+        self.tmux("kill-session", "-t", "=demo--coordinator")
+        from theseus import workqueue
+        workqueue.notify(self.conf())
+        third = self.runs("coordinator")[0]
+        self.assertEqual((3, 1, runs[0]["session_id"]), (third["gen"], third["resume"], third["session_id"]),
+                         "the driver's check brings a lost coordinator back on the same conversation")
+        self.assertIsNone(attention.pane_problem(attention.coordinator(self.conf())))
+        self.assertIn("demo--coordinator: running", self.theseus("coordinator", "status").stdout)
+        self.assertRegex(self.theseus("coordinator", "down").stdout, r"coordinator\s+stopped")
+        self.assertNotEqual(0, self.tmux("has-session", "-t", "=demo--coordinator").returncode)
+        self.assertIsNone(attention.coordinator(self.conf()))
+        self.assertEqual("", self.legacy_calls())
+
+    def test_the_generated_config_applies_to_a_running_agent_without_disturbing_it(self):
+        self.replace_config("fake = 2", "fake = 1")
+        self.replace_config('prefix = "demo"', 'prefix = "demo"\ncolor = "teal"')
+        self.git("commit", "-q", "-am", "one agent and a color")
+        extra = self.tmp / "mine.conf"
+        extra.write_text("set -g @mine first\n")
+        with open(self.tmp / "config.toml", "a") as handle:
+            handle.write(f'\n[tmux]\nprefix = "C-s"\nextra_conf = "{extra}"\n')
+        self.up()
+        text = self.theseus("tmux", "conf", "--print").stdout
+        self.assertIn("set -g prefix 'C-s'", text)
+        self.assertIn(f"source-file '{extra}'", text)
+        target = "=demo--demo-fake-1:"
+        self.assertIn("bg=#5fafaf", self.tmux("show-options", "-v", "-t", target, "status-style").stdout)
+        facts = "#{pane_pid} #{pane_dead} #{window_width}x#{window_height} #{pane_width}x#{pane_height}"
+        before = self.tmux("display", "-p", "-t", target, facts).stdout
+        hooks = self.tmux("show-hooks", "-gw").stdout
+        self.assertIn("pane-died", hooks)
+        extra.write_text("set -g @mine second\n")
+        self.tmux("new-session", "-d", "-s", "demo--demo-old", "sleep 60")
+        for option, value in (("@theseus_project", "demo"), ("@theseus_agent", "demo-old")):
+            self.tmux("set-option", "-p", "-t", "=demo--demo-old:", option, value)
+        self.assertRegex(self.theseus("tmux", "apply").stdout, r"applied .* to 2 session")
+        self.assertEqual(["fake-1", "old"], [self.tmux("show-options", "-v", "-t", f"={name}:", "@theseus_role").stdout.strip()
+                                            for name in ("demo--demo-fake-1", "demo--demo-old")],
+                         "sessions an older theseus started get the same styling")
+        self.assertIn("bg=#5fafaf", self.tmux("show-options", "-v", "-t", "=demo--demo-old:", "status-style").stdout)
+        refused = self.theseus("tmux", "apply", "--socket", str(self.legacy), check=False)
+        self.assertIn("not theseus's private tmux server", refused.stderr)
+        self.assertEqual(before, self.tmux("display", "-p", "-t", target, facts).stdout)
+        self.assertEqual(hooks, self.tmux("show-hooks", "-gw").stdout)
+        self.assertEqual("second", self.tmux("show-options", "-gv", "@mine").stdout.strip())
+        self.assertEqual("C-s", self.tmux("show-options", "-gv", "prefix").stdout.strip())
+        self.assertEqual("", self.legacy_calls())
+
 
 @unittest.skipUnless(REAL_TMUX, "tmux is not installed")
 

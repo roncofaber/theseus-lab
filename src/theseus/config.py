@@ -69,7 +69,7 @@ DEFAULT_CITATIONS = [
 ]
 
 DEFAULTS = {
-    "project": {"name": "", "prefix": ""},
+    "project": {"name": "", "prefix": "", "color": ""},
     "paths": {
         "data": "~/.local/share/${THESEUS_PROJECT}",
         "scratch": "${TMPDIR:-/tmp}/${THESEUS_PROJECT}",
@@ -103,6 +103,7 @@ DEFAULTS = {
     "consumers": {},
     "agents": {"managed": False, "name": "{project}-{profile}-{n}", "cwd": "root", "resume": "task", "counts": {},
                "extra": []},
+    "coordinator": {"profile": "", "autostart": False, "prompt": ".agents/skills/theseus-coordinating/session-prompt.md"},
 }
 
 ENV_OVERRIDES = {"THESEUS_DATA": ("paths", "data"), "THESEUS_SCRATCH": ("paths", "scratch"),

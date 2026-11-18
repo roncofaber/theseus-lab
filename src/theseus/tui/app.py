@@ -492,6 +492,8 @@ class TopApp(App):
         Binding("r", "refresh", "Refresh", tooltip="Refresh now"),
         Binding("p", "pause", "Pause", tooltip="Pause or resume this project's queue"),
         Binding("C", "coordinator", "Coordinator", key_display="C", tooltip="The coordinator's mirror and send line"),
+        Binding("A", "attach_coordinator", "Attach coordinator", key_display="A",
+                tooltip="Attach this terminal to the supervised coordinator session (detach: prefix d or C-q)"),
         Binding("c", "cores", "Cores", tooltip="Per-core CPU on the Host tab"),
         Binding("/", "filter", "Filter", key_display="/", tooltip="Filter rows"),
         Binding("escape", "clear", "Clear the filter and the row highlight", show=False),
@@ -518,6 +520,7 @@ class TopApp(App):
         self.keys_fn = keys_fn or top.send_keys
         self.cli_fn = cli_fn or run_theseus
         self.attach_fn = attach_fn or attach_supervised
+        self.coordinator_attach_fn = attach_coordinator
         self.fit_fn = fit_fn or supervised_fitter
         self.conversation_fn = conversation_fn or conversation_reader
         self.diff_fn = diff_fn or task_diff
@@ -607,6 +610,7 @@ class TopApp(App):
 
     async def apply(self, snap):
         self.snap = snap
+        theme.COLORS.update({item["name"]: item["color"] for item in snap["projects"] if item.get("color")})
         tabs = self.base.query_one(TabbedContent)
         self.items = {pane_id(item["root"]): item for item in snap["projects"]}
         for identifier in [i for i in self.views if i not in self.items]:
@@ -855,6 +859,9 @@ class TopApp(App):
         self.push_screen(popups.Dialog(f"event {record.get('kind')}", R.event_text({**record, "project": project}, task)))
 
     def open_agent(self, view, key):
+        if key.startswith("coordinator:"):
+            self.action_coordinator()
+            return
         if key.startswith("worker:"):
             _, name, task_id = key.split(":", 2)
             task = (view.item["snapshot"].get("tasks") or {}).get(task_id)
@@ -930,10 +937,25 @@ class TopApp(App):
             send=lambda text: self.send_fn(self.loader(root), target, text, expect_busy=not text.startswith("/")),
             keys=lambda *keys: self.keys_fn(pane, *keys) or f"{' '.join(keys)} → {coordinator['name']}",
             type=lambda *keys: self.keys_fn(pane, *keys),
-            jump=(lambda: self.jump_fn(pane)) if self.tmux_ok else None,
+            jump=(lambda: self.jump_fn(pane)) if self.tmux_ok or coordinator.get("supervised") else None,
+            attach=(lambda: self.coordinator_attach_fn(root)) if coordinator.get("supervised") else None,
             events=lambda: R.agent_events(item["snapshot"]["events"], None))
         self.push_screen(popups.AgentScreen(f"coordinator {coordinator['name']}", R.coordinator_text(coordinator), pane,
                                             actions, poll=self.mirror_seconds))
+
+    def action_attach_coordinator(self):
+        view, item = self.active_view(), self.active_item()
+        if not isinstance(view, ProjectView) or not item or not item.get("available"):
+            self.notify("no project tab", severity="warning")
+            return
+        coordinator = item["snapshot"].get("coordinator") or {}
+        if not coordinator.get("supervised") or not coordinator.get("pane"):
+            self.notify("no coordinator session: theseus coordinator up", severity="warning")
+            return
+        with self.suspend():
+            message = self.coordinator_attach_fn(view.root_path)
+        if message:
+            self.notify(message)
 
     def run_cli(self, root, argv, question=None):
         """Run a theseus command for a project in a worker, after a confirmation when question is set; notify the
@@ -991,6 +1013,14 @@ def attach_supervised(root, name):
         return f"{name} is not a supervised agent"
     result = subprocess.run(supervisor.attach_argv(rec))
     return "" if result.returncode == 0 else f"attach to {name} failed"
+
+
+def attach_coordinator(root):
+    """Attach this terminal to the supervised coordinator session (runs while the app is suspended)."""
+    import subprocess
+    from .. import coordinator
+    result = subprocess.run(coordinator.attach_argv(cfg.load(root=root)))
+    return "" if result.returncode == 0 else "attach to the coordinator failed"
 
 
 def supervised_fitter(root, name):

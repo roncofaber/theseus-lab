@@ -365,15 +365,16 @@ def coordinator(conf):
         return None
 
 
-def register(conf, pane=None, profile=None):
+def register(conf, pane=None, profile=None, server=None):
+    """Record the coordinator pane; server names the private server a pane address lives on (the supervised
+    coordinator session registers itself this way)."""
     from . import profiles
     from . import tmux as tm
     pane = pane or os.environ.get("TMUX_PANE")
     if not pane:
         raise AttentionError("no pane given and $TMUX_PANE is not set: run this in the coordinator's tmux pane, or name "
                              "the pane (theseus coordinator register %N)")
-    server = None
-    if pane == os.environ.get("TMUX_PANE") and tm.private_tmux(os.environ.get("TMUX")):
+    if server is None and pane == os.environ.get("TMUX_PANE") and tm.private_tmux(os.environ.get("TMUX")):
         server = tm.Server().name
     holder = next((a for a in ag.agents(conf) if a["pane"] == pane), None)
     if holder is not None:
@@ -561,10 +562,17 @@ def escalate(conf, found, book, now, s, record=None):
 
 
 def drive(conf, now=None):
-    """The driver's step after a tick: compute the list and push it; a failure is reported and never stops the
-    queue."""
+    """The driver's step after a tick: compute the list, write the tmux status cache from it and push it; a failure
+    is reported and never stops the queue."""
     try:
-        return push(conf, items(conf, now=now, driver=False), now)
+        states = ag.states(conf)
+        found = items(conf, now=now, states=states, driver=False)
+        try:
+            from . import tmuxconf
+            tmuxconf.write_status(conf, found, states, now)
+        except Exception as error:
+            print(f"theseus attention: tmux status: {error}", file=sys.stderr)
+        return push(conf, found, now)
     except Exception as error:
         print(f"theseus attention: {error}", file=sys.stderr)
         return []

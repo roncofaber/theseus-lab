@@ -125,7 +125,7 @@ Set `[instances] coordinator` to the coordinator session's name when the agent s
 
 ## 8. Start the coordinator
 
-Open the coordinator agent in the project root and tell it: "Read AGENTS.md and follow the theseus-coordinating skill." The `theseus-recipe` skill gives the phases, from exploration to release. Check that the agent sees the skills in `.agents/skills/`; for agents that read skills from another directory, link them there.
+Let theseus run it, or open it yourself. Supervised: ask the person which interactive profile the coordinator should use (there is no default), set `[coordinator] profile = "PROFILE"` in `theseus.local.toml` (or `[defaults] coordinator.profile` in the host file) and run `theseus coordinator up`. It starts in session `PROJECT--coordinator` of the private tmux server with the project's start prompt, resumes its conversation after a crash and is registered for the attention push (`[attention] notify = "pane"`); `theseus coordinator attach` shows it, also nested in their own tmux (the theseus prefix is C-b, `[tmux] prefix`). By hand: open the coordinator agent in the project root and tell it: "Read AGENTS.md and follow the theseus-coordinating skill." The `theseus-recipe` skill gives the phases, from exploration to release. Check that the agent sees the skills in `.agents/skills/`; for agents that read skills from another directory, link them there.
 
 ## Troubleshooting
 

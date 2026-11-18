@@ -10,6 +10,8 @@
 # workers.default = "gateway"
 # limits.heavy_runs = 2
 # paths.data = "${XDG_DATA_HOME:-~/.local/share}/${THESEUS_PROJECT}"
+# The agent profile of the supervised coordinator session (`theseus coordinator up`); there is no built-in default.
+# coordinator.profile = "gateway"
 
 # Agent profiles available to every project, same fields as [workers.<name>] in theseus.toml (see
 # docs/agent-profiles.md). A project selects one with [workers] default = "gateway" or `--profile gateway`; a project
@@ -51,3 +53,9 @@
 # [tools.paths]
 # ghidra = "/opt/ghidra"
 # java = "/usr/lib/jvm/java-21"
+
+# theseus's private tmux server (agents, queue drivers, coordinators). The prefix must differ from your own tmux's to
+# nest; extra_conf is sourced last on the private server only and must never load session-persistence plugins.
+# [tmux]
+# prefix = "C-b"
+# extra_conf = "~/.config/theseus/tmux.conf"

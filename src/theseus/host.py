@@ -45,8 +45,9 @@ def project_snapshot(root, sample_host=None):
     except Exception as error:
         base["error"] = f"{type(error).__name__}: {error}"
         return base
-    from . import gateway
-    return {**base, "name": conf.name, "available": True, "snapshot": state, "activity": activity(history),
+    from . import gateway, tmuxconf
+    return {**base, "name": conf.name, "available": True, "color": tmuxconf.project_color(conf), "snapshot": state,
+            "activity": activity(history),
             "lastEvent": history[-1]["time"] if history else None, "gatewayAttempts": gateway.settings(conf)["attempts"]}
 
 

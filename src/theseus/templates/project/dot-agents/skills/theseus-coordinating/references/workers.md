@@ -19,6 +19,8 @@ Run exactly one driver per project, `theseus queue run`. `theseus agents up` sta
 
 The coordinator follows `theseus attention` (push into its pane, or `--follow`; `events.md`). A plain `queue wait` also drives (ticks) while it waits: use it only when no `queue run` is running, never both. The driver ticks every `--interval` seconds and rereads the configuration when it changes. Each tick: records deliveries (an idle agent whose `handoff.md` states a Result and has not changed for `instances.handoff_settle_seconds`), nudges an idle agent once, then reports it stalled, retries gateway errors, resets a free agent's context (compact; a full clear when it moves from dirty to clean work) and assigns it the next ready task it may take (room, profile, capability, pools). `theseus queue tick --no-assign` runs one pass that only reports. `theseus queue status` counts tasks by state.
 
+The coordinator can itself run supervised: `theseus coordinator up` starts `[coordinator] profile` in session `PROJECT--coordinator` of the private server, registered for the push, and a crash resumes its conversation. There you learn of new items from the pushed `theseus:` line, and `theseus attention` stays the per-turn check. `theseus coordinator down` and `restart` refuse to run from inside that session; the human runs them, or attaches with `theseus coordinator attach`.
+
 ## Supervised agents
 
 ```sh

@@ -111,39 +111,23 @@ def hook_script():
 
 
 def tmux_conf():
-    """The private server's configuration, loaded with -f so the user's ~/.tmux.conf never applies. Global
-    window-size manual crashes tmux 3.4 at the first new-session, so the fixed agent size comes from default-size
-    and a per-window resize-window instead."""
-    s = settings()
-    width, height = size()
-    hook = str(hook_script())
-    if "'" in hook or '"' in hook:
-        raise SupervisorError(f"the host data path {hook} contains a quote; tmux hooks cannot run it")
-    detach = str(s.get("detach_key") or "C-q")
-    lines = [
-        "set -g exit-empty on",
-        "set -g remain-on-exit on",
-        f"set -g history-limit {int(s.get('history_limit') or 50000)}",
-        f"set -g default-size {width}x{height}",
-        'set -g default-terminal "tmux-256color"',
-        "set -g escape-time 10",
-        "set -g focus-events on",
-        "set -g status on",
-        "set -g status-left-length 60",
-        'set -g status-left "[theseus #{@theseus_project}] "',
-        f'set -g status-right "#{{@theseus_agent}}  {detach} detach "',
-        "set -g prefix None",
-        "set -g prefix2 None",
-        f"bind -n {detach} detach-client",
-        f"set-hook -g pane-died \"run-shell -b '{hook} #{{socket_path}} #{{session_name}} #{{pane_pid}} s#{{pane_dead_status}} g#{{pane_dead_signal}}'\"",
-        'set-hook -g client-attached "resize-window -A"',
-        f'set-hook -g client-detached "resize-window -x {width} -y {height}"',
-    ]
-    path = home() / "tmux.conf"
-    text = "\n".join(lines) + "\n"
-    if not path.exists() or path.read_text() != text:
-        path.write_text(text)
-    return path
+    """The private server's configuration file (theseus.tmuxconf), loaded with -f so the user's ~/.tmux.conf never
+    applies."""
+    from . import tmuxconf
+    try:
+        return tmuxconf.write_conf()[0]
+    except tmuxconf.TmuxConfError as error:
+        raise SupervisorError(str(error)) from error
+
+
+def ensure_conf(srv):
+    """Bring a running private server to the current configuration (an older theseus may have started it)."""
+    from . import tmuxconf
+    try:
+        return tmuxconf.ensure(srv)
+    except (tmuxconf.TmuxConfError, tm.TmuxError) as error:
+        print(f"theseus: the private tmux configuration was not applied: {error}", file=sys.stderr)
+        return False
 
 
 def server(name=None):
@@ -339,6 +323,9 @@ def problems(conf):
             warnings.append(f"[agents] profile {item['profile']}: command {command!r} is not on PATH; supervised agents "
                             f"exec it directly (no shell aliases or functions; [supervisor] launch_shell = \"login\" "
                             f"runs it through a login shell)")
+    from . import agents
+    errors += [f"[agents] {name} is reserved for the project's {name} session; rename it"
+               for name in names if name in agents.RESERVED]
     duplicates = sorted({n for n in names if names.count(n) > 1})
     if duplicates:
         errors.append(f"[agents] duplicate agent names: {', '.join(duplicates)}")
@@ -535,6 +522,8 @@ def spawn(conf, slot, intent="start", session=None, profile=None, srv=None):
                        ("@theseus_profile", profile)):
         srv.set_option(pane, key, value)
     srv.run("resize-window", "-x", str(width), "-y", str(height), "-t", pane)
+    from . import tmuxconf
+    tmuxconf.tag(srv, conf, target, "agent", name, (current_task(conf, name) or {}).get("id"))
     info = pane_info(srv, target) or {}
     if info.get("pane_pid", "").isdigit():
         with store.for_project(conf) as conn:
@@ -800,6 +789,11 @@ def died(socket, session, pid, status=None, signal=None):
     with store.for_host() as conn:
         row = conn.execute("SELECT project, name FROM agents WHERE target = ? AND managed", (session,)).fetchone()
     if row is None:
+        from . import coordinator
+        project = coordinator.project_of(session)
+        if project:
+            conf = project_conf(project)
+            return coordinator.died(conf, srv, pid, status, signal) if conf is not None else 0
         project = driver_project(session)
         conf = project_conf(project) if project else None
         return driver_died(conf, srv, status) if conf is not None else 0
@@ -888,6 +882,8 @@ def start_driver(conf, dry_run=False):
         return DRIVER_LABEL, "manual", "[queue] driver = false: run `theseus queue run` yourself"
     srv = server()
     target = driver_session(conf)
+    if not dry_run:
+        ensure_conf(srv)
     info = pane_info(srv, target) if srv.alive() else None
     if info and info.get("pane_dead") == "0":
         if not dry_run:
@@ -916,6 +912,8 @@ def spawn_driver(conf, srv, target, info):
         raise SupervisorError(f"queue driver: {error}") from error
     srv.set_option(tm.address(target), "@theseus_project", conf.name)
     srv.set_option(tm.address(target), "@theseus_driver", "1")
+    from . import tmuxconf
+    tmuxconf.tag(srv, conf, target, "queue")
 
 
 def stop_driver(conf):
@@ -981,6 +979,8 @@ def reconcile(conf, names=None, wait=False, dry_run=False, reset=False):
     if paused(conf):
         return [("-", "paused", "supervision paused by `theseus agents down --all`; `theseus agents up` resumes it")]
     srv = server()
+    if not dry_run:
+        ensure_conf(srv)
     regs = records(conf)
     wanted = standing(conf, regs, keep=names or ())
     if names:
@@ -1623,8 +1623,17 @@ def fit(rec, columns=None, rows=None):
 
 
 def attach_argv(rec, read_only=False):
-    srv = server_of(rec)
-    argv = ["env", "-u", "TMUX", *srv.argv("attach-session", "-t", f"={rec['target']}")]
+    return session_attach_argv(server_of(rec), rec["target"], read_only)
+
+
+def session_attach_argv(srv, session, read_only=False, env=None):
+    """The command that shows a session of the private server in this terminal: inside the private server itself (a
+    popup, another theseus session) it switches the client; anywhere else, in a plain terminal or nested in the
+    user's own tmux, it attaches a new client with TMUX unset, which tmux needs to nest."""
+    env = os.environ if env is None else env
+    if tm.private_tmux(env.get("TMUX")):
+        return srv.argv("switch-client", "-t", tm.address(session))
+    argv = ["env", "-u", "TMUX", *srv.argv("attach-session", "-t", f"={session}")]
     return argv + (["-r"] if read_only else [])
 
 

@@ -1298,7 +1298,7 @@ def identify(env, cwd, via, opener, readonly):
         raise TaskError("unauthenticated", "this process runs as a theseus agent without valid credentials; an agent is "
                                            "never the coordinator (an agent started before credentials existed gets "
                                            "them at its next restart)")
-    if env.get("TMUX_PANE"):
+    if env.get("TMUX_PANE") and not private_pane(env):
         with facts(opener, readonly) as repo:
             agent = repo.hand_made_agent(env["TMUX_PANE"]) if repo else None
         if agent and (not agent["pane_pid"] or agent["pane_pid"] in ancestors()):
@@ -1311,6 +1311,16 @@ def identify(env, cwd, via, opener, readonly):
         raise TaskError("unauthenticated", f"{cwd} is inside the task worktree {worktree}; the coordinator works from "
                                            f"the main checkout")
     return Principal("coordinator", via=via)
+
+
+def private_pane(env):
+    """Whether TMUX_PANE names a pane of theseus's private server, where no hand-made agent lives (pane ids repeat
+    across servers, so the supervised coordinator's pane could share an id with a hand-made agent's)."""
+    from . import tmux as tm
+    try:
+        return tm.private_tmux(env.get("TMUX"))
+    except Exception:
+        return False
 
 
 def ancestors(pid=None):

@@ -1011,8 +1011,14 @@ def reloaded(conf, seen):
 
 
 def notify(conf):
-    """The attention push of a driving loop after its tick (theseus.attention)."""
-    from . import attention
+    """After a driving loop's tick: the supervised coordinator's check (theseus.coordinator), then the attention push
+    and the tmux status cache (theseus.attention)."""
+    from . import attention, coordinator
+    try:
+        for line in coordinator.tick(conf):
+            print(f"{ag.now()} supervise  coordinator        - {line}")
+    except Exception as error:
+        print(f"theseus queue: coordinator: {error}", file=sys.stderr)
     for line in attention.drive(conf):
         print(f"{ag.now()} pushed     coordinator        - {line}")
         sys.stdout.flush()

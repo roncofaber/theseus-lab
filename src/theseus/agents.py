@@ -96,7 +96,12 @@ def get(conf, name):
     raise AgentError(f"no registered agent {name}; `theseus agents list`")
 
 
+RESERVED = ("coordinator", "queue")
+
+
 def add(conf, name, pane, provider=None, rooms=None):
+    if name in RESERVED:
+        raise AgentError(f"{name} is reserved for the project's {name} session; choose another name")
     with store.for_project(conf) as conn:
         seed(conf, conn)
         with store.transaction(conn):
@@ -408,6 +413,9 @@ def send_context(conf, agent, profile=None):
 def type_text(ctx, text, sleep=None, enter=True):
     """Empty the input line, type text and (enter) press Enter after a short pause. Returns '' or the tmux error."""
     server, pane = ctx["server"], ctx["pane"]
+    # A pane left in copy mode (a mouse wheel scroll) takes typed keys as copy-mode commands.
+    if (on(server, "display-message", "-p", "-t", pane, "#{pane_in_mode}").stdout or "").strip() == "1":
+        on(server, "send-keys", "-t", pane, "-X", "cancel")
     if ctx["clear"]:
         if server.is_legacy:
             tmux("send-keys", "-t", pane, ctx["clear"])

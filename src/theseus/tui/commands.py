@@ -77,6 +77,9 @@ class ConsoleCommands(Provider):
             for title, help_text, argv, question in project_commands(item):
                 found.append((f"{name}: {title}", help_text, partial(app.run_cli, item["root"], argv, question)))
             found.append((f"{name}: Coordinator", "the coordinator's mirror and send line", app.action_coordinator))
+            if (item["snapshot"].get("coordinator") or {}).get("supervised"):
+                found.append((f"{name}: Attach the coordinator", "the coordinator session here; prefix d detaches",
+                              app.action_attach_coordinator))
             for task in item["snapshot"]["queue"].get("review", []):
                 found.append((f"{name}: Open the handoff of {task}", "the delivered task's handoff.md",
                               partial(app.open_handoff, item, task)))

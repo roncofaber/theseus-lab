@@ -84,10 +84,31 @@ def context(use):
     return shown
 
 
+COORDINATOR_STATE = {"busy": "GREEN", "idle": "YELLOW", "waiting": "RED", "offline": "RED", "failed": "RED"}
+
+
+def coordinator_row(state):
+    """The supervised coordinator's row of AGENTS, with its own role and key."""
+    coordinator = state.get("coordinator")
+    if not coordinator or not coordinator.get("supervised"):
+        return None
+    color = getattr(theme, COORDINATOR_STATE[coordinator["state"]]) if coordinator["state"] in COORDINATOR_STATE else ""
+    shown = coordinator["state"] + (f" ({coordinator['waiting']})" if coordinator.get("waiting") else "")
+    return row(f"coordinator:{coordinator['name']}", [
+        marked("coordinator", theme.MAGENTA, f"bold {theme.MAGENTA}", marker="◆"), cell(shown, color), "",
+        cell("-", "dim"), "-", "-", context(coordinator.get("context")), "-", "-",
+        cell(top.duration(time.time() - coordinator["lastActivity"]) if coordinator.get("lastActivity") else "-", "dim"),
+        "-", "-", cell((coordinator.get("session") or "-")[:8], "dim"), cell(coordinator.get("profile") or "-", "dim"),
+        "-", cell("role coordinator", "dim")], "coordinator")
+
+
 def agent_rows(state):
     times = state.get("times", {})
     total = (state.get("host") or {}).get("memTotal") or 0
     rows = []
+    found = coordinator_row(state)
+    if found:
+        rows.append(found)
     for agent in state["agents"]:
         color = theme.STATE.get(agent["state"], "")
         note = "dirty" if agent.get("tainted") else ""

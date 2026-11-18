@@ -292,12 +292,13 @@ def env(profile, model=None):
     return {k: fill(v, {"model": model}) for k, v in (profile.get("env") or {}).items()}
 
 
-def mcp_config(conf, profile, agent=None, credentials=None):
+def mcp_config(conf, profile, agent=None, credentials=None, role=None):
     """Path of the MCP config a profile's agents start with (only the servers in mcp_servers), written under the data
     root, or None when the profile keeps the client's own MCP servers. Each server definition comes from the user's
     Claude Code configuration; "theseus" is the theseus MCP server. With theseus listed the file is per agent, and its
     theseus entry names the agent's credentials file in `env`: some clients (Codex, the MCP SDK's own) pass a stdio
-    server only an allow list of the environment plus that entry."""
+    server only an allow list of the environment plus that entry. role "coordinator" writes the supervised
+    coordinator's own file instead, whose theseus entry passes --role coordinator and names no credentials."""
     names = profile.get("mcp_servers")
     if names is None:
         return None
@@ -310,14 +311,19 @@ def mcp_config(conf, profile, agent=None, credentials=None):
             known = {}
     servers = {}
     for name in names:
-        if name == "theseus":
+        if name == "theseus" and role == "coordinator":
+            servers[name] = {**THESEUS_MCP, "args": [*THESEUS_MCP["args"], "--role", "coordinator"]}
+        elif name == "theseus":
             servers[name] = {**THESEUS_MCP, **({"env": {"THESEUS_CREDENTIALS": str(credentials)}} if credentials else {})}
         elif name in known:
             servers[name] = known[name]
         else:
             raise ProfileError(f"profile {profile['name']}: MCP server {name!r} is not defined in {client}")
-    path = conf.data / "mcp" / (f"{profile['name']}/{agent}.json" if "theseus" in names and agent else
-                                f"{profile['name']}.json")
+    if role == "coordinator":
+        path = conf.data / "mcp" / profile["name"] / "coordinator.json"
+    else:
+        path = conf.data / "mcp" / (f"{profile['name']}/{agent}.json" if "theseus" in names and agent else
+                                    f"{profile['name']}.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps({"mcpServers": servers}, indent=2) + "\n"
     if not path.exists() or path.read_text() != text:
@@ -325,8 +331,8 @@ def mcp_config(conf, profile, agent=None, credentials=None):
     return path
 
 
-def mcp_args(conf, profile, agent=None, credentials=None):
-    path = mcp_config(conf, profile, agent, credentials) if conf is not None else None
+def mcp_args(conf, profile, agent=None, credentials=None, role=None):
+    path = mcp_config(conf, profile, agent, credentials, role) if conf is not None else None
     if path is None:
         return []
     if not profile.get("mcp_flags"):
