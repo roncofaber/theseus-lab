@@ -221,7 +221,7 @@ def list_tasks(queue, status=None, include_archive=False, show_evidence=False):
     for task in tasks:
         if status and task["status"] != status:
             continue
-        flags = blocking(task, index, current, reach, holds)
+        flags = blocking(task, index, current, reach, holds) + (["held"] if task.get("hold") else [])
         flags += ["ready"] if task["status"] == "pending" and not flags else []
         line = f"{task['status']:<12} {task['id']}  owner={task.get('owner') or '-'}  {','.join(flags)}"
         if show_evidence:

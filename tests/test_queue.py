@@ -250,6 +250,13 @@ class QueueTests(Sandbox):
         self.assertRegex(self.theseus("queue", "tick").stdout, r"assigned\s+worker-a\s+second-task")
         self.assertTrue((self.tmp / "worktrees/worker-a-second-task/src/first.py").exists())
 
+    def test_a_held_task_lists_as_held_not_ready(self):
+        self.add("parked-task")
+        self.theseus("tasks", "hold", "parked-task")
+        listed = self.theseus("tasks", "ls").stdout
+        self.assertRegex(listed, r"parked-task .*held")
+        self.assertNotRegex(listed, r"parked-task .*ready")
+
     def test_a_truncated_worktree_name_never_ends_in_a_hyphen(self):
         self.add("fix-placed-item-restore-identity")
         self.assertRegex(self.theseus("queue", "tick").stdout, r"assigned\s+worker-a\s+fix-placed-item-restore-identity")
