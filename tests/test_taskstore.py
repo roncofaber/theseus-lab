@@ -83,6 +83,11 @@ class RoundTripTests(TaskStoreCase):
         fresh = ts.open(self.conf)
         fresh.import_(COORDINATOR, second)
         self.assertEqual(second, fresh.export(COORDINATOR))
+        with store.opened() as conn:
+            restored = conn.execute("""SELECT a.result, a.source FROM task_attempts a JOIN tasks t ON t.pk = a.task_pk
+                                       WHERE t.id = 'alpha' AND a.result IS NOT NULL ORDER BY a.n""").fetchall()
+        self.assertEqual([("delivered", "command"), ("partial", "detected")], [tuple(row) for row in restored],
+                         "each delivery's result and source come back from the history")
 
     def drive_every_call(self):
         svc, worker = self.svc, ts.Principal("worker", "agent-1")
@@ -130,8 +135,31 @@ class RoundTripTests(TaskStoreCase):
         self.assertEqual(["reopenedAt"], [k for k in records["alpha"]["previousAttempts"][0] if k.endswith("At")])
         self.assertEqual(["unmergedAt", "releasedAt"],
                          [next(k for k in a if k.endswith("At")) for a in records["beta"]["previousAttempts"]])
-        self.assertEqual("assignment failed: no space left for the worktree",
-                         records["gamma"]["previousAttempts"][0]["reason"])
+        self.assertNotIn("previousAttempts", records["gamma"], "a claim that never became active leaves no attempt")
+        self.assertIn("unclaimed", [e["kind"] for e in svc.get(COORDINATOR, "gamma", history=True)["history"]])
+
+
+class ImportTests(TaskStoreCase):
+    def test_task_files_wait_for_an_import_and_identity_survives_replace_and_prune(self):
+        files = self.conf.root / "docs/project"
+        files.mkdir(parents=True)
+        (files / "tasks.json").write_text(json.dumps({"schema": 1, "tasks": [{"id": "old", "status": "pending"}]}))
+        self.conf.data = self.tmp / "data"
+        self.assertEqual("not-imported", self.code(self.svc.list, COORDINATOR))
+        fresh = ts.open(SimpleNamespace(name="new-project", root=self.tmp / "empty", data=self.tmp / "data"))
+        self.assertEqual([], fresh.list(COORDINATOR), "a project with no tasks imports itself on first use")
+
+        first = self.svc.import_(COORDINATOR, taskrecords.read(self.conf.root))
+        self.assertEqual("refused", self.code(self.svc.import_, COORDINATOR, taskrecords.read(self.conf.root)))
+        self.assertEqual("refused", self.code(self.svc.import_, COORDINATOR, taskrecords.read(self.conf.root),
+                                              new_id=True))
+        replaced = self.svc.import_(COORDINATOR, taskrecords.read(self.conf.root), replace=True)
+        self.assertEqual(first["id"], replaced["id"])
+        self.assertIn('"old"', (Path(replaced["saved"]) / "tasks.json").read_text())
+
+        saved = self.svc.drop_tasks(COORDINATOR)
+        self.assertIn('"old"', (Path(saved) / "tasks.json").read_text())
+        self.assertNotEqual(first["id"], self.svc.import_(COORDINATOR, taskrecords.read(self.conf.root), new_id=True)["id"])
 
 
 class MigrationTests(TaskStoreCase):
@@ -251,6 +279,10 @@ class AuthorizationTests(TaskStoreCase):
         self.svc.mark_merged(COORDINATOR, "mine", "abc1234")
         self.svc.complete(COORDINATOR, "mine", "Done.", checks=["tests"], log="/logs/mine.log")
         self.assertEqual("coordinator", ts.principal({}, self.worktree).role, "a finished task's worktree")
+        with store.opened() as conn:
+            store.upsert_agent(conn, "demo", "by-hand", pane="%7")
+        self.assertEqual("unauthenticated", self.code(ts.principal, {"TMUX_PANE": "%7"}, self.tmp))
+        self.assertEqual("coordinator", ts.principal({"TMUX_PANE": "%8"}, self.tmp).role)
         ts.revoke_credentials(COORDINATOR, "agent-a", "run-1")
         self.assertEqual("unauthenticated", self.code(ts.principal, {"THESEUS_CREDENTIALS": str(path)}, self.tmp))
         forged = self.tmp / "forged.json"

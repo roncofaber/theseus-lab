@@ -15,6 +15,7 @@ import hmac
 import json
 import os
 import secrets
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +31,7 @@ EDITABLE = {"role", "objective", "contract", "accept", "owned", "add_owned", "to
 WORKER_COMMANDS = "`theseus task show|note|done|blocked TASK`"
 
 
-class TaskError(Exception):
+class TaskError(t.TaskError):
     """A refused call. code is stable for scripts: forbidden, unauthenticated, not-your-task, not-found, invalid,
     refused, conflict, not-imported, wrong-root, lossy."""
 
@@ -81,6 +82,7 @@ class TaskService:
         self.name = conf.name
         self.root = Path(conf.root)
         self.opener = opener
+        self.checkouts = {}
 
     # plumbing
 
@@ -92,18 +94,49 @@ class TaskService:
                 project = repo.project(self.name)
                 if project is None or project["id"] is None:
                     repo.ensure_project(self.name)
+                    project = repo.project(self.name)
+                if imported and not project["tasks_imported"]:
+                    fresh = self.fresh()
+                    if fresh:
+                        self.import_(COORDINATOR, fresh)
                 with repo.transaction() if write else contextlib.nullcontext():
                     project = repo.project(self.name)
                     if imported and not project["tasks_imported"]:
                         raise TaskError("not-imported", f"{self.name}'s tasks are not in the host store yet; run "
                                                         f"`theseus tasks import`")
                     recorded = project["tasks_root"]
-                    if root and recorded and Path(recorded).resolve() != self.root.resolve():
+                    if root and recorded and not self.same_checkout(recorded):
                         raise TaskError("wrong-root", f"{self.name}'s tasks belong to {recorded}; if the checkout "
                                                       f"moved, run `theseus tasks adopt` in the new one")
                     yield repo, project
         except taskrepo.Conflict as error:
             raise TaskError("conflict", str(error)) from error
+
+    def fresh(self):
+        """The task files of a project that has no task at all yet (a new one), which its first task call imports;
+        None when they hold tasks, which `theseus tasks import` must load."""
+        try:
+            snap = rec.read(self.root)
+            doc, archived, history = snap.documents()
+        except FileNotFoundError:
+            return rec.Snapshot(tasks='{"schema": 2, "tasks": []}\n')
+        except ValueError:
+            return None
+        return snap if isinstance(doc, dict) and not doc.get("tasks") and not archived and not history else None
+
+    def same_checkout(self, recorded):
+        """The recorded root, or a linked worktree of it (a worker's `theseus` resolves its own worktree as root)."""
+        if recorded not in self.checkouts:
+            def common(path):
+                found = subprocess.run(["git", "-C", str(path), "rev-parse", "--path-format=absolute",
+                                        "--git-common-dir"], capture_output=True, text=True)
+                return Path(found.stdout.strip()).resolve() if found.returncode == 0 and found.stdout.strip() else None
+            same = Path(recorded).resolve() == self.root.resolve()
+            if not same and Path(recorded).is_dir():
+                mine = common(self.root)
+                same = mine is not None and mine == common(recorded)
+            self.checkouts[recorded] = same
+        return self.checkouts[recorded]
 
     def load(self, repo, project, task_id):
         task = repo.task(project["id"], task_id)
@@ -112,7 +145,7 @@ class TaskService:
         return task, repo.attempts(task["pk"])
 
     def records(self, repo, project, statuses=None):
-        attempts = repo.project_attempts(project["id"])
+        attempts = repo.project_attempts(project["id"], statuses)
         return [rec.render(task, attempts.get(task["pk"], [])) for task in repo.tasks(project["id"], statuses)]
 
     def write(self, repo, task, fields, touched, expected_rev=None):
@@ -142,8 +175,7 @@ class TaskService:
         fields = {"task_pk": task["pk"], "n": n, "agent_id": closed["agent_id"], "owner": closed["owner"],
                   "worktree": closed["worktree"], "base": closed["base"], "log_dir": closed["log_dir"],
                   "execution": execution, "started": closed["started"]}
-        busy = next((a for a in repo.active_attempts(task["project_id"])
-                     if closed["agent_id"] and a["agent_id"] == closed["agent_id"]), None)
+        busy = next((a for a in repo.active_attempts(task["project_id"]) if same_agent(a, closed)), None)
         if busy is None:
             repo.insert_attempt({**fields, "phase": "active"})
             return None
@@ -173,7 +205,9 @@ class TaskService:
     def index(self, p):
         return {task["id"]: task for task in self.list(p, include_completed=True)}
 
-    def ready(self, p, *, any_milestone=False, include_paused=False):
+    def ready(self, p, *, any_milestone=False, include_paused=False, reach=None):
+        """Open task ids ready to assign; reach (tasks.merge_reach) also holds a task until its dependencies' merges
+        are in the base a worktree would start from."""
         with self.unit(write=False) as (repo, project):
             everything = self.records(repo, project)
             current = None if any_milestone else project["milestone"]
@@ -181,9 +215,20 @@ class TaskService:
         found = []
         for task in everything:
             candidate = {**task, "pause": None} if include_paused else task
-            if t.dependency_ready(candidate, index, current):
+            if task["status"] != "completed" and t.dependency_ready(candidate, index, current, reach):
                 found.append(task["id"])
         return found
+
+    def document(self, p):
+        """The tasks.json document as an export would write it now: the header and the open tasks."""
+        with self.unit(write=False) as (repo, project):
+            doc = self.header(project)
+            doc["tasks"] = self.records(repo, project, t.OPEN)
+            return doc
+
+    def header(self, project):
+        legacy = project["tasks_legacy"] or {}
+        return rec.overlay(rec.header(project), legacy.get("extra"), legacy)
 
     def questions(self, p, task_id=None):
         """Open worker questions, oldest first: [{task, text, author, time}]."""
@@ -515,6 +560,45 @@ class TaskService:
                        attempt=current)
         return {"task": task_id, "status": "completed", "commit": commit}
 
+    def relocate(self, p, task_id, old, new, branch=None):
+        """Point the attempts of task_id that used the worktree old (moved aside to new) at new, their log and
+        handoff paths with it, and record branch (the renamed work branch) on them."""
+        allow(p, "coordinator", "queue")
+        old, new = str(old), str(new)
+        under = lambda path: isinstance(path, str) and (path == old or path.startswith(old + os.sep))
+        moved = lambda path: new + path[len(old):] if under(path) else path
+
+        def paths_moved(execution):
+            return {k: moved(v) if k in ("logDir", "handoff") else v for k, v in execution.items()}
+
+        with self.unit() as (repo, project):
+            task, attempts = self.load(repo, project, task_id)
+            changed = 0
+            for attempt in attempts:
+                record = attempt["record"] if attempt["record"] is not None else {
+                    "worktree": attempt["worktree"], "execution": attempt["execution"]}
+                execution = record.get("execution") if isinstance(record.get("execution"), dict) else {}
+                if not (under(record.get("worktree")) or under(execution.get("logDir"))):
+                    continue
+                fields = {"worktree": moved(attempt["worktree"]), "log_dir": moved(attempt["log_dir"]),
+                          "handoff": moved(attempt["handoff"]),
+                          "execution": paths_moved(attempt["execution"]) if attempt["execution"] else None}
+                if attempt["record"] is not None:
+                    record = {**record}
+                    if "worktree" in record:
+                        record["worktree"] = moved(record["worktree"])
+                    if branch:
+                        record["branch"] = branch
+                    if execution:
+                        record["execution"] = paths_moved(execution)
+                    fields["record"] = record
+                repo.update_attempt(attempt["id"], fields)
+                changed += 1
+            if changed:
+                self.write(repo, task, {}, {"previousAttempts", *rec.ATTEMPT_KEYS})
+                self.event(repo, p, task, "relocated", {"from": old, "to": new})
+        return changed
+
     def adopt(self, p):
         """Record this checkout as the root of the project's tasks (a moved or renamed checkout)."""
         allow(p, "coordinator")
@@ -525,10 +609,17 @@ class TaskService:
     # queue and dispatch
 
     def claim(self, p, task_id, agent_id, *, owner, provider, model="persistent-instance", expected_rev=None,
-              capacity=None, force=False):
+              capacity=None, force=False, reach=None):
         """The first step of an assignment: the task in_progress under a claimed attempt, decided in one transaction
-        and by the unique indexes (one active attempt per task and per agent). No worktree exists yet."""
+        and by the unique indexes (one active attempt per task and per agent). No worktree exists yet. reach (see
+        ready) runs git, so it is checked before the transaction opens."""
         allow(p, "coordinator", "queue")
+        if reach and not force:
+            with self.unit(write=False) as (repo, project):
+                index = {record["id"]: record for record in self.records(repo, project)}
+            held = t.unreached(index[task_id], index, reach) if task_id in index else []
+            if held:
+                raise TaskError("refused", f"{task_id} is not ready: {'; '.join(held)}")
         with self.unit() as (repo, project):
             task, attempts = self.load(repo, project, task_id)
             if expected_rev is not None and expected_rev != task["rev"]:
@@ -603,11 +694,16 @@ class TaskService:
                 raise TaskError("conflict", f"attempt {attempt_id} is {attempt['phase']}, not claimed or active")
             task = repo.task_by_pk(attempt["task_pk"])
             at = now()
-            repo.update_attempt(attempt_id, {"phase": "abandoned", "ended": at, "reason": reason,
-                                             "record": rec.release_record(attempt, reason, at)})
+            if attempt["phase"] == "claimed":
+                # Nothing reached a worker or the disk: the claim leaves no attempt in the record, only an event.
+                repo.delete_attempt(attempt_id)
+                self.event(repo, p, task, "unclaimed", {"reason": reason})
+            else:
+                repo.update_attempt(attempt_id, {"phase": "abandoned", "ended": at, "reason": reason,
+                                                 "record": rec.release_record(attempt, reason, at)})
+                self.event(repo, p, task, "released", {"from": task["status"], "reason": reason}, queue=reason,
+                           attempt=attempt)
             self.write(repo, task, {"status": "pending"}, {"status", *rec.ATTEMPT_KEYS, "previousAttempts"})
-            self.event(repo, p, task, "released", {"from": task["status"], "reason": reason}, queue=reason,
-                       attempt=attempt)
         return {"task": task["id"], "status": "pending"}
 
     def abandon_orphans(self, p):
@@ -619,12 +715,12 @@ class TaskService:
         return [self.abandon(p, attempt_id, "orphaned claim") for attempt_id in orphans]
 
     def assign(self, p, task_id, agent_id, prepare, *, owner, provider, model="persistent-instance", expected_rev=None,
-               capacity=None, force=False):
+               capacity=None, force=False, reach=None):
         """claim, then prepare(claim) outside any transaction (worktree creation may fetch for minutes against the
         store's 30 s busy timeout), then activate with the (worktree, base, log_dir) it returns, or abandon when it
         raises."""
         claim = self.claim(p, task_id, agent_id, owner=owner, provider=provider, model=model,
-                           expected_rev=expected_rev, capacity=capacity, force=force)
+                           expected_rev=expected_rev, capacity=capacity, force=force, reach=reach)
         try:
             worktree, base, log_dir = prepare(claim)
         except Exception as error:
@@ -673,7 +769,7 @@ class TaskService:
             self.write(repo, task, {"status": "verification"}, {"status", "execution"})
             detail = f"handoff result {result or 'not stated'}" + (f": {reason}" if reason else "")
             recorded = {"from": "in_progress", "result": kind, "source": source, "reason": reason,
-                        "handoff_sha256": None if handoff_text is None else sha256(handoff_text)}
+                        "handoff_sha256": None if handoff_text is None else sha256(handoff_text), "attempt": active["n"]}
             self.event(repo, p, task, kind, {k: v for k, v in recorded.items() if v is not None}, queue=detail,
                        attempt=active)
             repo.delivery(self.name, task_id, agent_label(active), None if handoff_path is None else str(handoff_path),
@@ -703,9 +799,7 @@ class TaskService:
     def snapshot(self, repo, project):
         attempts = repo.project_attempts(project["id"])
         rendered = [(task["status"], rec.render(task, attempts.get(task["pk"], []))) for task in repo.tasks(project["id"])]
-        built = rec.header(project)
-        legacy = project["tasks_legacy"] or {}
-        doc = rec.overlay(built, legacy.get("extra"), legacy)
+        doc = self.header(project)
         doc["tasks"] = [record for status, record in rendered if status != "completed"]
         archived = [record for status, record in rendered if status == "completed"]
         return rec.snapshot(doc, archived, [rec.history_line(row) for row in repo.history(project["id"])])
@@ -713,7 +807,9 @@ class TaskService:
     def import_(self, p, snap, *, replace=False, new_id=False):
         """Load a snapshot (the legacy files, or an export) as the project's tasks in one transaction, export it again
         and compare: anything but the documented normalizations (schema 2 and the project header, completed tasks
-        moved to the archive) rolls the import back with TaskError lossy. Records skip the add-time budgets."""
+        moved to the archive) rolls the import back with TaskError lossy. Records skip the add-time budgets.
+        replace loads over existing tasks after writing their export to <data>/exports/; new_id gives the project a
+        fresh id, for another project reusing the name once the old one's tasks are pruned."""
         allow(p, "coordinator")
         started = time.monotonic()
         try:
@@ -734,10 +830,15 @@ class TaskService:
         if problems:
             raise TaskError("invalid", "; ".join(problems[:10]))
         with self.unit(imported=False, root=False) as (repo, project):
+            saved = None
             if repo.tasks(project["id"]):
+                if new_id:
+                    raise TaskError("refused", f"{self.name} has tasks under its current id; remove them first with "
+                                               f"`theseus db prune --with-tasks`, which exports them")
                 if not replace:
                     raise TaskError("refused", f"{self.name} already has tasks in the store; pass --replace to load "
                                                f"over them")
+                saved = self.save_export(repo, project, "replaced")
                 repo.delete_tasks(project["id"])
             ident = self.import_identity(repo, project, doc, new_id)
             project = {**project, "id": ident}
@@ -761,11 +862,29 @@ class TaskService:
                     raise TaskError("lossy", f"the export differs from the input, nothing imported:\n{difference}")
         canonical = rec.snapshot(doc, archived, history)
         return {"project": self.name, "id": ident, "open": len(doc["tasks"]), "archived": len(archived),
-                "events": events, "notes": notes, "warnings": warnings,
+                "events": events, "notes": notes, "warnings": warnings, "saved": saved,
                 "formatting_kept": {"tasks.json": canonical.tasks == snap.tasks,
                                     "tasks-archive.jsonl": canonical.archive == snap.archive,
                                     "tasks-history.jsonl": canonical.history == snap.history},
                 "seconds": round(time.monotonic() - started, 3)}
+
+    def save_export(self, repo, project, label):
+        """Write the current export to <data>/exports/<project>-<time>-<label>/ before tasks are deleted."""
+        directory = Path(self.conf.data) / "exports" / f"{self.name}-{store.iso().replace(':', '')}-{label}"
+        rec.write_flat(self.snapshot(repo, project), directory)
+        return str(directory)
+
+    def drop_tasks(self, p):
+        """Export the project's tasks to <data>/exports/, then delete them (db prune --with-tasks). Returns the
+        directory, or None when it had none."""
+        allow(p, "coordinator")
+        with self.unit(imported=False, root=False) as (repo, project):
+            if not repo.tasks(project["id"]):
+                return None
+            saved = self.save_export(repo, project, "pruned")
+            repo.delete_tasks(project["id"])
+            repo.update_project(self.name, tasks_imported=None, tasks_root=None)
+            return saved
 
     def import_identity(self, repo, project, doc, new_id):
         """The project id the import keeps: a fresh one with new_id, else the export header's (so a store on another
@@ -815,18 +934,34 @@ class TaskService:
 
     def import_history(self, repo, project, history):
         pks = {task["id"]: task["pk"] for task in repo.tasks(project["id"])}
+        attempts = {(pk, attempt["n"]): attempt for pk, found in repo.project_attempts(project["id"]).items()
+                    for attempt in found}
         events = notes = 0
         for line in history:
             pk = pks.get(line.get("task"))
             if pk is None:
                 raise TaskError("invalid", f"history names an unknown task: {json.dumps(line)[:200]}")
             if "event" in line:
-                repo.add_event(pk, line["actor"], line["event"], line.get("detail") or {}, time=line["time"])
+                detail = line.get("detail") or {}
+                attempt = attempts.get((pk, detail.get("attempt")))
+                repo.add_event(pk, line["actor"], line["event"], detail, time=line["time"],
+                               attempt_id=attempt["id"] if attempt else None)
+                if attempt and detail.get("source"):
+                    repo.update_attempt(attempt["id"], {key: detail.get(key) for key in (
+                        "result", "source", "reason", "handoff_sha256")})
                 events += 1
             else:
                 repo.add_note(pk, line["author"], line["kind"], line["note"], line["time"], answered=line.get("answered"))
                 notes += 1
         return events, notes
+
+
+def same_agent(a, b):
+    """Two attempts held by one agent: the same agent id, or, for agents without one, the same name in the owner
+    label (unless both carry ids that differ)."""
+    if a["agent_id"] and b["agent_id"]:
+        return a["agent_id"] == b["agent_id"]
+    return bool(agent_label(a)) and agent_label(a) == agent_label(b)
 
 
 def cycle(task_id, depends, tasks):
@@ -879,8 +1014,9 @@ def authenticate(credentials, *, via="cli", opener=taskrepo.opened):
 
 def principal(env=None, cwd=None, *, via="cli", opener=taskrepo.opened):
     """Who is calling, deny by default: credentials (THESEUS_CREDENTIALS) make a worker; the coordinator is a caller
-    with neither THESEUS_AGENT_ID nor THESEUS_CREDENTIALS whose working directory is not a task worktree. Anything else
-    is refused, never promoted. Reads do not need this (see the module docstring)."""
+    with neither THESEUS_AGENT_ID nor THESEUS_CREDENTIALS, not in a hand-made agent's tmux pane (TMUX_PANE, which only
+    ever denies), whose working directory is not a task worktree. Anything else is refused, never promoted. Reads do
+    not need this (see the module docstring)."""
     env = os.environ if env is None else env
     cwd = Path(cwd or os.getcwd())
     path = env.get("THESEUS_CREDENTIALS")
@@ -892,6 +1028,12 @@ def principal(env=None, cwd=None, *, via="cli", opener=taskrepo.opened):
         return authenticate(credentials, via=via, opener=opener)
     if env.get("THESEUS_AGENT_ID"):
         raise TaskError("unauthenticated", "THESEUS_AGENT_ID is set without credentials; an agent is never the coordinator")
+    if env.get("TMUX_PANE"):
+        with opener() as repo:
+            agent = repo.hand_made_agent(env["TMUX_PANE"])
+        if agent:
+            raise TaskError("unauthenticated", f"this pane ({env['TMUX_PANE']}) is the registered agent {agent}; an agent "
+                                               f"is never the coordinator")
     worktree = task_worktree(cwd, opener)
     if worktree:
         raise TaskError("unauthenticated", f"{cwd} is inside the task worktree {worktree}; the coordinator works from "

@@ -280,6 +280,16 @@ Questions for the coordinator:
 - Q10: no path-based identity. Hand-made panes read their task through the read-only `theseus tasks show ID` (reads need no credentials) and deliver through the permanent handoff fallback; `agents migrate` is recommended before cutover but not required.
 - The dependency rule landing on main now (a dependency is satisfied only when its merge is an ancestor of the assignment base) moves into `ready()` and `claim()` in phase 2.
 
+Decisions on the phase 1 notes (coordinator review, 2026-11-18):
+
+- No external requests at all: no real API endpoints, no model calls, no probe that leaves the machine. Spikes use dead local endpoints or source.
+- Project identity: projects stay keyed by name. `tasks import --new-id` refuses while the name has task rows; the old project is first removed with `db prune --with-tasks`, which writes a final export. `tasks import --replace` also writes an export to `<data>/exports/` before deleting anything.
+- Q5 against Q10: a caller whose `TMUX_PANE` is the pane of a registered hand-made agent is never the coordinator. The pane only ever denies; it never grants an identity. Reads stay open.
+- `observe` on a completed task stays allowed (an evidence upgrade such as `--user` is legitimate), so that task's archive line may change: the one exception to "exported lines never change".
+- Accepted as built: dispatch workers' exports carry `ownerId`; `claim` refuses held tasks, and `tasks assign --force` overrides; `edit` refuses only growth past the record limit.
+- Export fidelity: each attempt's result and delivery source travel in the history lines, so a re-import restores them. Observed touches are transient and may be lost.
+- Phase 2 callers own the file-side steps: setting the handoff aside on reopen and unmerge, the unintegrated-files check, `complete --from-log`, and the backup before import.
+
 ## 17. Phase 0 findings (2026-11-18)
 
 ### MCP Python SDK

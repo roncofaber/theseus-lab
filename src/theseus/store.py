@@ -541,20 +541,22 @@ def list_projects(conn):
     return [dict(row) for row in conn.execute("SELECT * FROM projects ORDER BY name")]
 
 
-def prune_projects(conn, missing_root=True, older_than=None, dry_run=False):
+def prune_projects(conn, missing_root=True, older_than=None, dry_run=False, with_tasks=False, rows=False):
     """Remove projects whose root directory no longer exists, or (with older_than, in seconds) that nobody saw for
     that long; their agents, agent runs, events, deliveries, samples, sessions, gateway errors and retry episodes and
-    pool slots go with them. A project with task rows is kept: its tasks outlive a missing root. Returns the names
-    (with dry_run, the names it would remove). Nothing calls this automatically."""
+    pool slots go with them. A project with task rows is kept (its tasks outlive a missing root) unless with_tasks,
+    and even then only once its tasks are gone (`db prune --with-tasks` exports and deletes them first). Returns the
+    names (with dry_run, the names it would remove; with rows, their project rows). Nothing calls this automatically."""
     cutoff = time.time() - older_than if older_than is not None else None
     with transaction(conn):
         doomed = []
-        for row in conn.execute("""SELECT name, root, last_seen_epoch FROM projects
-                                   WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.project_id = projects.id)""").fetchall():
+        keep_tasks = "" if with_tasks and dry_run else \
+            " WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.project_id = projects.id)"
+        for row in conn.execute("SELECT * FROM projects" + keep_tasks).fetchall():
             gone = missing_root and row["root"] and not Path(row["root"]).exists()
             stale = cutoff is not None and (row["last_seen_epoch"] or 0) < cutoff
             if gone or stale:
-                doomed.append(row["name"])
+                doomed.append(dict(row) if rows else row["name"])
         if not dry_run:
             for table in ("gateway_errors", "gateway_retries", "pool_leases", "pool_claims"):
                 conn.executemany(f"DELETE FROM {table} WHERE project = ?", [(name,) for name in doomed])

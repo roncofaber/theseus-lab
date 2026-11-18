@@ -63,11 +63,12 @@ class Repo(Protocol):
     def drop_observed(self, pk: int) -> None: ...
     def attempts(self, pk: int) -> list[dict]: ...
     def attempt(self, attempt_id: str) -> dict | None: ...
-    def project_attempts(self, project_id: str) -> dict[int, list[dict]]: ...
+    def project_attempts(self, project_id: str, statuses: Iterable[str] | None = None) -> dict[int, list[dict]]: ...
     def active_attempts(self, project_id: str) -> list[dict]: ...
     def attempts_at(self, worktree: str) -> list[dict]: ...
     def insert_attempt(self, fields: dict) -> str: ...
     def update_attempt(self, attempt_id: str, fields: dict, phases: Iterable[str] | None = None) -> None: ...
+    def delete_attempt(self, attempt_id: str) -> None: ...
     def add_note(self, pk: int, author: str, kind: str, text: str, time: str, attempt_id: str | None = None,
                  answered: str | None = None) -> int: ...
     def notes(self, pk: int) -> list[dict]: ...
@@ -82,6 +83,7 @@ class Repo(Protocol):
                  agent_id: str | None, source: str) -> None: ...
     def add_credential(self, agent_id: str, run_id: str, secret_hash: str) -> None: ...
     def credential_hashes(self, agent_id: str) -> list[str]: ...
+    def hand_made_agent(self, pane: str) -> str | None: ...
     def revoke_credential(self, agent_id: str, run_id: str) -> bool: ...
 
 
@@ -207,11 +209,15 @@ class SqliteRepo:
     def attempt(self, attempt_id):
         return decoded(self.conn.execute("SELECT * FROM task_attempts WHERE id = ?", (attempt_id,)).fetchone(), ATTEMPT_JSON)
 
-    def project_attempts(self, project_id):
-        """Every attempt of the project's tasks, by task pk, each list ordered by n."""
-        grouped = {}
-        for row in self.conn.execute("""SELECT a.* FROM task_attempts a JOIN tasks t ON t.pk = a.task_pk
-                                        WHERE t.project_id = ? ORDER BY a.task_pk, a.n""", (project_id,)):
+    def project_attempts(self, project_id, statuses=None):
+        """The attempts of the project's tasks (of those statuses), by task pk, each list ordered by n."""
+        grouped, sql, args = {}, """SELECT a.* FROM task_attempts a JOIN tasks t ON t.pk = a.task_pk
+                                    WHERE t.project_id = ?""", [project_id]
+        if statuses:
+            statuses = list(statuses)
+            sql += f" AND t.status IN ({','.join('?' * len(statuses))})"
+            args += statuses
+        for row in self.conn.execute(sql + " ORDER BY a.task_pk, a.n", args):
             grouped.setdefault(row["task_pk"], []).append(decoded(row, ATTEMPT_JSON))
         return grouped
 
@@ -261,6 +267,9 @@ class SqliteRepo:
         if cursor.rowcount != 1:
             raise Conflict(f"attempt {attempt_id} changed under this call (expected phase {', '.join(phases or ('any',))})")
 
+    def delete_attempt(self, attempt_id):
+        self.conn.execute("DELETE FROM task_attempts WHERE id = ?", (attempt_id,))
+
     def add_note(self, pk, author, kind, text, time, attempt_id=None, answered=None):
         return self.conn.execute("""INSERT INTO task_notes (task_pk, attempt_id, author, kind, text, time, answered)
                                     VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -308,6 +317,11 @@ class SqliteRepo:
     def credential_hashes(self, agent_id):
         return [row[0] for row in self.conn.execute(
             "SELECT secret_hash FROM agent_credentials WHERE agent_id = ? AND revoked IS NULL", (agent_id,))]
+
+    def hand_made_agent(self, pane):
+        """The name of a registered agent the user launched by hand (not supervised) in pane, or None."""
+        found = [a for a in store.list_agents(self.conn) if a["pane"] == pane and not a["managed"]]
+        return f"{found[0]['project']}/{found[0]['name']}" if found else None
 
     def revoke_credential(self, agent_id, run_id):
         return self.conn.execute("""UPDATE agent_credentials SET revoked = ? WHERE agent_id = ? AND run_id = ?

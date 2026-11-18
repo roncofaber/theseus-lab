@@ -253,6 +253,15 @@ def write(snap, root):
             cfg.write_atomic(target, body)
 
 
+def write_flat(snap, directory):
+    """The three export files side by side in directory, for a copy kept outside the checkout."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, body in (("tasks.json", snap.tasks), ("tasks-archive.jsonl", snap.archive),
+                       ("tasks-history.jsonl", snap.history)):
+        cfg.write_atomic(directory / name, body)
+
+
 def history_line(row):
     if row["type"] == "event":
         line = {"time": row["time"], "task": row["task"], "event": row["kind"], "actor": row["actor"]}
