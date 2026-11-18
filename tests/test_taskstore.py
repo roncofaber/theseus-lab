@@ -244,6 +244,13 @@ class AuthorizationTests(TaskStoreCase):
         self.assertEqual("unauthenticated", self.code(ts.principal, {"THESEUS_AGENT_ID": "agent-a"}, self.tmp))
         self.assertEqual("unauthenticated", self.code(ts.principal, {}, self.worktree / "src"))
         self.assertEqual("coordinator", ts.principal({}, self.tmp).role)
+        self.svc.add(COORDINATOR, spec("in-place"))
+        self.svc.assign(QUEUE, "in-place", "agent-c", lambda c: (self.conf.root, "uncommitted", self.tmp / "log"),
+                        owner="p:c:c-in-place", provider="p")
+        self.assertEqual("coordinator", ts.principal({}, self.conf.root).role, "a task assigned in place")
+        self.svc.mark_merged(COORDINATOR, "mine", "abc1234")
+        self.svc.complete(COORDINATOR, "mine", "Done.", checks=["tests"], log="/logs/mine.log")
+        self.assertEqual("coordinator", ts.principal({}, self.worktree).role, "a finished task's worktree")
         ts.revoke_credentials(COORDINATOR, "agent-a", "run-1")
         self.assertEqual("unauthenticated", self.code(ts.principal, {"THESEUS_CREDENTIALS": str(path)}, self.tmp))
         forged = self.tmp / "forged.json"

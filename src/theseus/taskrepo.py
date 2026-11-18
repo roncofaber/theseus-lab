@@ -23,6 +23,7 @@ PROJECT_COLUMNS = ("id", "tasks_root", "milestone", "objective_complete", "polic
                    "last_export")
 CURRENT = ("claimed", "active", "delivered", "merged")
 ACTIVE = ("claimed", "active")
+BATCH = 500
 
 
 class Conflict(Exception):
@@ -64,7 +65,7 @@ class Repo(Protocol):
     def attempt(self, attempt_id: str) -> dict | None: ...
     def project_attempts(self, project_id: str) -> dict[int, list[dict]]: ...
     def active_attempts(self, project_id: str) -> list[dict]: ...
-    def attempts_at(self, project_id: str | None, worktree: str) -> list[dict]: ...
+    def attempts_at(self, worktree: str) -> list[dict]: ...
     def insert_attempt(self, fields: dict) -> str: ...
     def update_attempt(self, attempt_id: str, fields: dict, phases: Iterable[str] | None = None) -> None: ...
     def add_note(self, pk: int, author: str, kind: str, text: str, time: str, attempt_id: str | None = None,
@@ -120,14 +121,16 @@ class SqliteRepo:
         by_pk = {task["pk"]: task for task in tasks}
         for task in tasks:
             task.update(deps=[], owned=[], touches=[], observed=[])
-        marks = ",".join("?" * len(by_pk))
-        for row in self.conn.execute(f"SELECT task_pk, depends_on FROM task_deps WHERE task_pk IN ({marks}) "
-                                     "ORDER BY task_pk, n", list(by_pk)):
-            by_pk[row[0]]["deps"].append(row[1])
-        for row in self.conn.execute(f"SELECT task_pk, kind, path, source FROM task_paths WHERE task_pk IN ({marks}) "
-                                     "ORDER BY task_pk, n", list(by_pk)):
-            key = "observed" if row[3] == "observed" else row[1]
-            by_pk[row[0]][key].append(row[2])
+        pks = list(by_pk)
+        for start in range(0, len(pks), BATCH):
+            batch = pks[start:start + BATCH]
+            marks = ",".join("?" * len(batch))
+            for row in self.conn.execute(f"SELECT task_pk, depends_on FROM task_deps WHERE task_pk IN ({marks}) "
+                                         "ORDER BY task_pk, n", batch):
+                by_pk[row[0]]["deps"].append(row[1])
+            for row in self.conn.execute(f"SELECT task_pk, kind, path, source FROM task_paths WHERE task_pk IN ({marks}) "
+                                         "ORDER BY task_pk, n", batch):
+                by_pk[row[0]]["observed" if row[3] == "observed" else row[1]].append(row[2])
         return tasks
 
     def task(self, project_id, task_id):
@@ -218,16 +221,13 @@ class SqliteRepo:
                                  (project_id,))
         return [decoded(row, ATTEMPT_JSON) for row in rows]
 
-    def attempts_at(self, project_id, worktree):
-        """Current attempts (claimed to merged) whose worktree is the given directory, in any project when project_id
-        is None."""
-        sql = """SELECT a.*, t.id AS task_id, t.project_id FROM task_attempts a JOIN tasks t ON t.pk = a.task_pk
-                 WHERE a.worktree = ? AND a.phase IN ('claimed', 'active', 'delivered', 'merged')"""
-        args = [worktree]
-        if project_id is not None:
-            sql += " AND t.project_id = ?"
-            args.append(project_id)
-        return [decoded(row, ATTEMPT_JSON) for row in self.conn.execute(sql, args)]
+    def attempts_at(self, worktree):
+        """Attempts of unfinished tasks (any project) whose worktree is the given directory, with the project's root."""
+        rows = self.conn.execute("""SELECT a.*, t.id AS task_id, p.root AS project_root, p.tasks_root
+                                    FROM task_attempts a JOIN tasks t ON t.pk = a.task_pk JOIN projects p ON p.id = t.project_id
+                                    WHERE a.worktree = ? AND a.phase IN ('claimed', 'active', 'delivered', 'merged')
+                                    AND t.status != 'completed'""", (worktree,))
+        return [decoded(row, ATTEMPT_JSON) for row in rows]
 
     def insert_attempt(self, fields):
         unknown = set(fields) - set(ATTEMPT_COLUMNS)

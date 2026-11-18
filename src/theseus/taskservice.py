@@ -672,7 +672,9 @@ class TaskService:
             repo.add_observed(task["pk"], active["id"], list(dict.fromkeys(observed_touches)))
             self.write(repo, task, {"status": "verification"}, {"status", "execution"})
             detail = f"handoff result {result or 'not stated'}" + (f": {reason}" if reason else "")
-            self.event(repo, p, task, kind, {"from": "in_progress", "result": kind, "source": source}, queue=detail,
+            recorded = {"from": "in_progress", "result": kind, "source": source, "reason": reason,
+                        "handoff_sha256": None if handoff_text is None else sha256(handoff_text)}
+            self.event(repo, p, task, kind, {k: v for k, v in recorded.items() if v is not None}, queue=detail,
                        attempt=active)
             repo.delivery(self.name, task_id, agent_label(active), None if handoff_path is None else str(handoff_path),
                           kind, active["agent_id"], source)
@@ -898,10 +900,13 @@ def principal(env=None, cwd=None, *, via="cli", opener=taskrepo.opened):
 
 
 def task_worktree(cwd, opener=taskrepo.opened):
-    """The worktree of a current attempt (any project) that holds cwd, or None."""
+    """The worktree of an unfinished task (any project) that holds cwd, or None. A task assigned in place, in its
+    project's own checkout, does not make that checkout a worktree."""
     candidates = {cwd, cwd.resolve()}
     with opener() as repo:
         for directory in [*candidates, *(parent for c in candidates for parent in c.parents)]:
-            if repo.attempts_at(None, str(directory)):
-                return str(directory)
+            for attempt in repo.attempts_at(str(directory)):
+                roots = {Path(root).resolve() for root in (attempt["project_root"], attempt["tasks_root"]) if root}
+                if Path(attempt["worktree"]).resolve() not in roots:
+                    return str(directory)
     return None
