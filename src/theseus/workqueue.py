@@ -123,8 +123,9 @@ def events(conf, limit=None, since=None, after_id=None, kinds=None, task=None):
 
 @contextmanager
 def locked(conf, announce=False):
-    """Hold the project's queue lock, which serializes queue ticks with the commands that change tasks.json, the
-    agents or the main checkout. announce says on stderr when the lock is busy before waiting for it."""
+    """Hold the project's queue lock, which serializes queue ticks with the commands that change the agents, the main
+    checkout, worktrees or handoffs (task state itself is serialized by the host store). announce says on stderr when
+    the lock is busy before waiting for it."""
     with open(queue_dir(conf) / "lock", "w") as handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -256,7 +257,7 @@ def assign_and_send(conf, agent, task):
     name = f"{agent['name']}-{suffix}"
     worktree, base, _ = integrate.assign(conf, task["id"], name, provider, "persistent-instance",
                                          owner=f"{provider}:{agent['name']}:{name}", instance=agent["name"],
-                                         owner_id=agent.get("id"))
+                                         owner_id=agent.get("id"), principal=queue_principal())
     try:
         record = (f"Owned paths: {', '.join(task['ownedPaths'])}. Objective: {task['objective']} "
                   f"Contract: {task.get('generalContract') or 'not recorded'} Acceptance: {' | '.join(task['acceptance'])}.")
@@ -299,7 +300,7 @@ def release_for_fallback(conf, agent, task_id, profile, fallback):
     reason = f"{FALLBACK_RELEASE} profile {profile} is down; the task moves to an agent of {fallback}"
     start = last_event_id(conf)
     try:
-        t.release(t.Queue(conf), task_id, reason)
+        t.release(t.Queue(conf), task_id, reason, principal=queue_principal())
     except t.TaskError as error:
         return [event(conf, "error", agent["name"], task_id, f"release after {profile} went down failed: {error}")]
     with store.for_project(conf) as conn:
@@ -308,12 +309,21 @@ def release_for_fallback(conf, agent, task_id, profile, fallback):
     return events(conf, after_id=start)
 
 
+def queue_principal():
+    from . import taskservice
+    return taskservice.QUEUE
+
+
 def roll_back(conf, task_id, name, worktree, base, reason):
-    """Undo an assignment whose task message never reached the agent: release the task, remove its worktree and
-    work/<name> branch when they hold nothing beyond what assignment wrote. Returns the detail for the error event."""
+    """Undo an assignment whose task message never reached the agent: abandon its attempt (recorded as a release),
+    remove its worktree and work/<name> branch when they hold nothing beyond what assignment wrote. Returns the detail
+    for the error event."""
     from . import gitutil as g
     from . import integrate
-    t.release(t.Queue(conf), task_id, reason)
+    svc = t.Queue(conf).service
+    attempt = svc.show(queue_principal(), task_id)["attempt"]
+    if attempt and attempt["phase"] in ("claimed", "active"):
+        svc.abandon(queue_principal(), attempt["id"], reason)
     status = g.git(worktree, "status", "--porcelain", check=False)
     changed = [line for line in status.stdout.splitlines()
                if line[3:].rstrip("/") not in (cfg.WORKER_LOG, cfg.LOCAL_NAME)]
@@ -374,6 +384,7 @@ def tick(conf, assign=True):
             recorded.extend(check_health(conf))
             active = health.fallbacks()
             recorded.extend(supervise(conf))
+            t.Queue(conf).service.abandon_orphans(queue_principal())
             registered = ag.agents(conf)
             recorded.extend(resume_sends(conf, registered, sends))
             pool_names = {a["name"]: pools.pool_of(conf, a.get("provider")) for a in registered}
@@ -393,7 +404,7 @@ def tick(conf, assign=True):
                 name, task_id = agent["name"], info["task"]
                 if info["state"] == "delivered":
                     task = t.Queue(conf).get(task_id)
-                    t.deliver(t.Queue(conf), task_id, ag.handoff_path(task))
+                    t.deliver(t.Queue(conf), task_id, ag.handoff_path(task), principal=queue_principal())
                     state = runtime(conf)
                     state.setdefault(name, {})["needs_reset"] = True
                     save_runtime(conf, state)

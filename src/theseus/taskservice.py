@@ -724,7 +724,8 @@ class TaskService:
         try:
             worktree, base, log_dir = prepare(claim)
         except Exception as error:
-            self.abandon(p, claim["attempt"], f"assignment failed: {error}")
+            with contextlib.suppress(TaskError):
+                self.abandon(p, claim["attempt"], f"assignment failed: {error}")
             raise
         return self.activate(p, claim["attempt"], worktree=worktree, base=base, log_dir=log_dir)
 

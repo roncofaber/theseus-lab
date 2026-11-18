@@ -206,7 +206,9 @@ def cmd_check(args):
 
 # tasks
 
-TASK_READS = ("list", "ls", "ready", "show", "prompt", "check-delivery", "consumers", "stats", "export")
+# Task state is decided by the store; the queue lock only keeps ticks off a main checkout, worktree or handoff that a
+# command is changing.
+TASK_LOCKED = ("assign", "rebase", "unmerge", "reopen", "retire", "import")
 
 
 def queue_locked(conf):
@@ -217,8 +219,7 @@ def queue_locked(conf):
 def cmd_tasks(args):
     from . import tasks as t
     conf = load()
-    reads = args.task_action in TASK_READS or (args.task_action == "milestone" and args.value is None)
-    with contextlib.nullcontext() if reads else queue_locked(conf):
+    with queue_locked(conf) if args.task_action in TASK_LOCKED else contextlib.nullcontext():
         tasks_action(conf, t.Queue(conf), args)
 
 
@@ -1374,7 +1375,7 @@ def build_parser():
     p.add_argument("--host", action="store_true", help="the host-wide view instead of the current project")
     p.add_argument("--back", action="store_true",
                    help="switch this tmux client back to the dashboard pane it left when it jumped to an agent")
-    p.set_defaults(func=cmd_top)
+    p.set_defaults(func=guarded(cmd_top))
     p = sub.add_parser("projects", help="list the projects registered on this host")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_projects)

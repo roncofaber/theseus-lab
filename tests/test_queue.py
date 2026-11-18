@@ -220,20 +220,21 @@ class QueueTests(Sandbox):
         self.assertEqual("pending", t.Queue(conf).get("raising-task")["status"])
         self.assertFalse((self.tmp / "worktrees/worker-a-raising-task").exists())
 
-    def test_a_task_command_waits_for_a_running_tick_instead_of_racing_it(self):
+    def test_only_commands_that_touch_worktrees_wait_for_a_running_tick(self):
         import subprocess
         import sys
         from theseus import config as cfg, workqueue
         self.add("locked-task")
         with workqueue.locked(cfg.load(root=self.project)):
-            process = subprocess.Popen([sys.executable, "-m", "theseus", "tasks", "priority", "locked-task", "3"],
+            self.theseus("tasks", "priority", "locked-task", "3", timeout=20)
+            self.assertEqual(3, json.loads(self.theseus("tasks", "show", "locked-task").stdout)["priority"])
+            self.theseus("tasks", "export")
+            process = subprocess.Popen([sys.executable, "-m", "theseus", "tasks", "import", "--replace"],
                                        cwd=self.project, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        text=True)
             self.assertIn("waiting for the queue lock", process.stderr.readline())
-            self.assertNotEqual(3, json.loads(self.theseus("tasks", "show", "locked-task").stdout).get("priority"))
         process.communicate(timeout=60)
         self.assertEqual(0, process.returncode)
-        self.assertEqual(3, json.loads(self.theseus("tasks", "show", "locked-task").stdout)["priority"])
 
     def test_a_hand_made_pane_at_a_permission_prompt_is_waiting_and_never_typed_into(self):
         self.add("prompt-task")

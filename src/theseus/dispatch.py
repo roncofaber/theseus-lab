@@ -103,9 +103,9 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
         rooms.exclude_dirty(conf, task, worktree)
         queue.service.activate(principal, claim["attempt"], worktree=worktree, base=base[:12], log_dir=log_dir)
     except Exception as error:
-        queue.service.abandon(principal, claim["attempt"], f"dispatch failed: {error}")
         if created:
             integrate.remove_worktree(conf, worktree, name)
+        integrate.abandon_quietly(queue, principal, claim["attempt"], f"dispatch failed: {error}")
         raise
     record = {"task": task_id, "name": name, "provider": provider, "profile": profile["preset"], "model": model, "base": base,
               "worktree": str(worktree), "session": session, "resume": resume, "env": extra_env,

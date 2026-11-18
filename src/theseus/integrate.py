@@ -408,9 +408,9 @@ def assign(conf, task_id, name, provider, model, owner=None, commit=True, instan
         queue.service.activate(principal, claim["attempt"], worktree=worktree, base=base[:12],
                                log_dir=worktree / cfg.WORKER_LOG)
     except Exception as error:
-        queue.service.abandon(principal, claim["attempt"], f"assignment failed: {error}")
         if worktree is not None:
             remove_worktree(conf, worktree, name)
+        abandon_quietly(queue, principal, claim["attempt"], f"assignment failed: {error}")
         raise
     message = f"{task_id} -> in_progress ({owner})"
     if aside:
@@ -418,6 +418,15 @@ def assign(conf, task_id, name, provider, model, owner=None, commit=True, instan
     if instance:
         rooms.record_assignment(conf, task, instance)
     return worktree, base, message
+
+
+def abandon_quietly(queue, principal, attempt_id, reason):
+    """Abandon a claim after a failed assignment step; one already released or swept needs nothing, and the step's own
+    error is what the caller must see."""
+    try:
+        queue.service.abandon(principal, attempt_id, reason)
+    except t.TaskError:
+        pass
 
 
 def assign_in_place(conf, task_id, name, provider, model, owner=None, instance=None, owner_id=None):

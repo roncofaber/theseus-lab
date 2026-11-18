@@ -358,3 +358,41 @@ Questions for the coordinator:
 - Section 9 says exported archive lines never change. `observe` on a completed task (allowed today while the task is still in `tasks.json`) rewrites that task's archive line. Either refuse it, or accept the change.
 - Dispatch workers. The minted worker id becomes the attempt's `agent_id`, so their tasks now export an `ownerId`, which today's `tasks.json` omits for unregistered workers.
 - The edit budget. Imported records reach 14 KB, so `edit` refuses only a change that grows a record past `TASK_RECORD_LIMIT`.
+
+## 19. Phase 2 implementation notes
+
+Phase 2 switched the callers. Task state now lives only in the store, and nothing commits task records.
+
+Callers:
+
+- `tasks.py` keeps its function names, arguments and messages, so `integrate`, `dispatch`, `workqueue`, the CLI and the console change little. Each mutation calls the service.
+- `Queue` is a read facade over the service (`load`, `archived`, `all`, `index`, `get`, `milestone`), so `top`, `rooms`, `gateway`, `agents.current_task`, `workqueue.summary` and the console read the store unchanged. `Queue.save` is gone. On opends2's data, `load` takes about 1 ms and `index` about 24 ms.
+- The CLI runs as the coordinator and the tick as the queue. Resolving the principal from the environment (`taskservice.principal`, which now also applies the `TMUX_PANE` rule) is wired in phase 3.
+
+Import, roots and the export:
+
+- Import gate. A project whose task files hold no task imports them on its first task call, which covers new projects and the scaffold template (now `"schema": 2`). Files that do hold tasks are refused with "run `theseus tasks import`".
+- Commands:
+  - `tasks import` backs the store up first (label `pre-import`) and takes the queue lock.
+  - `tasks export` writes the three files.
+  - `tasks archive` is now an alias of `export`.
+  - `tasks adopt` records a moved checkout.
+  - `tasks migrate-ids` does nothing, and `--no-commit` on assignments has no effect.
+  - `db prune --with-tasks` exports a project's tasks to its data directory's `exports/` before deleting them.
+  - `import --replace` saves an export the same way, and `--new-id` refuses while the name has task rows.
+- The `tasks_root` guard accepts a linked worktree of the recorded checkout (same git common directory). A worker's `theseus` resolves its own worktree as the root, so without this `theseus tasks show` in a worktree would be refused.
+- The committed export is stale until `theseus tasks export`; phase 6 exports at each verified merge. Two readers stay on the committed files, not the store: `rules.task_record_problems`, which `theseus check` runs, and `docs/index.known_tasks`. The guard checks a snapshot without the store, and regenerating the indexes must give the same result there as in the main checkout. This departs from section 8, which listed `docs/index` among the service readers.
+- `refuse_dirty` exempts all three export files. A revert that conflicts in one of them regenerates it from the store.
+
+Assignment:
+
+- The order is base commit (which may fetch), reach check, claim, moving a previous attempt's worktree aside (the service rewrites that attempt's paths, `relocate`), worktree creation, activate.
+- A failure after the claim abandons it. A claim that never became active is deleted: it leaves only an `unclaimed` event, and no `previousAttempts` entry for a worktree that never existed. An abandoned active attempt, such as a task message that never arrived, is recorded as a release, as before. Each tick starts by abandoning orphaned claims.
+- One-shot dispatch workers get an attempt id minted for the dispatch (`ownerId` in the export).
+- Reopen and unmerge find the agent's other active task by agent id. For attempts without one (instance assignments to unregistered names), they fall back to the agent name in the owner label, as `second_task` did.
+
+Locking and edits:
+
+- The queue lock is narrowed as section 4 describes. Of the task commands, only `rebase`, `unmerge`, `reopen` (which moves the handoff the tick reads), `retire` and `import` take it. `tasks priority`, `edit`, `note` and the rest no longer wait for a tick.
+- `tasks priority`, `profile` and `capability` are aliases of `edit --force`. They still work on in-progress tasks, now with an edit note, and are refused on delivered or merged ones.
+- The history keeps each delivery's attempt number, result, source, reason and handoff hash, and an import restores the attempt's result and source from it (section 16).

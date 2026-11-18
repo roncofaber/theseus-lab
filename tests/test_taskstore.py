@@ -150,6 +150,12 @@ class ImportTests(TaskStoreCase):
         self.assertEqual([], fresh.list(COORDINATOR), "a project with no tasks imports itself on first use")
 
         first = self.svc.import_(COORDINATOR, taskrecords.read(self.conf.root))
+        moved = ts.open(SimpleNamespace(name="demo", root=self.tmp / "moved", data=self.tmp / "data"))
+        self.assertEqual("wrong-root", self.code(moved.list, COORDINATOR), "another checkout claiming the name")
+        moved.adopt(COORDINATOR)
+        self.assertEqual(["old"], [t["id"] for t in moved.list(COORDINATOR)])
+        self.assertEqual("wrong-root", self.code(self.svc.list, COORDINATOR))
+        self.svc.adopt(COORDINATOR)
         self.assertEqual("refused", self.code(self.svc.import_, COORDINATOR, taskrecords.read(self.conf.root)))
         self.assertEqual("refused", self.code(self.svc.import_, COORDINATOR, taskrecords.read(self.conf.root),
                                               new_id=True))
