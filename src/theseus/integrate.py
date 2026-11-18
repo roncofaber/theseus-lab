@@ -472,10 +472,25 @@ def patch_paths(text):
     if not text.strip():
         return []
     listed = subprocess.run(["git", "apply", "--numstat", "-z", "-"], input=text.encode("utf-8", "surrogateescape"),
-                            capture_output=True, cwd=tempfile.gettempdir())
+                            capture_output=True, cwd=os.sep)
+    if listed.returncode != 0:
+        return header_paths(text)
     paths = [entry.split(b"\t", 2)[2].decode("utf-8", "surrogateescape")
              for entry in listed.stdout.split(b"\0") if entry.count(b"\t") >= 2]
     paths += [unquote(line.split(" ", 2)[2]) for line in text.splitlines() if line.startswith(("rename from ", "copy from "))]
+    return [p for p in paths if p]
+
+
+def header_paths(text):
+    """The paths in the file headers of a patch git apply rejects (apply_patches falls back to patch(1) for those)."""
+    paths = []
+    for line in text.splitlines():
+        if line.startswith(("+++ ", "--- ")):
+            name = unquote(line[4:].rstrip("\t").strip())
+            if name.startswith(("a/", "b/")):
+                paths.append(name[2:])
+        elif line.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
+            paths.append(unquote(line.split(" ", 2)[2]))
     return [p for p in paths if p]
 
 

@@ -13,6 +13,7 @@ start with an empty context and may take either room.
 """
 import json
 
+from . import config as cfg
 from . import tasks as t
 
 ROOMS = ("clean", "dirty")
@@ -86,7 +87,7 @@ def clear_taint(conf, instance):
         return f"{instance}: still tainted by {task} (rooms.taint is permanent)"
     data["tainted"].pop(instance)
     data.setdefault("cleared", []).append({"instance": instance, "task": task})
-    ledger_path(conf).write_text(json.dumps(data, indent=2) + "\n")
+    cfg.write_atomic(ledger_path(conf), json.dumps(data, indent=2) + "\n")
     return f"{instance}: context cleared, taint from {task} lifted"
 
 
@@ -95,7 +96,7 @@ def record_assignment(conf, task, instance):
         data = ledger(conf)
         data["tainted"].setdefault(instance, task["id"])
         ledger_path(conf).parent.mkdir(parents=True, exist_ok=True)
-        ledger_path(conf).write_text(json.dumps(data, indent=2) + "\n")
+        cfg.write_atomic(ledger_path(conf), json.dumps(data, indent=2) + "\n")
 
 
 def sparse_patterns(conf):

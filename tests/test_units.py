@@ -381,7 +381,7 @@ class DriftTests(Sandbox):
         from theseus import store, supervisor
         self.scaffold()
         local = ('[agents]\nmanaged = true\n\n[agents.counts]\ngw = 1\n\n[workers.gw]\npreset = "claude-code"\n'
-                 'model = "{model}"\nenv = {{ CBORG_CLAUDE_MODEL = "{{model}}", TOKEN = "t" }}\n')
+                 'model = "{model}"\nenv = {{ AGENT_MODEL = "{{model}}", TOKEN = "t" }}\n')
         self.write("theseus.local.toml", local.format(model="m-1"))
         conf = cfg.load(root=self.project)
         name = "demo-port-gw-1"
@@ -395,8 +395,8 @@ class DriftTests(Sandbox):
         self.assertIn("no drifted agents", self.theseus("agents", "restart", "--drifted").stdout)
         self.write("theseus.local.toml", local.format(model="m-2"))
         conf = cfg.load(root=self.project)
-        self.assertEqual(["model m-1 -> m-2", "env CBORG_CLAUDE_MODEL"], supervisor.drift(conf, supervisor.record(conf, name)))
-        self.assertIn("drift: model m-1 -> m-2; env CBORG_CLAUDE_MODEL", self.theseus("agents", "ls").stdout)
+        self.assertEqual(["model m-1 -> m-2", "env AGENT_MODEL"], supervisor.drift(conf, supervisor.record(conf, name)))
+        self.assertIn("drift: model m-1 -> m-2; env AGENT_MODEL", self.theseus("agents", "ls").stdout)
         refused = self.theseus("agents", "restart", name, "--drifted", check=False)
         self.assertIn("usage:", refused.stderr)
 

@@ -288,11 +288,11 @@ def tasks_action(conf, queue, args):
         emit(t.stats(conf, args.since))
     elif action == "archive":
         message = t.archive(queue)
+        emit(message)
         if message.startswith("archived"):
             from . import gitutil
             gitutil.commit_paths(conf.root, f"chore: {message}", [cfg.TASKS, cfg.ARCHIVE])
-            message += "; committed"
-        emit(message)
+            print(f"committed {cfg.TASKS} and {cfg.ARCHIVE}")
     elif action == "milestone":
         if args.value is None:
             print(queue.milestone() or "none")
