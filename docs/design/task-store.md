@@ -487,3 +487,74 @@ Phase 4 adds soft ownership. A task's conflict set is its owned patterns plus it
   - Only the claude-code preset has `mcp_flags`. A Codex profile needs its own `mcp_flags`, written for Codex's TOML overrides, before it can list servers.
 - The coordinator adds its server by hand: `claude mcp add theseus -- theseus mcp --role coordinator`.
 - Test 7 of section 13 (an in-process `mcp.Client` lists the worker tools and calls `task_show`) skips without the extra. The SDK cannot be installed on this host without network access, so it has not run here. Role resolution and the per-agent config are tested without the SDK.
+
+## 24. Phase 6 implementation notes
+
+- Export points:
+  - A passing `theseus verify` writes the task export (after resolving the caller as the coordinator), and so does `tasks complete`. Neither commits.
+  - Every export records its time, `HEAD` and the SHA-256 of the three files in `projects.last_export`.
+- Export state (`taskservice.export_state`) compares the files in the checkout with a fresh export and that record. The files are current, or stale (the store moved on since the export they hold, normal between verified merges), or edited (no export ever wrote them: a hand edit, which theseus ignores).
+  - `theseus doctor` shows the state and warns on edited.
+  - The console's PROJECT panel shows `export`, and an edited export is an attention item.
+  - `theseus upgrade` reports it, or with `--import-tasks` imports the project (under the queue lock) and exports.
+- Backups:
+  - The queue backs the store up at most hourly while task rows changed since the newest backup (compared with that file's modification time). Rotation keeps the newest of each day.
+  - `[store.backups] offsite` (empty by default) receives a copy of each daily backup, rotated the same way; hourly backups stay local, as section 16 decided.
+  - `theseus doctor` warns when the store sits on a network filesystem (`stat -f` type nfs, cifs, smb2, afs or fuse*), or when the newest off-site copy is over two days old.
+- `theseus db downgrade 6 [--yes]` refuses unless every imported project's export is current, then takes a `pre-downgrade` backup. It drops the task tables, the v7 columns (`projects` task columns, `deliveries.source`, `agents.pane_pid`) and the `projects_id` index, recreates `task_index`, and sets `user_version = 6`. A test checks that the result equals the v6 database it started from. Any command of the v7 code migrates the store again, so the older theseus has to be installed right after.
+- `db prune` names each project it keeps for its tasks, and `--with-tasks` exports them first.
+- A detected delivery's queue event says `(detected: the worker did not run theseus task done)`, which the console's event feed and `queue wait` show.
+- A process with `THESEUS_AGENT` set (every supervised launch, also by older versions) is never the coordinator, so an agent started before the cutover cannot pass as one.
+- Skills and templates:
+  - The worker skill, the instance brief and the prompt template use `theseus task show`, `task done`, `task blocked` and `task note --question`, and add "never read or print the credentials file".
+  - The coordinating skill and its references drop committing records before assignment, the hand-editing paragraph and dispatch's record commit. They add `tasks edit` (blocker flags included), `--touches`, worker questions, and the export that verify and complete write.
+  - All skills stay within their byte budgets: worker 5493 of 5500, coordinating 7988 of 8000, brief 3450 of 4000, prompt template 1316 of 1800.
+  - `AGENTS.md`, the ROADMAP template, `docs/workflow.md`, `docs/architecture.md` and `docs/configuration.md` (`offsite`, `credentials_days`, `prune --with-tasks`, `downgrade`) describe the store.
+
+## 25. Cutover runbook for this host
+
+Stable is an editable `uv tool` install of `~/software/theseus-lab-stable`, a detached worktree of the main repository; `theseus --schema-version` names the store version it knows. The store is `~/.local/share/theseus/theseus.db` (version 6). Both projects run only supervised agents (seven in opends2, two in openst133) and no hand-made panes. Moving stable's checkout is the code switch, and the first command of the new code migrates the store, so freeze both queues before that.
+
+Before (nothing changes):
+
+1. Merge `task-store` into `main` and run the suite on `main`; call that commit `C`. Note stable's current commit (now `91b854f`) for rollback.
+2. `theseus db` (schema 6, integrity ok) and `theseus doctor`, from each project root.
+3. In each project root, `git status docs/project` must be clean: commit any record change with stable, which still commits records.
+
+Freeze (both projects):
+
+4. `theseus queue pause` in `/home/roncofaber/SCRATCH/laserlab_software` (openst133) and `/home/roncofaber/software/opends2`.
+5. Stop each project's `theseus queue run` driver (its hidden tmux session) and the coordinator's `queue wait`. Wait until `theseus console --json` shows no live watcher and `flock -n <data>/queue/lock true` succeeds.
+6. Leave busy agents alone. Their tasks deliver through the handoff fallback after the switch.
+7. `theseus db backup` (still version 6).
+
+Switch stable and the store together:
+
+8. `git -C ~/software/theseus-lab-stable checkout --detach C`; `theseus --schema-version` now prints 7.
+9. `theseus db`: schema 7. Check that `~/.local/share/theseus/backups/theseus-*-pre-v7.db` exists, and that `theseus doctor` shows the store rows.
+
+openst133 first (116 archived tasks, none open):
+
+10. In `/home/roncofaber/SCRATCH/laserlab_software`: `theseus upgrade` (refreshes the skills), then `theseus upgrade --import-tasks`. Expect "imported 0 open and 116 archived task(s) ... the store was backed up to ...-pre-import.db", then the export line.
+11. `git diff --stat docs/project`: only `tasks.json` (the six header lines). `git diff .agents/` shows the refreshed skills. Then `theseus check`, `theseus doctor` (tasks export current), and commit `docs/project/` and `.agents/`.
+12. Restart both agents (`theseus agents restart NAME` while free) so they get credentials and the new brief. `theseus queue resume`, then restart the `queue run` driver.
+13. Watch one assignment end to end: the pointer line arrives; the agent runs `theseus task show ID` (and, if credentials are missing, is refused rather than taken for the coordinator); `theseus task done` puts the task in `verification`; `queue wait` wakes.
+
+opends2 (23 open, 3 of them in progress, 1088 archived):
+
+14. In `/home/roncofaber/software/opends2`: `theseus upgrade`, then `theseus upgrade --import-tasks`. Expect 23 open and 1088 archived and no warnings (the three running tasks belong to three different agents). `git diff --stat docs/project` shows only the six header lines of `tasks.json`.
+15. `theseus check`, `theseus doctor`, `theseus tasks list` and `theseus queue status`. One hold is expected, and it is real: `split-interpreted-component-executor` owns a directory holding files of the running `wire-act3-valdis-final-encounter`, and also waits on it as a dependency. Commit `docs/project/` and `.agents/`.
+16. Restart free agents one by one so they get credentials and the new brief. The three busy ones finish their tasks with the old brief; their deliveries are detected (marked so in the feed). Restart each once it is free.
+17. `theseus queue resume`, then restart the driver.
+
+Afterwards:
+
+18. Optional: set `[store.backups] offsite` in `~/.config/theseus/config.toml` (the path is your decision), and install the MCP extra into the tool environment (`uv tool install --editable ~/software/theseus-lab-stable --with "mcp>=2.3,<3"`, which needs the network).
+19. `theseus doctor` in both projects, and keep an eye on `export` in the console's PROJECT panel.
+
+Rollback:
+
+- Before step 8: nothing changed; `theseus queue resume`.
+- After step 8, before any import: check out the old commit in stable, then `theseus db restore <pre-v7 backup> --yes` (the store is otherwise unchanged), and resume.
+- After imports: `theseus tasks export` in each imported project and commit, then `theseus db downgrade 6 --yes` with the new code. Only then `git -C ~/software/theseus-lab-stable checkout --detach 91b854f` (the old commit), and resume. Old theseus reads the schema 2 export.
+- An import that reports `lossy` imported nothing. The project stays as it was, refused until imported; send me the printed diff.

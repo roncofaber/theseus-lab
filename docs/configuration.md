@@ -170,7 +170,7 @@ Profiles that share one API key share its limits (requests in flight, requests a
 
 ## Host store
 
-Runtime state shared by every project on the machine (projects, registered agents, queue events, pool slots, deliveries and agent-state samples) lives in one SQLite database, `~/.local/share/theseus/theseus.db`. Task records stay in each project's `tasks.json`. The first command run in a project imports its old `agents.json` and `queue/events.jsonl` once and leaves the files in place; `queue/events.jsonl` still receives a copy of every event as a deprecated audit trail. See [Design notes](architecture.md#host-store) for how it works.
+Runtime state shared by every project on the machine (projects, registered agents, queue events, pool slots, deliveries and agent-state samples) lives in one SQLite database, `~/.local/share/theseus/theseus.db`, and so do the task records (`theseus tasks import` loads a project's files once; `theseus tasks export` writes them back to `docs/project/` for the coordinator to commit, as a passing verify and `tasks complete` do). The first command run in a project imports its old `agents.json` and `queue/events.jsonl` once and leaves the files in place; `queue/events.jsonl` still receives a copy of every event as a deprecated audit trail. See [Design notes](architecture.md#host-store) for how it works.
 
 Retention and backups are set in `[store]` of the host configuration; these are the defaults:
 
@@ -181,11 +181,13 @@ events_days = 365          # queue events and ended coordinator sessions
 deliveries_days = 365      # deliveries
 runs_days = 90             # ended supervised-agent runs (each agent's latest run is always kept)
 gateway_days = 7           # gateway errors and gateway retry episodes no longer waiting
+credentials_days = 30      # agent credentials of runs that ended (task rows and their history are never trimmed)
 
 [store.backups]
 directory = ""      # default: the backups directory next to the database
 daily = 7           # keep the newest backup of each of this many recent days
 weekly = 4          # and of each of this many recent ISO weeks
+offsite = ""        # optional: a directory (another disk, network storage) the daily and weekly copies also go to
 ```
 
 ```sh
@@ -194,9 +196,11 @@ theseus db maintain            # trim by retention, ANALYZE, optimize, increment
 theseus db backup              # online backup to the backups directory, integrity check, rotation
 theseus db restore FILE --yes  # back up the current database, then load FILE (refuses without --yes)
 theseus db prune [--yes]       # list (and with --yes delete) projects whose root is gone, with all their rows
+theseus db prune --with-tasks --yes   # also projects with tasks, after exporting them to the project's data directory
+theseus db downgrade 6 [--yes] # remove the task store for an older theseus, once every project's export is current
 ```
 
-The work queue runs `maintain` (which trims by retention) and `backup` by itself at most once a day across the host, so a machine that runs a queue needs no cron job and the database stays bounded. `theseus doctor` shows the database path, schema version, size, last backup, last maintenance and any project name claimed by two different roots (give one of them a different `[project] name`).
+The work queue runs `maintain` (which trims by retention) and `backup` by itself at most once a day across the host, and another backup at most hourly while task rows changed since the newest one (rotation keeps the newest of each day), so a machine that runs a queue needs no cron job and the database stays bounded. Keep the live database on a local disk: `theseus doctor` warns when it sits on a network filesystem, and when the newest off-site copy is older than two days. `theseus doctor` shows the database path, schema version, size, last backup, last maintenance and any project name claimed by two different roots (give one of them a different `[project] name`).
 
 Environment overrides, mainly for tests: `THESEUS_DB` (database file), `THESEUS_BACKUPS` (backup directory, above `[store.backups] directory`), `THESEUS_CONFIG` (the host `config.toml`), `THESEUS_STORE_CONFIG` (the deprecated `store.toml`).
 

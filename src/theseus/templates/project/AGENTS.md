@@ -9,7 +9,7 @@ State in two or three sentences what the port delivers, from which original, and
 | Role | Read at start | Then load skill |
 | --- | --- | --- |
 | Coordinator | this file, `docs/project/STATE.md`, `theseus tasks list`; `MANIFEST.md` and `ROADMAP.md` once per session | `theseus-coordinating` |
-| Worker | this file, `docs/project/STATE.md`, `theseus tasks show <TASK_ID>` | `theseus-worker` |
+| Worker | this file, `docs/project/STATE.md`, `theseus task show <TASK_ID>` | `theseus-worker` |
 
 User instructions recorded in `STATE.md` after the mandate (such as a pause) take precedence over the MANIFEST's standing loop. Do not read `docs/project/tasks-archive.jsonl` or `docs/project/archive/` whole; query them with `theseus tasks show` and `rg`. `docs/project/ROADMAP.md` holds milestones and deferred scope, `docs/topics/README.md` lists the living topic documents (read the topic first), `docs/investigations/README.md` indexes every report and `docs/re/citation-index.md` indexes every cited address and capture. All configurable values (paths, commands, worker providers, panes) are in `theseus.toml`; machine-specific values are in the Git-ignored `theseus.local.toml`.
 
@@ -29,7 +29,7 @@ Project skills (data formats, the device protocol, the build of the new applicat
 
 The coordinator owns integration, task assignment, verification, commits, pushes (when the user asks) and worker replenishment. Workers are coding agents described by an agent profile (`theseus agents profiles`: Claude Code, Codex, OpenCode, Gemini CLI and others): one-shot headless runs (`theseus dispatch ID`), persistent sessions in tmux panes registered with `theseus agents add` and fed by `theseus queue`, or subagents of the coordinator. Capacity per profile is `workers.<profile>.capacity` in `theseus.toml`. Workers stay inside their owned paths, report exact evidence and limits, and never commit or push.
 
-A worker task has a task ID in `docs/project/tasks.json`, owned paths, a general contract, at most six acceptance items and a milestone. Inspect current state at task start; another slice may have changed assumptions. Only the coordinator edits shared integration files and governance files (`AGENTS.md`, `README.md`, `theseus.toml`, `docs/project/**`, `.agents/skills/**`).
+A worker task has a task ID in the task queue (the host store, exported to `docs/project/tasks.json`), owned paths, a general contract, at most six acceptance items and a milestone. Inspect current state at task start; another slice may have changed assumptions. Only the coordinator edits shared integration files and governance files (`AGENTS.md`, `README.md`, `theseus.toml`, `docs/project/**`, `.agents/skills/**`).
 
 The coordinator may compact or restart. Recovery starts from repository state and local runtime records, never from the assumption that earlier tool calls, agents or processes still exist.
 
@@ -41,7 +41,7 @@ The coordinator may compact or restart. Recovery starts from repository state an
 - Recover behavior from the original (decompilation, data, recorded protocol traffic) before implementing it. Never silently invent behavior to fill a gap; return an explicit unsupported result and record what evidence would resolve it.
 - Build general contracts tested over representative variations of the original's inputs. One device model, file or scenario is a fixture, never a subsystem boundary.
 - Unrecovered original behavior is bounded reverse-engineering work, not an external blocker. Reserve external blockers for inputs the team cannot obtain itself.
-- Work one milestone at a time: `currentMilestone` in `docs/project/tasks.json` gates which tasks are ready.
+- Work one milestone at a time: the current milestone (`theseus tasks milestone`) gates which tasks are ready.
 - Merged, observed at runtime and user-tested are three different claims. Record each (`theseus merge`, `theseus tasks observe`, `theseus tasks observe --user`) and never report one as another.
 - Code-only rounds owe a periodic full verification pass (`theseus verify`); the pre-push guard refuses further unverified pushes past `verification.max_unverified_merges`.
 - A script used more than once lives in this repository with a header saying what it does, never in a scratch folder.

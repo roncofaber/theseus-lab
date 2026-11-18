@@ -2,10 +2,11 @@
 
 ```sh
 theseus tasks add ID --role ROLE --owned PATHS... --objective "..." --contract "..." --accept ITEMS... \
-  [--depends IDS] [--milestone M] [--room clean|dirty] [--priority N] [--profile P] [--min-capability N]
+  [--depends IDS] [--milestone M] [--room clean|dirty] [--priority N] [--profile P] [--min-capability N] \
+  [--touches FILES]
 ```
 
-`--owned` must include the task's report, `docs/investigations/<name>.md`. The record is written as `pending`; commit `docs/project/tasks.json` before the task is assigned (dispatch and the queue refuse or commit an uncommitted record). `theseus check` validates every record.
+`--owned` must include the task's report, `docs/investigations/<name>.md`. The record goes into the host store as `pending`; there is nothing to commit before it is assigned (workers read it with `theseus task show`). A passing `theseus verify` and `tasks complete` write the export under `docs/project/`, which you commit; `theseus tasks export` writes it any time. Never edit those files by hand: theseus ignores the edit, and `theseus doctor` reports it.
 
 ## Rules
 
@@ -16,6 +17,7 @@ theseus tasks add ID --role ROLE --owned PATHS... --objective "..." --contract "
 - `researchRequired` and `externalBlocker` each need `evidence` and `unblockCondition`; `externalBlocker` is only for inputs the team cannot obtain.
 - `--profile P` only when the task needs what that profile adds (an MCP server's session state); the queue relaunches a compatible agent onto it and back afterwards.
 - `--min-capability N` only when the task needs a profile `capability` of at least N.
+- `--touches FILES` names shared files outside `ownedPaths` the task will patch. A running or delivered task that owns or touches one holds it (and overlapping owned paths do), so name them rather than discover them at merge.
 - Hardware: say in the objective or contract when a task may operate a device, and which commands are allowed (only those seen in recorded original traffic). Workers treat any device as off limits otherwise.
 
 ## Rooms
@@ -24,7 +26,7 @@ With `[rooms]` enabled every record gets `--room dirty` (reads the original's co
 
 ## Changing a record
 
-There is no `tasks edit`. Use the command for the field:
+`theseus tasks edit ID --objective ... --contract ... --accept ... --owned ... --add-owned ... --depends ... --touches ...` changes a pending task, and with `--force` an in-progress one (its worker gets an edit note and an updated task copy). A delivered or merged task: reopen or unmerge first. Single fields also have their own commands:
 
 | Change | Command |
 | --- | --- |
@@ -37,4 +39,4 @@ There is no `tasks edit`. Use the command for the field:
 | Merged but wrong | `theseus tasks unmerge ID --reason "..."` |
 | Merge committed by hand | `theseus tasks merged ID --commit SHA` |
 
-Anything else (objective, contract, acceptance, owned paths, dependencies): edit the record in `docs/project/tasks.json`, preferably while it is `pending`, run `theseus check`, and commit before the next assignment. A worker already on the task does not see the edit; tell it with `theseus instance send`.
+Blockers: `theseus tasks edit ID --research-required EVIDENCE --unblock CONDITION` (or `--external-blocker`, `--clear-blockers`).

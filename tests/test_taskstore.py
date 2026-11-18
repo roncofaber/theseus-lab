@@ -474,6 +474,8 @@ class AuthorizationTests(TaskStoreCase):
         worker = ts.principal({"THESEUS_CREDENTIALS": str(path)}, self.tmp)
         self.assertEqual(("worker", "agent-a"), (worker.role, worker.agent_id))
         self.assertEqual("unauthenticated", self.code(ts.principal, {"THESEUS_AGENT_ID": "agent-a"}, self.tmp))
+        self.assertEqual("unauthenticated", self.code(ts.principal, {"THESEUS_AGENT": "w-1"}, self.tmp),
+                         "an agent launched before credentials existed is not the coordinator either")
         self.assertEqual("unauthenticated", self.code(ts.principal, {}, self.worktree / "src"))
         self.assertEqual("coordinator", ts.principal({}, self.tmp).role)
         self.svc.add(COORDINATOR, spec("in-place"))

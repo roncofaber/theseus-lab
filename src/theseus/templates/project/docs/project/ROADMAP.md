@@ -17,7 +17,7 @@ What is outside the current definition of done. Keep architecture compatible whe
 
 ## Milestones
 
-Work one milestone at a time. The current one is `currentMilestone` in `docs/project/tasks.json`; `theseus tasks ready` offers only its tasks.
+Work one milestone at a time. The current one is set with `theseus tasks milestone M`; `theseus tasks ready` offers only its tasks.
 
 ### M0: Foundation
 

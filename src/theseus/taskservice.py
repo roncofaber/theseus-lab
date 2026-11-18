@@ -1279,8 +1279,11 @@ def identify(env, cwd, via, opener, readonly):
         except (OSError, ValueError) as error:
             raise TaskError("unauthenticated", f"cannot read the credentials file {path}: {error}") from error
         return authenticate(credentials, via=via, opener=opener, readonly=readonly)
-    if env.get("THESEUS_AGENT_ID"):
-        raise TaskError("unauthenticated", "THESEUS_AGENT_ID is set without credentials; an agent is never the coordinator")
+    if env.get("THESEUS_AGENT_ID") or env.get("THESEUS_AGENT"):
+        # THESEUS_AGENT is set by every supervised launch, also by theseus versions that wrote no credentials yet.
+        raise TaskError("unauthenticated", "this process runs as a theseus agent without valid credentials; an agent is "
+                                           "never the coordinator (an agent started before credentials existed gets "
+                                           "them at its next restart)")
     if env.get("TMUX_PANE"):
         with facts(opener, readonly) as repo:
             agent = repo.hand_made_agent(env["TMUX_PANE"]) if repo else None

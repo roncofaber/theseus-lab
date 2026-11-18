@@ -25,7 +25,7 @@ The worker finished some acceptance items and listed the rest under Limits. Pref
 
 Read the handoff: it names what is missing and what would unblock it.
 
-- Something you can supply (a decision, a spec section, an ownership extension, a patch you apply on main): supply it, then send the task back (above). For an ownership extension, edit `ownedPaths` in `docs/project/tasks.json` and commit it first.
+- Something you can supply (a decision, a spec section, an ownership extension, a patch you apply on main): supply it, then send the task back (above). For an ownership extension, `theseus tasks edit ID --add-owned PATH --force`.
 - Unknown original behavior: add a research task (`theseus-native-re` or `theseus-reference-runs`) and make this task depend on it: release it and edit `dependencies`.
 - An input the team cannot obtain (hardware, credentials, a licence, a user decision): escalate; record `externalBlocker` with `evidence` and `unblockCondition`.
 
@@ -77,7 +77,7 @@ For profiles that detect them (Claude Code), the queue handles retryable errors 
 `theseus verify` FAIL after a merge:
 
 1. Read the verify log; find the failing check and the merge that caused it (`theseus verify --debt` lists the code commits since the last pass).
-2. Move that task's handoff aside (above), then `theseus tasks unmerge ID --reason "verify: <failing check>"`. It reverts the merge commit, commits the record and puts the task back in `in_progress` with its worktree.
+2. Move that task's handoff aside (above), then `theseus tasks unmerge ID --reason "verify: <failing check>"`. It reverts the merge commit and puts the task back in `in_progress` with its worktree.
 3. Get it fixed: if the owning agent is free, `theseus instance send NAME "ID was unmerged: <failure>. Fix it in WORKTREE, rerun <check>, rewrite the handoff."`. If it moved on, `theseus tasks release ID --reason "..."` and `theseus tasks note ID "..."` as above.
 4. Right after the unmerge, `theseus verify` again to confirm main passes without it.
 5. Never complete a task whose verification failed. When the cause is not one recent merge, stop merging and escalate.

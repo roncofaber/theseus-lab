@@ -22,7 +22,7 @@ Never read `tasks-archive.jsonl` or `docs/project/archive/` whole; use `theseus 
 
 Take the first action whose trigger holds, then loop. Busy agents are never a reason to stop.
 
-1. An event from `queue wait`: handle it (table below).
+1. An event from `queue wait`: handle it (table below); answer a `question` with `theseus tasks note ID`.
 2. A task in `verification`: integrate it (section 3).
 3. Fewer ready tasks than free agents: write records (`references/task-records.md`), following the phase gates of the `theseus-recipe` skill. Unknown original behavior is a bounded research task, not a blocker.
 4. `theseus verify --debt` near its limit: `theseus verify` before more merges.
@@ -53,8 +53,8 @@ No agents registered: dispatch by hand (`references/workers.md`).
 4. `theseus build` and `theseus smoke`.
 5. `theseus verify`. FAIL: `theseus tasks unmerge ID --reason "..."` (events.md, failed verification); never complete it.
 6. `theseus tasks observe ID --how "..."` only after you saw it work in the running application; `--user` only after the user tested it.
-7. `theseus tasks complete ID --from-log VERIFY_LOG --summary "..."` (or `--check "cmd -> outcome" --log PATH`), `theseus tasks archive`, `theseus tasks retire ID`.
-8. Rewrite the affected STATE.md rows (replace, never append), then commit `docs/project/` (complete, archive and retire leave it modified).
+7. `theseus tasks complete ID --from-log VERIFY_LOG --summary "..."` (or `--check "cmd -> outcome" --log PATH`), `theseus tasks retire ID`.
+8. Rewrite the affected STATE.md rows (replace, never append), then commit `docs/project/` (verify and complete write the export).
 
 ## Safety rules
 

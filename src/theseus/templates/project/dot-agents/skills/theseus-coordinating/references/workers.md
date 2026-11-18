@@ -9,7 +9,7 @@ Workers run under an agent profile (`theseus agents profiles`; `workers.default`
 | Headless one-shot | `theseus dispatch ID [--profile P]`, then keep `theseus wait` running | `theseus followup NAME MSG` (profiles that resume), `theseus stop NAME` |
 | Subagent (`claude-subagent`, needs a capacity) | `theseus dispatch ID --profile claude-subagent`, then launch a subagent told to read and follow the printed `prompt.md` | your agent's own messaging and stop tools; stop it once it hands back |
 
-Before a by-hand dispatch: `theseus tasks ready`, rank, `theseus dispatch ID --dry-run` and read the rendered prompt. Dispatch commits an uncommitted task record so the worker sees it at its base. `theseus status` lists headless workers (`FAILED` = exited without a handoff, `LEAKING` = processes left in its slice).
+Before a by-hand dispatch: `theseus tasks ready`, rank, `theseus dispatch ID --dry-run` and read the rendered prompt. Dispatch writes the worker's credentials; a subagent's prompt says how to pass them to `theseus task`. `theseus status` lists headless workers (`FAILED` = exited without a handoff, `LEAKING` = processes left in its slice).
 
 **Ranking** ready tasks: (1) inside the current milestone, (2) unblocks the most dependents, (3) general contract over fixture, (4) ownership disjoint from running work, (5) smaller first. `theseus tasks priority ID N` makes the queue assign it first; `theseus tasks hold ID` keeps it from being assigned (`release-hold` undoes); `theseus queue pause|resume` stops and restarts all assignment.
 
