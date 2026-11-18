@@ -447,16 +447,20 @@ def tick(conf, assign=True):
                             recorded.append(event(conf, "error", name, task["id"], f"{needed} failed: {detail}"))
                             continue
                         recorded.append(event(conf, "cleared" if needed == "clear" else "compacted", name, None, detail))
+                    from . import integrate
+                    held = False
                     try:
                         ok, detail = assign_and_send(conf, agent, task)
                     except Exception as error:
-                        ok, detail = False, str(error)
+                        ok, detail, held = False, str(error), isinstance(error, integrate.DependencyHeld)
                     if not ok:
                         back_off(conf, task["id"])
-                    recorded.append(events(conf, 1)[-1] if ok else event(conf, "error", name, task["id"], detail))
+                    recorded.append(events(conf, 1)[-1] if ok else
+                                    event(conf, "held" if held else "error", name, task["id"], detail))
                 finally:
                     if pool and not ok:
                         pools.release(conf.name, pool, name)
+            recorded.extend(note_holds(conf))
         finally:
             recorded.extend(verify_sends(conf, sends))
         for pool in set(filter(None, pool_names.values())) - waiting_on_pool:
@@ -465,6 +469,23 @@ def tick(conf, assign=True):
             with store.for_project(conf) as conn:
                 store.add_samples(conn, conf.name, samples)
     housekeeping()
+    return recorded
+
+
+def note_holds(conf):
+    """Record a held event, which does not wake the coordinator, when a pending task starts waiting for a dependency's
+    merge to reach the assignment base."""
+    queue = t.Queue(conf)
+    index = queue.index()
+    reach = t.merge_reach(conf)
+    recorded = []
+    for task in queue.load()["tasks"]:
+        detail = "; ".join(t.unreached(task, index, reach)) if task["status"] == "pending" else ""
+        if not detail:
+            continue
+        last = events(conf, 1, kinds=["held"], task=task["id"])
+        if not last or last[-1]["detail"] != detail:
+            recorded.append(event(conf, "held", None, task["id"], detail))
     return recorded
 
 
@@ -862,6 +883,7 @@ def summary(conf):
     groups = {"ready": [], "held": [], "blocked": [], "in_progress": [], "review": [], "merged": []}
     index = queue.index()
     current = queue.milestone()
+    reach = t.merge_reach(conf)
     for task in open_tasks:
         status = task["status"]
         if status == "pending":
@@ -870,7 +892,7 @@ def summary(conf):
             elif task["id"] in ready:
                 groups["ready"].append(task)
             else:
-                groups["blocked"].append({**task, "reasons": t.blocking(task, index, current)})
+                groups["blocked"].append({**task, "reasons": t.blocking(task, index, current, reach)})
         elif status == "in_progress":
             groups["in_progress"].append(task)
         elif status == "verification":

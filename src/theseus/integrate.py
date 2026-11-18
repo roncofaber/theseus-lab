@@ -28,6 +28,17 @@ class IntegrationError(Exception):
         self.code = code
 
 
+class DependencyHeld(IntegrationError):
+    """A dependency is merged on main but its merge commit is not yet in the assignment base."""
+
+
+def check_reached(conf, task, base):
+    reach = t.merge_reach(conf, base, f"{t.queue_base_ref(conf)} ({base[:12]})")
+    held = t.unreached(task, t.Queue(conf).index(), reach)
+    if held:
+        raise DependencyHeld(f"{task['id']} is not ready: {'; '.join(held)}")
+
+
 def base_commit(conf):
     git = conf.section("git")
     ref = git.get("base") or "HEAD"
@@ -418,6 +429,7 @@ def assign(conf, task_id, name, provider, model, owner=None, commit=True, instan
     if commit and not record_committed(conf, task_id, "HEAD"):
         commit_record(conf, f"chore: queue {task_id}")
     base = base_commit(conf)
+    check_reached(conf, task, base)
     if not record_committed(conf, task_id, base):
         raise IntegrationError(base_mismatch(conf, task_id, base))
     aside = move_previous_attempt(conf, queue, task_id, conf.worktrees / name)

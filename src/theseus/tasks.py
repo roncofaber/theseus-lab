@@ -1,9 +1,9 @@
 """Task queue: docs/project/tasks.json holds policy plus open tasks, docs/project/tasks-archive.jsonl the completed ones.
 
 Lifecycle: pending -> in_progress (assigned to a worker) -> verification (worker delivered) -> merged (the coordinator
-integrated the code; dependents may start) -> completed (verified against acceptance; archivable). Runtime observation
-and user testing are recorded separately under `evidence`, because merged, observed at runtime and user-tested are
-different claims.
+integrated the code; dependents may start once the merge commit is in their assignment base) -> completed (verified
+against acceptance; archivable). Runtime observation and user testing are recorded separately under `evidence`, because
+merged, observed at runtime and user-tested are different claims.
 """
 import datetime
 import hashlib
@@ -122,7 +122,49 @@ def in_milestone(task, current):
     return not current or task.get("milestone") in (None, "", current)
 
 
-def blocking(task, index, current=None):
+def merge_reach(conf, base=None, label=None):
+    """A function taking a dependency's recorded merge commit and returning the name of the base a worktree would
+    start from when that base lacks the commit, else None. base defaults to the configured [git] base ref, resolved
+    without fetching. A commit that no longer resolves (rewritten history, old archive records) counts as reached."""
+    ref = base or queue_base_ref(conf)
+    label = label or ref
+    resolved, ancestry = {}, {}
+
+    def resolve(rev):
+        if rev not in resolved:
+            shown = g.git(conf.root, "rev-parse", "--verify", "-q", f"{rev}^{{commit}}", check=False)
+            resolved[rev] = shown.stdout.strip() if shown.returncode == 0 else None
+        return resolved[rev]
+
+    def missing(commit):
+        merge, tip = resolve(commit), resolve(ref)
+        if merge is None or tip is None:
+            return None
+        if merge not in ancestry:
+            ancestry[merge] = g.git(conf.root, "merge-base", "--is-ancestor", merge, tip, check=False).returncode == 0
+        return None if ancestry[merge] else label
+
+    return missing
+
+
+def queue_base_ref(conf):
+    return conf.section("git").get("base") or "HEAD"
+
+
+def unreached(task, index, reach):
+    """A reason per satisfied dependency whose merge commit is not yet in the base a worktree would start from."""
+    reasons = []
+    for dependency in task.get("dependencies", []):
+        record = index.get(dependency)
+        commit = ((record or {}).get("merge") or {}).get("commit")
+        if record and record["status"] in SATISFIES_DEPENDENCY and commit:
+            where = reach(commit)
+            if where:
+                reasons.append(f"waiting for {dependency}'s merge {commit[:7]} to reach {where}")
+    return reasons
+
+
+def blocking(task, index, current=None, reach=None):
     reasons = [key for key in ("externalBlocker", "researchRequired", "pause") if task.get(key)]
     if not in_milestone(task, current):
         reasons.append(f"milestone:{task.get('milestone')}")
@@ -132,11 +174,13 @@ def blocking(task, index, current=None):
             reasons.append(f"missing:{dependency}")
         elif record["status"] not in SATISFIES_DEPENDENCY:
             reasons.append(f"waits:{dependency}")
+    if reach and task["status"] == "pending":
+        reasons += unreached(task, index, reach)
     return reasons
 
 
-def dependency_ready(task, index, current=None):
-    return task["status"] == "pending" and not blocking(task, index, current)
+def dependency_ready(task, index, current=None, reach=None):
+    return task["status"] == "pending" and not blocking(task, index, current, reach)
 
 
 def evidence_level(task):
@@ -153,12 +197,14 @@ def evidence_level(task):
 def list_tasks(queue, status=None, include_archive=False, show_evidence=False):
     index = queue.index()
     current = queue.milestone()
+    reach = merge_reach(queue.conf)
     tasks = queue.all() if include_archive else queue.load()["tasks"]
     lines = []
     for task in tasks:
         if status and task["status"] != status:
             continue
-        flags = blocking(task, index, current) + (["ready"] if dependency_ready(task, index, current) else [])
+        flags = blocking(task, index, current, reach)
+        flags += ["ready"] if task["status"] == "pending" and not flags else []
         line = f"{task['status']:<12} {task['id']}  owner={task.get('owner') or '-'}  {','.join(flags)}"
         if show_evidence:
             line += f"  evidence={evidence_level(task)}"
@@ -169,10 +215,11 @@ def list_tasks(queue, status=None, include_archive=False, show_evidence=False):
 def ready(queue, include_paused=False, any_milestone=False):
     index = queue.index()
     current = None if any_milestone else queue.milestone()
+    reach = merge_reach(queue.conf)
     result = []
     for task in queue.load()["tasks"]:
         candidate = {**task, "pause": None} if include_paused else task
-        if dependency_ready(candidate, index, current):
+        if dependency_ready(candidate, index, current, reach):
             result.append(task["id"])
     return result
 
@@ -284,8 +331,9 @@ def assign(queue, task_id, owner, provider, model, worktree, base, log_dir, forc
         raise TaskError(f"{task_id} is {task['status']}; pass --force to reassign")
     index = queue.index()
     current = document.get("currentMilestone")
-    if not dependency_ready(task, index, current) and not force:
-        raise TaskError(f"{task_id} is not ready: {', '.join(blocking(task, index, current))}; pass --force to override")
+    reach = merge_reach(queue.conf, base) if base != "uncommitted" else None
+    if not dependency_ready(task, index, current, reach) and not force:
+        raise TaskError(f"{task_id} is not ready: {', '.join(blocking(task, index, current, reach))}; pass --force to override")
     capacity = provider_capacity(queue.conf, provider)
     if capacity is not None and not force and active_by_provider(document["tasks"]).get(provider, 0) >= int(capacity):
         raise TaskError(f"provider {provider} is at its capacity of {capacity} active tasks (workers.{provider}.capacity)")

@@ -883,9 +883,12 @@ def cmd_queue(args):
         for record in workqueue.events(conf, args.lines):
             print(f"{record['time']} {record['kind']:<10} {record['agent'] or '-':<18} {record['task'] or '-'} {record['detail']}")
     else:
-        for key, items in workqueue.summary(conf).items():
+        groups = workqueue.summary(conf)
+        for key, items in groups.items():
             print(f"{key:<12} {len(items):>3}  {', '.join(x['id'] for x in items[:8])}")
         print("paused" if workqueue.paused(conf) else "running")
+        for task in groups["blocked"][:8]:
+            print(f"  {task['id']}: {'; '.join(task['reasons'])}")
 
 
 def cmd_top(args):

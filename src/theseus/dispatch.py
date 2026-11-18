@@ -48,7 +48,7 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
     task = queue.get(task_id)
     if task_id not in t.ready(queue, include_paused=resume_paused):
         index = queue.index()
-        reasons = t.blocking(task, index, queue.milestone()) or [task["status"]]
+        reasons = t.blocking(task, index, queue.milestone(), t.merge_reach(conf)) or [task["status"]]
         raise integrate.IntegrationError(f"{task_id} is not ready: {', '.join(reasons)}")
     if not integrate.record_committed(conf, task_id, "HEAD"):
         if not commit or dry_run:
@@ -58,6 +58,7 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
     if problems:
         raise integrate.IntegrationError("task records break the Supervisor rules; fix them before dispatching:\n" + "\n".join(problems))
     base = integrate.base_commit(conf)
+    integrate.check_reached(conf, task, base)
     if not integrate.record_committed(conf, task_id, base):
         raise integrate.IntegrationError(integrate.base_mismatch(conf, task_id, base))
     name = name or task_id

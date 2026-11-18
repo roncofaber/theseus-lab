@@ -153,6 +153,38 @@ class QueueTests(Sandbox):
         result = self.theseus("queue", "wait", "--timeout", "20", "--interval", "1")
         self.assertIn("delivered", result.stdout)
 
+    def test_tick_holds_a_dependent_until_the_dependency_merge_reaches_the_base(self):
+        self.add("first-task")
+        self.add("second-task", dependencies=["first-task"])
+        self.git("init", "-q", "--bare", self.tmp / "origin.git", cwd=self.tmp)
+        self.git("remote", "add", "origin", self.tmp / "origin.git")
+        self.git("push", "-q", "--no-verify", "origin", "main")
+        self.write("theseus.local.toml", '[git]\nbase = "origin/main"\n')
+        self.write("src/first.py", "FIRST = 1\n")
+        self.git("add", "src/first.py")
+        self.git("commit", "-q", "-m", "merge first-task")
+        merge = self.git("rev-parse", "HEAD").stdout.strip()
+        path = self.project / "docs/project/tasks.json"
+        document = json.loads(path.read_text())
+        document["tasks"][0].update({"status": "merged", "merge": {"commit": merge, "mergedAt": "2026-11-18T00:00:00Z"}})
+        path.write_text(json.dumps(document, indent=2) + "\n")
+        self.git("commit", "-q", "-am", "first-task merged")
+
+        out = self.theseus("queue", "tick").stdout
+        self.assertRegex(out, rf"held\s+-\s+second-task waiting for first-task's merge {merge[:7]} to reach origin/main")
+        self.assertNotIn("assigned", out)
+        self.assertNotIn("error", out)
+        waited = self.theseus("queue", "wait", "--timeout", "1", "--interval", "1", check=False)
+        self.assertEqual(1, waited.returncode, "a hold is not something the coordinator is woken for")
+        from theseus import config as cfg, workqueue
+        conf = cfg.load(root=self.project)
+        self.assertEqual(1, len(workqueue.events(conf, kinds=["held"])), "the hold is recorded once")
+        self.assertEqual([], workqueue.events(conf, kinds=["error"]))
+
+        self.git("push", "-q", "--no-verify", "origin", "main")
+        self.assertRegex(self.theseus("queue", "tick").stdout, r"assigned\s+worker-a\s+second-task")
+        self.assertTrue((self.tmp / "worktrees/worker-a-second-task/src/first.py").exists())
+
     def test_an_assignment_failure_backs_off_that_task_and_the_queue_keeps_going(self):
         self.add("blocked-task")
         self.add("other-task")

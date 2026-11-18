@@ -59,11 +59,12 @@ class TaskFlowTests(Sandbox):
         self.theseus("tasks", "milestone", "M0")
         self.git("commit", "-q", "-am", "configure")
 
-    def add_task(self, task_id=TASK, owned=("src/capture/header.py", f"docs/investigations/{TASK}.md")):
+    def add_task(self, task_id=TASK, owned=("src/capture/header.py", f"docs/investigations/{TASK}.md"), depends=()):
         self.theseus("tasks", "add", task_id, "--role", "implementation", "--owned", *owned,
                      "--objective", "Parse the capture file header.",
                      "--contract", "Every header variant the original writes, with unknown fields preserved.",
-                     "--accept", "Two header variants parse.", "Unknown versions return an explicit unsupported result.")
+                     "--accept", "Two header variants parse.", "Unknown versions return an explicit unsupported result.",
+                     *(["--depends", *depends] if depends else []))
 
     def deliver(self, worktree, task_id=TASK):
         self.write("src/capture/header.py", "def parse(data):\n    return data[:4]\n", root=worktree)
@@ -248,6 +249,35 @@ class TaskFlowTests(Sandbox):
                             "the deletion must be in the merge commit itself")
         self.theseus("tasks", "complete", TASK, "--summary", "replaced", "--check", "manual", "--log",
                      str(worktree / ".theseus/handoff.md"))
+
+    def test_dependent_waits_until_the_dependency_merge_reaches_the_assignment_base(self):
+        later = "use-capture-header"
+        self.add_task()
+        self.add_task(later, owned=("src/capture/use.py", f"docs/investigations/{later}.md"), depends=[TASK])
+        self.git("commit", "-q", "-am", "queue both")
+        self.git("init", "-q", "--bare", self.tmp / "origin.git", cwd=self.tmp)
+        self.git("remote", "add", "origin", self.tmp / "origin.git")
+        self.git("push", "-q", "--no-verify", "origin", "main")
+        self.write("theseus.local.toml", '[git]\nbase = "origin/main"\n')
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        self.deliver(self.tmp / "worktrees/worker-1-a")
+        self.theseus("merge", TASK)
+        waiting = f"waiting for {TASK}'s merge {self.record()['merge']['commit'][:7]} to reach origin/main"
+
+        self.assertEqual("", self.theseus("tasks", "ready", check=False).stdout.strip())
+        self.assertIn(waiting, self.theseus("tasks", "list").stdout)
+        self.assertIn(f"{later}: {waiting}", self.theseus("queue", "status").stdout)
+        refused = self.theseus("instance", "assign", later, "worker-2", "b", check=False)
+        self.assertNotEqual(0, refused.returncode)
+        self.assertIn(waiting, refused.stderr)
+        self.assertEqual("pending", self.record(later)["status"])
+        self.assertFalse((self.tmp / "worktrees/worker-2-b").exists())
+
+        self.git("push", "-q", "--no-verify", "origin", "main")
+        self.assertEqual(later, self.theseus("tasks", "ready").stdout.strip())
+        self.theseus("instance", "assign", later, "worker-2", "b")
+        self.assertEqual(self.git("rev-parse", "--short=12", "origin/main").stdout.strip(), self.record(later)["baseCommit"])
+        self.assertIn("def parse", (self.tmp / "worktrees/worker-2-b/src/capture/header.py").read_text())
 
     def test_merge_adopts_a_rebase_onto_main_but_refuses_worker_commits(self):
         self.add_task()

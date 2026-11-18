@@ -15,7 +15,7 @@ Decisions behind the package layout, for contributors. User documentation starts
 
 ## Task lifecycle
 
-- `pending -> in_progress -> verification -> merged -> completed`. `merged` satisfies dependencies, so code-only rounds do not stall the queue, but only `completed` tasks are archived, so merged work stays visible until verified.
+- `pending -> in_progress -> verification -> merged -> completed`. `merged` satisfies dependencies once the merge commit is in the assignment base (`[git] base`, so a dependent's worktree never starts without it), so code-only rounds do not stall the queue, but only `completed` tasks are archived, so merged work stays visible until verified.
 - `evidence.observed` and `evidence.userTested` are recorded separately from status, because a merge, a runtime observation and a user test are different claims.
 - `currentMilestone` gates `ready` and `assign`; the rule tests (`theseus check`) reject in-progress work outside it.
 
