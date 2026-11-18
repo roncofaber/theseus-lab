@@ -12,14 +12,20 @@ class GitError(Exception):
 LOCK_RETRIES = (0.5, 1.0, 2.0, 4.0)
 
 
-def git(root, *args, check=True, env=None, input=None):
-    result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, env=env, input=input)
+def git(root, *args, check=True, env=None, input=None, timeout=None):
+    def run():
+        try:
+            return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, env=env, input=input,
+                                  timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise GitError(f"git {' '.join(args)}: no answer within {timeout:g}s") from None
+    result = run()
     # Another theseus process (a merge, a queue tick) may hold the index for a moment.
     for delay in LOCK_RETRIES:
         if result.returncode == 0 or "index.lock" not in (result.stderr or ""):
             break
         time.sleep(delay)
-        result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, env=env, input=input)
+        result = run()
     if check and result.returncode != 0:
         raise GitError(f"git {' '.join(args)}: {(result.stderr or result.stdout).strip()}")
     return result

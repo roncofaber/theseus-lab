@@ -311,6 +311,17 @@ class TaskFlowTests(Sandbox):
         self.assertNotIn("docs/project/tasks-archive.jsonl", self.git("show", "--name-only", "--format=", "HEAD~1").stdout)
         self.assertEqual(["docs/project/tasks-archive.jsonl"], staged())
 
+    def test_a_delivered_file_whose_name_git_quotes_is_merged(self):
+        self.add_task(owned=("src/capture/", f"docs/investigations/{TASK}.md"))
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        worktree = self.tmp / "worktrees/worker-1-a"
+        self.deliver(worktree)
+        self.write("src/capture/caf\u00e9 notes b/x.txt", "notes\n", root=worktree)
+        self.theseus("merge", TASK)
+        files = self.git("-c", "core.quotepath=false", "show", "--name-only", "--format=", "HEAD~1").stdout.splitlines()
+        self.assertIn("src/capture/caf\u00e9 notes b/x.txt", files)
+        self.assertEqual("", self.git("status", "--porcelain").stdout)
+
     def test_unmerge_reverts_the_merge_and_a_redelivery_merges_again(self):
         self.add_task()
         self.theseus("instance", "assign", TASK, "worker-1", "a")

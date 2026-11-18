@@ -1,6 +1,7 @@
 """theseus command line. Every subcommand prints its usage with --help; `theseus` alone on a terminal opens the control
 console (`theseus console`, also `theseus top`)."""
 import argparse
+import contextlib
 import json
 import os
 import subprocess
@@ -202,10 +203,24 @@ def cmd_check(args):
 
 # tasks
 
+TASK_READS = ("list", "ready", "show", "prompt", "check-delivery", "consumers", "stats")
+
+
+def queue_locked(conf):
+    from . import workqueue
+    return workqueue.locked(conf, announce=True)
+
+
 def cmd_tasks(args):
     from . import tasks as t
     conf = load()
-    queue = t.Queue(conf)
+    reads = args.task_action in TASK_READS or (args.task_action == "milestone" and args.value is None)
+    with contextlib.nullcontext() if reads else queue_locked(conf):
+        tasks_action(conf, t.Queue(conf), args)
+
+
+def tasks_action(conf, queue, args):
+    from . import tasks as t
     action = args.task_action
     if action == "add":
         emit(t.add(queue, args.id, args.role, args.owned, args.objective, args.contract, args.accept, args.depends, args.milestone,
@@ -294,13 +309,14 @@ def cmd_instance(args):
         from . import profiles
         provider = args.provider or profiles.default_name(conf)
         name = f"{args.instance}-{args.suffix}"
-        if args.in_place:
-            worktree, base, message = integrate.assign_in_place(conf, args.task, name, provider, "persistent-instance",
-                                                                owner=f"{provider}:{args.instance}:{name}", instance=args.instance)
-        else:
-            worktree, base, message = integrate.assign(conf, args.task, name, provider, "persistent-instance",
-                                                       owner=f"{provider}:{args.instance}:{name}", commit=not args.no_commit,
-                                                       instance=args.instance)
+        owner = f"{provider}:{args.instance}:{name}"
+        with queue_locked(conf):
+            if args.in_place:
+                worktree, base, message = integrate.assign_in_place(conf, args.task, name, provider, "persistent-instance",
+                                                                    owner=owner, instance=args.instance)
+            else:
+                worktree, base, message = integrate.assign(conf, args.task, name, provider, "persistent-instance",
+                                                           owner=owner, commit=not args.no_commit, instance=args.instance)
         print(message)
         print(f"worktree {worktree} base {base[:12]}")
         return
@@ -392,15 +408,19 @@ def instance_send(conf, args):
 def cmd_dispatch(args):
     from . import dispatch
     conf = load()
-    emit(dispatch.dispatch(conf, args.task, name=args.name, provider=args.provider, model=args.model,
-                           dry_run=args.dry_run, resume_paused=args.resume_paused, commit=not args.no_commit))
+    with contextlib.nullcontext() if args.dry_run else queue_locked(conf):
+        lines = dispatch.dispatch(conf, args.task, name=args.name, provider=args.provider, model=args.model,
+                                  dry_run=args.dry_run, resume_paused=args.resume_paused, commit=not args.no_commit)
+    emit(lines)
 
 
 def cmd_merge(args):
     from . import integrate
     conf = load()
-    sha, report = integrate.merge(conf, args.task, subject=args.subject, accept=args.accept or [],
-                                  skip_patches=args.skip_patch or [], commit=not args.no_commit, regenerate=not args.no_index)
+    with queue_locked(conf):
+        _, report = integrate.merge(conf, args.task, subject=args.subject, accept=args.accept or [],
+                                    skip_patches=args.skip_patch or [], commit=not args.no_commit,
+                                    regenerate=not args.no_index)
     emit(report)
 
 

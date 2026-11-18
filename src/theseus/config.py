@@ -27,6 +27,14 @@ FOLDED = "docs/project/archive/investigations"
 CITATION_INDEX = "docs/re/citation-index.md"
 
 
+def write_atomic(path, text):
+    """Replace a file whole, so a reader in another process (a queue tick, the console) never sees it half-written."""
+    path = Path(path)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(text)
+    os.replace(temporary, path)
+
+
 def citation_index(conf):
     """The generated citation index path, [re] citation_index (default docs/re/citation-index.md)."""
     return str(conf.section("re").get("citation_index") or CITATION_INDEX)

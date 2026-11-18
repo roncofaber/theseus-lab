@@ -66,7 +66,7 @@ def runtime(conf):
 
 
 def save_runtime(conf, data):
-    (queue_dir(conf) / "agents-state.json").write_text(json.dumps(data, indent=2) + "\n")
+    cfg.write_atomic(queue_dir(conf) / "agents-state.json", json.dumps(data, indent=2) + "\n")
 
 
 def assign_failures(conf, now=None):
@@ -83,7 +83,7 @@ def back_off(conf, task_id, now=None):
     now = time.time() if now is None else now
     failures = assign_failures(conf, now)
     failures[task_id] = now + float(conf.section("queue").get("assign_backoff_seconds", 300))
-    (queue_dir(conf) / "assign-failures.json").write_text(json.dumps(failures, indent=2) + "\n")
+    cfg.write_atomic(queue_dir(conf) / "assign-failures.json", json.dumps(failures, indent=2) + "\n")
 
 
 def paused(conf):
@@ -117,9 +117,16 @@ def events(conf, limit=None, since=None, after_id=None, kinds=None, task=None):
 
 
 @contextmanager
-def locked(conf):
+def locked(conf, announce=False):
+    """Hold the project's queue lock, which serializes queue ticks with the commands that change tasks.json, the
+    agents or the main checkout. announce says on stderr when the lock is busy before waiting for it."""
     with open(queue_dir(conf) / "lock", "w") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if announce:
+                print("theseus: waiting for the queue lock (a queue tick or another command holds it)", file=sys.stderr)
+            fcntl.flock(handle, fcntl.LOCK_EX)
         yield
 
 
@@ -241,15 +248,18 @@ def assign_and_send(conf, agent, task):
     worktree, base, _ = integrate.assign(conf, task["id"], name, provider, "persistent-instance",
                                          owner=f"{provider}:{agent['name']}:{name}", instance=agent["name"],
                                          owner_id=agent.get("id"))
-    record = (f"Owned paths: {', '.join(task['ownedPaths'])}. Objective: {task['objective']} "
-              f"Contract: {task.get('generalContract') or 'not recorded'} Acceptance: {' | '.join(task['acceptance'])}.")
-    record += f" Log directory (handoff.md, changed.sha256): {worktree}/{cfg.WORKER_LOG}."
-    if task.get("assignmentNote"):
-        record += f" Coordinator notes: {task['assignmentNote']}"
-    record += rooms.message(conf, task)
-    deadline = conf.section("queue").get("deadline") or ""
-    text = task_message(conf, task["id"], worktree, record, deadline, launched(conf, agent))
-    ok, detail = ag.send_verified(conf, agent, text, task["id"], kind="task")
+    try:
+        record = (f"Owned paths: {', '.join(task['ownedPaths'])}. Objective: {task['objective']} "
+                  f"Contract: {task.get('generalContract') or 'not recorded'} Acceptance: {' | '.join(task['acceptance'])}.")
+        record += f" Log directory (handoff.md, changed.sha256): {worktree}/{cfg.WORKER_LOG}."
+        if task.get("assignmentNote"):
+            record += f" Coordinator notes: {task['assignmentNote']}"
+        record += rooms.message(conf, task)
+        deadline = conf.section("queue").get("deadline") or ""
+        text = task_message(conf, task["id"], worktree, record, deadline, launched(conf, agent))
+        ok, detail = ag.send_verified(conf, agent, text, task["id"], kind="task")
+    except Exception as error:
+        ok, detail = False, str(error)
     if not ok:
         return False, roll_back(conf, task["id"], name, worktree, base, f"task message not submitted: {detail}")
     state = runtime(conf)
@@ -271,8 +281,7 @@ def roll_back(conf, task_id, name, worktree, base, reason):
                if line[3:].rstrip("/") not in (cfg.WORKER_LOG, cfg.LOCAL_NAME)]
     head = g.out(worktree, "rev-parse", "HEAD", check=False)
     if status.returncode == 0 and not changed and head.startswith(base[:12]):
-        g.git(conf.root, "worktree", "remove", "--force", str(worktree), check=False)
-        g.git(conf.root, "branch", "-D", f"work/{name}", check=False)
+        integrate.remove_worktree(conf, worktree, name)
         what = "its worktree removed"
     else:
         what = f"its worktree kept at {worktree} (it holds changes)"
@@ -799,7 +808,7 @@ def heartbeat(conf, command, started, sleep_seconds, now=None):
     now = time.time() if now is None else now
     beat = {"pid": os.getpid(), "command": command, "started": started, "tick": now, "next": now + sleep_seconds}
     try:
-        (queue_dir(conf) / "watcher.json").write_text(json.dumps(beat) + "\n")
+        cfg.write_atomic(queue_dir(conf) / "watcher.json", json.dumps(beat) + "\n")
     except OSError:
         pass
 

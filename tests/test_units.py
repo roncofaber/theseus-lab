@@ -334,6 +334,22 @@ class LongRunningQueueTests(Sandbox):
             self.assertEqual([("a1", "stopped", "killed")], supervisor.down(cfg.load(root=self.project), ["a1"], force=True))
         stop.assert_called_once_with(mock.ANY, rec, graceful=False, reason="down", grace=5)
 
+    def test_a_stop_refused_as_busy_leaves_the_run_to_end_as_a_crash(self):
+        from unittest import mock
+        from theseus import store, supervisor
+        conf = cfg.load(root=self.project)
+        with store.for_project(conf) as conn:
+            store.upsert_agent(conn, conf.name, "a1", pane="=demo-port--a1:", profile="claude-code", source="supervisor")
+            run = store.add_run(conn, conf.name, "a1", "start", profile="claude-code")
+        rec = {"name": "a1", "managed": True, "target": "=demo-port--a1:", "pane": "=demo-port--a1:"}
+        with mock.patch.object(supervisor, "server_of"), \
+                mock.patch.object(supervisor, "pane_info", return_value={"pane_dead": "0", "pane_pid": "1"}), \
+                mock.patch.object(supervisor, "at_prompt", return_value=True), \
+                mock.patch.object(supervisor, "wait_idle", return_value=False):
+            self.assertEqual((False, "still busy after 180s"), supervisor.stop(conf, rec, reason="down"))
+        with store.for_project(conf) as conn:
+            self.assertIsNone(store.run_of(conn, conf.name, "a1", run["gen"])["stop_reason"])
+
     def test_reconcile_after_down_and_scale_keeps_live_agents_and_stops_the_newest(self):
         from unittest import mock
         from theseus import supervisor

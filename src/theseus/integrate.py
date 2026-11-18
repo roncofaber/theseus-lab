@@ -19,6 +19,7 @@ from . import gitutil as g
 from . import tasks as t
 
 EXIT_CONFLICT = 3
+FETCH_SECONDS = 120
 
 
 class IntegrationError(Exception):
@@ -32,7 +33,8 @@ def base_commit(conf):
     ref = git.get("base") or "HEAD"
     remote = git.get("remote") or "origin"
     if ref.startswith(remote + "/") and g.has_remote(conf.root, remote):
-        g.git(conf.root, "fetch", "-q", remote)
+        # A queue tick runs this unattended: a credential prompt must fail, not hang the tick under the queue lock.
+        g.git(conf.root, "fetch", "-q", remote, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}, timeout=FETCH_SECONDS)
     return g.out(conf.root, "rev-parse", ref)
 
 
@@ -385,6 +387,12 @@ def create_worktree(conf, name, base):
     return worktree
 
 
+def remove_worktree(conf, worktree, name):
+    """Drop a worktree and its work/<name> branch, as far as they exist."""
+    g.git(conf.root, "worktree", "remove", "--force", str(worktree), check=False)
+    g.git(conf.root, "branch", "-D", f"work/{name}", check=False)
+
+
 def copy_local_overlay(conf, tree):
     """Give a worktree the machine-specific theseus.local.toml so `theseus` run inside it resolves the same paths."""
     local = conf.root / cfg.LOCAL_NAME
@@ -414,16 +422,15 @@ def assign(conf, task_id, name, provider, model, owner=None, commit=True, instan
         raise IntegrationError(base_mismatch(conf, task_id, base))
     aside = move_previous_attempt(conf, queue, task_id, conf.worktrees / name)
     worktree = create_worktree(conf, name, base)
-    rooms.exclude_dirty(conf, task, worktree)
     try:
+        rooms.exclude_dirty(conf, task, worktree)
         message = t.assign(queue, task_id, owner or f"{provider}:{model}:{name}", provider, model, worktree, base[:12],
                            worktree / cfg.WORKER_LOG, owner_id=owner_id)
-        if aside:
-            message += f"; the previous attempt's worktree moved to {aside}"
-    except t.TaskError:
-        g.git(conf.root, "worktree", "remove", "--force", str(worktree), check=False)
-        g.git(conf.root, "branch", "-D", f"work/{name}", check=False)
+    except Exception:
+        remove_worktree(conf, worktree, name)
         raise
+    if aside:
+        message += f"; the previous attempt's worktree moved to {aside}"
     if instance:
         rooms.record_assignment(conf, task, instance)
     if commit:
@@ -459,18 +466,39 @@ def assign_in_place(conf, task_id, name, provider, model, owner=None, instance=N
 
 
 def patch_paths(text):
-    paths = []
-    for line in text.splitlines():
-        if line.startswith("diff --git a/") and " b/" in line:
-            left, right = line[len("diff --git a/"):].split(" b/", 1)
-            paths += [left.strip(), right.strip()]
-        elif line.startswith("+++ b/"):
-            paths.append(line[6:].strip())
-        elif line.startswith("--- a/"):
-            paths.append(line[6:].strip())
-        elif line.startswith("rename to ") or line.startswith("rename from "):
-            paths.append(line.split(" ", 2)[2].strip())
-    return [p for p in paths if p and p != "/dev/null"]
+    """The paths a diff or patch touches, both sides of a rename included. git apply --numstat -z reads them, so names
+    git quotes (non-ASCII, special characters) and names with spaces come out right; it lists only a rename's new
+    name, so the old one comes from its `rename from` line."""
+    if not text.strip():
+        return []
+    listed = subprocess.run(["git", "apply", "--numstat", "-z", "-"], input=text.encode("utf-8", "surrogateescape"),
+                            capture_output=True, cwd=tempfile.gettempdir())
+    paths = [entry.split(b"\t", 2)[2].decode("utf-8", "surrogateescape")
+             for entry in listed.stdout.split(b"\0") if entry.count(b"\t") >= 2]
+    paths += [unquote(line.split(" ", 2)[2]) for line in text.splitlines() if line.startswith(("rename from ", "copy from "))]
+    return [p for p in paths if p]
+
+
+C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13}
+
+
+def unquote(name):
+    """A path as git prints it in a diff header: in double quotes with C escapes when it holds unusual bytes."""
+    if len(name) < 2 or name[0] != '"' or name[-1] != '"':
+        return name
+    body, raw, i = name[1:-1], bytearray(), 0
+    while i < len(body):
+        if body[i] == "\\" and i + 1 < len(body):
+            if body[i + 1] in "01234567":
+                raw.append(int(body[i + 1:i + 4], 8))
+                i += 4
+                continue
+            raw.append(C_ESCAPES.get(body[i + 1], ord(body[i + 1])))
+            i += 2
+            continue
+        raw += body[i].encode()
+        i += 1
+    return raw.decode("utf-8", "surrogateescape")
 
 
 def worktree_diff(worktree, exclude=()):

@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from . import config as cfg
+from . import gitutil as g
 
 OPEN = ("pending", "in_progress", "verification", "merged")
 STATUSES = OPEN + ("completed",)
@@ -88,7 +89,7 @@ class Queue:
         return json.loads(self.path.read_text())
 
     def save(self, document):
-        self.path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n")
+        cfg.write_atomic(self.path, json.dumps(document, indent=2, ensure_ascii=False) + "\n")
 
     def archived(self):
         if not self.archive_path.exists():
@@ -598,14 +599,14 @@ def is_owned(path, patterns):
 
 
 def worktree_changes(worktree):
-    status = subprocess.run(["git", "-C", str(worktree), "status", "--porcelain", "--untracked-files=all"],
-                            capture_output=True, text=True, check=True).stdout
+    entries = iter(g.git(worktree, "status", "--porcelain", "-z", "--untracked-files=all").stdout.split("\0"))
     changes = []
-    for line in status.splitlines():
-        code, path = line[:2], line[3:]
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1]
-        path = path.strip('"')
+    for entry in entries:
+        if not entry:
+            continue
+        code, path = entry[:2], entry[3:]
+        if "R" in code or "C" in code:
+            next(entries, None)
         if path in (cfg.WORKER_LOG, cfg.LOCAL_NAME) or path.startswith(cfg.WORKER_LOG + "/"):
             continue
         changes.append((code, path))
@@ -694,12 +695,11 @@ def retire(queue, task_id, force=False):
     target.mkdir(parents=True, exist_ok=True)
     if (Path(worktree) / cfg.WORKER_LOG).is_dir():
         shutil.copytree(Path(worktree) / cfg.WORKER_LOG, target / cfg.WORKER_LOG, dirs_exist_ok=True)
-    branch = subprocess.run(["git", "-C", str(worktree), "symbolic-ref", "--quiet", "--short", "HEAD"],
-                            capture_output=True, text=True).stdout.strip()
-    subprocess.run(["git", "-C", str(queue.root), "worktree", "remove", "--force", str(worktree)], check=True)
+    branch = g.out(worktree, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    g.git(queue.root, "worktree", "remove", "--force", str(worktree))
     note = ""
     if branch.startswith("work/") and (task["status"] in SATISFIES_DEPENDENCY or released):
-        subprocess.run(["git", "-C", str(queue.root), "branch", "-D", branch], capture_output=True)
+        g.git(queue.root, "branch", "-D", branch, check=False)
         note = f", deleted branch {branch}"
     return f"archived {worktree}/{cfg.WORKER_LOG} to {target} and removed the worktree{note}"
 

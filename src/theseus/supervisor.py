@@ -451,10 +451,7 @@ def spec_path(conf, name):
 
 
 def save_spec(conf, name, gen, spec):
-    path = spec_path(conf, name)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"gen": gen, "spec": spec}, indent=2) + "\n")
-    os.replace(temporary, path)
+    cfg.write_atomic(spec_path(conf, name), json.dumps({"gen": gen, "spec": spec}, indent=2) + "\n")
 
 
 def saved_spec(conf, name, gen):
@@ -819,10 +816,7 @@ def died(socket, session, pid, status=None, signal=None):
     if reason not in ("crash", "exit"):
         return 0
     due, give_up = next_start(conf, name)
-    if give_up:
-        reconcile(conf, [name])
-        return 0
-    delay = due - time.time()
+    delay = 0 if give_up else due - time.time()
     if delay > 15:
         return 0
     if delay > 0:
@@ -1145,12 +1139,15 @@ def stop(conf, rec, graceful=True, wait=True, reason="down", idle_timeout=180, g
     info = pane_info(srv, rec["target"])
     if info is None:
         return True, "not running"
-    plan_stop(conf, name, reason)
     if graceful and not at_prompt(conf, rec, info):
         graceful = False
-    if info.get("pane_dead") != "1" and graceful:
-        if wait and not wait_idle(conf, rec, idle_timeout, poll=float(os.environ.get("THESEUS_STOP_POLL") or 5)):
-            return False, f"still busy after {idle_timeout}s"
+    alive = info.get("pane_dead") != "1"
+    if alive and graceful and wait and not wait_idle(conf, rec, idle_timeout,
+                                                     poll=float(os.environ.get("THESEUS_STOP_POLL") or 5)):
+        return False, f"still busy after {idle_timeout}s"
+    # Planned only once the stop goes ahead: the pane-died hook classifies the run's end by it.
+    plan_stop(conf, name, reason)
+    if alive and graceful:
         exit_text = profiles.interactive(conf, workqueue.launched(conf, rec))["exit"]
         srv.send_literal(rec["pane"], exit_text)
         time.sleep(0.3)
@@ -1159,7 +1156,7 @@ def stop(conf, rec, graceful=True, wait=True, reason="down", idle_timeout=180, g
             return True, "exit command sent"
         if not wait_dead(srv, rec, timeout=float(os.environ.get("THESEUS_STOP_SECONDS") or 30)):
             kill_pane(srv, rec, grace)
-    elif info.get("pane_dead") != "1":
+    elif alive:
         kill_pane(srv, rec, grace)
     info = pane_info(srv, rec["target"]) or {}
     record_exit(conf, name, info.get("@theseus_gen"), info.get("pane_dead_status"), info.get("pane_dead_signal"), srv)

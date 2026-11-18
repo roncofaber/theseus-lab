@@ -96,12 +96,11 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
     if aside:
         lines.append(f"the previous attempt's worktree moved to {aside}")
     integrate.create_worktree(conf, name, base)
-    rooms.exclude_dirty(conf, task, worktree)
     try:
+        rooms.exclude_dirty(conf, task, worktree)
         t.assign(queue, task_id, f"{provider}:{model}:{name}", provider, model, worktree, base[:12], log_dir, force=resume_paused)
     except Exception:
-        subprocess.run(["git", "-C", str(conf.root), "worktree", "remove", "--force", str(worktree)], capture_output=True)
-        subprocess.run(["git", "-C", str(conf.root), "branch", "-D", f"work/{name}"], capture_output=True)
+        integrate.remove_worktree(conf, worktree, name)
         raise
     record = {"task": task_id, "name": name, "provider": provider, "profile": profile["preset"], "model": model, "base": base,
               "worktree": str(worktree), "session": session, "resume": resume, "env": extra_env,

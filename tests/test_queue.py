@@ -181,6 +181,33 @@ class QueueTests(Sandbox):
         self.assertNotIn("work/worker-a-lost-task", self.git("branch").stdout)
         self.assertEqual("", self.git("status", "--porcelain", "--untracked-files=no").stdout)
 
+    def test_a_task_message_that_raises_rolls_the_assignment_back(self):
+        from unittest import mock
+        from theseus import agents, config as cfg, tasks as t, workqueue
+        self.add("raising-task")
+        conf = cfg.load(root=self.project)
+        with mock.patch.object(agents, "send_verified", side_effect=RuntimeError("pane vanished")):
+            ok, detail = workqueue.assign_and_send(conf, agents.agents(conf)[0], t.Queue(conf).get("raising-task"))
+        self.assertFalse(ok)
+        self.assertIn("pane vanished; raising-task released", detail)
+        self.assertEqual("pending", t.Queue(conf).get("raising-task")["status"])
+        self.assertFalse((self.tmp / "worktrees/worker-a-raising-task").exists())
+
+    def test_a_task_command_waits_for_a_running_tick_instead_of_racing_it(self):
+        import subprocess
+        import sys
+        from theseus import config as cfg, workqueue
+        self.add("locked-task")
+        with workqueue.locked(cfg.load(root=self.project)):
+            process = subprocess.Popen([sys.executable, "-m", "theseus", "tasks", "priority", "locked-task", "3"],
+                                       cwd=self.project, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       text=True)
+            self.assertIn("waiting for the queue lock", process.stderr.readline())
+            self.assertNotEqual(3, json.loads(self.theseus("tasks", "show", "locked-task").stdout).get("priority"))
+        process.communicate(timeout=60)
+        self.assertEqual(0, process.returncode)
+        self.assertEqual(3, json.loads(self.theseus("tasks", "show", "locked-task").stdout)["priority"])
+
 
 class WakeTests(Sandbox):
     """`theseus queue wait` sleeps until the earlier of its interval and the next pending wake time, so a gateway resend
