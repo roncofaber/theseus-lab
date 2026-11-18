@@ -901,6 +901,16 @@ class TopApp(App):
             current_task = (snapshot.get("tasks") or {}).get(current.get("task"))
             return R.agent_text(current, current_task, (snapshot.get("host") or {}).get("memTotal") or 0)
         actions.body = live_body
+
+        def neighbor(step):
+            names = [a.get("name") for a in view.panes.values()]
+            if name not in names or len(names) < 2:
+                return
+            target = names[(names.index(name) + step) % len(names)]
+            target_key = next(k for k, a in view.panes.items() if a.get("name") == target)
+            self.pop_screen()
+            self.open_agent(view, target_key)
+        actions.neighbor = neighbor
         actions.events = lambda: R.agent_events(view.item["snapshot"]["events"], name)
         self.push_screen(popups.AgentScreen(f"agent {agent.get('display') or name}", body, pane, actions,
                                             poll=self.mirror_seconds))

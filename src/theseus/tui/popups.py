@@ -252,7 +252,8 @@ class AgentScreen(Dialog):
                 Binding("U", "lifecycle('start')", "Start the agent (asks first)"),
                 Binding("l", "show_tab('live')", "Live tab"),
                 Binding("c", "show_tab('conversation')", "Conversation tab"), Binding("d", "show_tab('diff')", "Diff tab"),
-                Binding("t", "show_tab('task')", "Task tab"), Binding("v", "show_tab('events')", "Events tab")]
+                Binding("t", "show_tab('task')", "Task tab"), Binding("v", "show_tab('events')", "Events tab"),
+                Binding("]", "neighbor(1)", "Next agent"), Binding("[", "neighbor(-1)", "Previous agent")]
     DEFAULT_CSS = """
     AgentScreen > #dialog { height: 90%; }
     AgentScreen #body { height: auto; max-height: 30%; }
@@ -486,9 +487,15 @@ class AgentScreen(Dialog):
             return False
         if action == "compact" and self.action_of("compact") is None:
             return False
-        if self.typing and action in ("attach", "lifecycle", "show_tab", "focus_send", "open_pane", "send_key", "compact"):
+        if action == "neighbor" and getattr(self.actions, "neighbor", None) is None:
+            return False
+        if self.typing and action in ("attach", "lifecycle", "show_tab", "focus_send", "open_pane", "send_key", "compact",
+                                      "neighbor"):
             return False
         return True
+
+    def action_neighbor(self, step):
+        self.actions.neighbor(step)
 
     def poll(self):
         if self.busy:
