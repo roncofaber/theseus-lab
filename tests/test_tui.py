@@ -469,6 +469,7 @@ class TranscriptTests(Sandbox):
 
     def test_the_conversation_keeps_text_and_tool_calls_and_drops_thinking_sidechains_and_meta(self):
         from theseus.adapters import claude_code as transcripts
+        from theseus.tui.popups import conversation_widget, plain
         path = self.tmp / "c.jsonl"
         path.write_text(
             self.entry(type="user", message={"content": "decode the frame<system-reminder>hint</system-reminder>"},
@@ -482,7 +483,8 @@ class TranscriptTests(Sandbox):
                 {"type": "thinking", "thinking": "private reasoning"},
                 {"type": "text", "text": "Reading the decoder."},
                 {"type": "tool_use", "id": "u1", "name": "Read", "input": {"file_path": "/work/src/status.py",
-                                                                           "limit": 20}}]})
+                                                                           "limit": 20}},
+                {"type": "tool_use", "id": "u3", "name": "TodoWrite", "input": {"todos": [{"content": "x"}]}}]})
             + self.entry(type="user", message={"content": [
                 {"type": "tool_result", "tool_use_id": "u1", "content": [{"type": "text", "text": "line 1\nline 2"}]}]})
             + self.entry(type="assistant", isSidechain=True, message={"content": [{"type": "text", "text": "subagent"}]})
@@ -491,7 +493,9 @@ class TranscriptTests(Sandbox):
             + self.entry(type="user", message={"content": "<command-name>/compact</command-name>\n<command-message>compact"
                                                           "</command-message>\n<command-args>keep notes</command-args>"}))
         state = transcripts.read(path)
-        self.assertEqual(6, state["total"])
+        todo = state["entries"].pop(3)
+        self.assertEqual("▸ TodoWrite", plain(conversation_widget(todo).content).strip(), "no JSON on a folded line")
+        self.assertEqual(6, state["total"] - 1)
         self.assertEqual([("user", "decode the frame"), ("assistant", "Reading the decoder."), ("tool", None),
                           ("result", "line 1\nline 2"), ("result", "no such file"), ("user", "/compact keep notes")],
                          [(e["kind"], None if e["kind"] == "tool" else e["text"]) for e in state["entries"]])
@@ -504,7 +508,7 @@ class TranscriptTests(Sandbox):
         with open(path, "a") as handle:
             handle.write(self.entry(type="assistant", message={"content": [{"type": "text", "text": "x" * 9000}]}))
         state = transcripts.read(path)
-        self.assertEqual(7, state["total"])
+        self.assertEqual(8, state["total"])
         self.assertIn("1000 more characters", state["entries"][-1]["text"])
 
     def test_the_console_conversation_is_redacted_and_read_from_where_it_left_off(self):

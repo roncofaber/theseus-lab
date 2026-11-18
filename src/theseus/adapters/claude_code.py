@@ -111,7 +111,7 @@ def user_text(text):
     """What the user typed: slash commands and shell escapes as typed, system reminders dropped, and "" for messages
     the CLI writes on the user's behalf (command output, background task notices)."""
     text = re.sub(r"<system-reminder>.*?</system-reminder>", "", text, flags=re.S).strip()
-    command = re.search(r"<command-name>(.*?)</command-name>", text, re.S)
+    command = re.search(r"<command-name>(.*?)</command-name>", text, re.S) if text.startswith("<command-") else None
     if command:
         args = re.search(r"<command-args>(.*?)</command-args>", text, re.S)
         return f"{command.group(1).strip()} {args.group(1).strip() if args else ''}".strip()

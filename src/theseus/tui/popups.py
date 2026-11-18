@@ -183,9 +183,10 @@ def conversation_widget(entry):
         body = Markdown(text) if entry.get("format") == "markdown" else Text(text)
         return Static(body, classes=f"turn {entry['kind']}")
     lines = text.splitlines() or [""]
-    summary = " ".join(str(entry.get("summary") or "").split())
+    summary = " ".join(str(entry["summary"]).split()) if "summary" in entry else None
     if entry["kind"] == "tool":
-        head = f"▸ {entry.get('name') or 'tool'}: {summary or ' '.join(text.split())}"
+        argument = " ".join(text.split()) if summary is None else summary
+        head = f"▸ {entry.get('name') or 'tool'}" + (f": {argument}" if argument else "")
         style = "dim"
     else:
         head = (f"  ↳ {'error: ' if entry.get('error') else ''}{summary or lines[0].strip()}"
