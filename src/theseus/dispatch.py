@@ -9,7 +9,6 @@ logs and handoff to <worktree>/.theseus/.
 """
 import datetime
 import json
-import os
 import shlex
 import subprocess
 import uuid

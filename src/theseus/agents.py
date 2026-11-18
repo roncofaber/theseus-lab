@@ -21,11 +21,6 @@ class AgentError(Exception):
     pass
 
 
-def registry_path(conf):
-    """The pre-store agents.json, read once by the store migration."""
-    return conf.data / "agents.json"
-
-
 def now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -644,8 +639,3 @@ def shorten(infos):
 def instance_entries(conf):
     """Name and pane of every registered agent, for the instance scripts."""
     return [{"name": a["name"], "pane": a["pane"]} for a in agents(conf)]
-
-
-def ensure_known(conf, name):
-    if not any(a["name"] == name for a in agents(conf)):
-        raise cfg.ConfigError(f"{name} is not a registered agent")

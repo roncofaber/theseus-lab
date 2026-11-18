@@ -1037,37 +1037,6 @@ def samples(conn, project=None, agent=None, since=None, until=None):
     return [dict(row) for row in conn.execute(sql, args)]
 
 
-def task_updated(task):
-    execution = task.get("execution") or {}
-    stamps = [task.get("createdAt"), execution.get("assignedAt"), execution.get("deliveredAt"),
-              (task.get("merge") or {}).get("mergedAt"), (task.get("result") or {}).get("completedAt")]
-    stamps = [s for s in stamps if s]
-    return max(stamps) if stamps else None
-
-
-def index_tasks(conn, project, tasks):
-    """Replace this project's rows in the task index with the given task records."""
-    indexed = iso()
-    with transaction(conn):
-        touch_project(conn, project)
-        conn.execute("DELETE FROM task_index WHERE project = ?", (project,))
-        conn.executemany("""INSERT OR REPLACE INTO task_index (project, id, status, priority, room, milestone, updated, indexed)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                         [(project, task["id"], task.get("status"), task.get("priority"), task.get("room"),
-                           task.get("milestone"), task_updated(task), indexed) for task in tasks])
-
-
-def task_index(conn, project=None, status=None):
-    sql, args = "SELECT * FROM task_index WHERE 1", []
-    if project is not None:
-        sql += " AND project = ?"
-        args.append(project)
-    if status is not None:
-        sql += " AND status = ?"
-        args.append(status)
-    return [dict(row) for row in conn.execute(sql + " ORDER BY project, id", args)]
-
-
 DELIVERY_KINDS = ("delivered", "partial", "blocked")
 
 

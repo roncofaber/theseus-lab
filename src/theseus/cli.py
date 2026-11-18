@@ -1351,7 +1351,6 @@ def main(argv=None):
         except store.SchemaTooNew as error:
             if not (args.command == "queue" and args.action in ("run", "wait")):
                 sys.exit(f"theseus: {error}")
-            from . import upgrade
             upgrade.newer_store(error, argv, interval=args.interval or 30)
         except upgrade.CodeChanged:
             upgrade.restart(argv)

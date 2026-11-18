@@ -2,7 +2,6 @@
 folded reports, so agents scan an index instead of opening reports."""
 import json
 import re
-from pathlib import Path
 
 from .. import config as cfg
 

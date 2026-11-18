@@ -1275,7 +1275,6 @@ def relaunch(conf, agent, profile):
 
 def thrashing_restart(conf, agent, task_id):
     """A thrashing agent restarts on a fresh session; the queue sends its task's restart prompt once it is ready."""
-    rec = record(conf, agent["name"])
     ok, detail = restart(conf, agent["name"], fresh=True, intent="fresh", wait=False, graceful=False)
     want_prompt(conf, agent["name"], task_id)
     return ok, f"thrashing: restarted on a fresh session ({detail}); the task stays assigned"

@@ -714,10 +714,7 @@ def merge(conf, task_id, subject=None, accept=(), skip_patches=(), commit=True, 
     if not task.get("worktree") or not worktree.is_dir():
         raise IntegrationError(f"{task_id} has no live worktree")
     root = conf.root
-    dirty = [line[3:] for line in g.dirty_tracked(root).splitlines() if line[3:] not in (cfg.TASKS, cfg.ARCHIVE)]
-    if dirty:
-        raise IntegrationError("the main checkout has uncommitted changes to tracked files (" + ", ".join(dirty)
-                               + "); commit or set them aside first", 2)
+    refuse_dirty(root)
     base = g.out(root, "rev-parse", task["baseCommit"])
     rebased, stale = adopt_rebase(conf, queue, task)
     lines, outside = t.check_delivery(queue, task_id, accept)
@@ -795,6 +792,14 @@ def merge(conf, task_id, subject=None, accept=(), skip_patches=(), commit=True, 
     return sha, report
 
 
+def refuse_dirty(root):
+    """Refuse to touch a main checkout whose tracked files (the task records aside) have uncommitted changes."""
+    dirty = [line[3:] for line in g.dirty_tracked(root).splitlines() if line[3:] not in (cfg.TASKS, cfg.ARCHIVE)]
+    if dirty:
+        raise IntegrationError("the main checkout has uncommitted changes to tracked files (" + ", ".join(dirty)
+                               + "); commit or set them aside first", 2)
+
+
 def still_present(conf, commit):
     """Paths whose change in commit (generated indexes aside) still reverse-applies on HEAD. Checked per file, since a
     whole-patch check fails as soon as any one file is reverted."""
@@ -836,10 +841,7 @@ def unmerge(conf, task_id, reason, revert=True):
         message = t.unmerge(queue, task_id, reason)
         commit_record(conf, f"chore: {task_id} unmerged")
         return [message]
-    dirty = [line[3:] for line in g.dirty_tracked(root).splitlines() if line[3:] not in (cfg.TASKS, cfg.ARCHIVE)]
-    if dirty:
-        raise IntegrationError("the main checkout has uncommitted changes to tracked files (" + ", ".join(dirty)
-                               + "); commit or set them aside first", 2)
+    refuse_dirty(root)
     generated = docs.generated_paths(conf)
     names = g.out(root, "diff-tree", "--root", "--no-commit-id", "-r", "--name-only", "--no-renames", commit).splitlines()
     touched = sorted(set(names) | set(generated))

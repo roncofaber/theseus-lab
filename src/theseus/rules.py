@@ -1,6 +1,5 @@
 """Workflow rules the scaffolded Supervisor tests enforce. Each function returns problems (empty when the rule holds);
 the project's tests in tools/Supervisor choose the budgets, allowlists and scanned directories."""
-import json
 import os
 import re
 import shutil
@@ -287,7 +286,3 @@ def scenario_named(root, words, production=("src",), test_markers=("/tests/", "/
             if pattern.search(path.name):
                 found.add(relative)
     return found
-
-
-def load_json(path):
-    return json.loads(Path(path).read_text())

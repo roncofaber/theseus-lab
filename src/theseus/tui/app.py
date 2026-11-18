@@ -12,7 +12,6 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
-from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import DataTable, Footer, Header, Input, Static, TabbedContent, TabPane
 
@@ -349,10 +348,6 @@ class HostView(VerticalScroll):
             yield Table(R.GATEWAY_COLUMNS, widths=R.WIDTHS["gateway"], optional=R.OPTIONAL["gateway"], id="gateway")
         with Panel("EVENTS", id="events-panel", classes="grow"):
             yield Table(R.HOST_EVENT_COLUMNS, sort=("time", True), widths=R.WIDTHS["host-events"], id="events")
-
-    def project_names(self):
-        table = self.query_one("#projects-table", Table)
-        return [table.get_row(row.key)[0].plain for row in table.ordered_rows]
 
     def update(self, snap, text):
         state = snap["host"]
