@@ -210,7 +210,9 @@ class QueueTests(Sandbox):
 
     def test_a_hand_made_pane_at_a_permission_prompt_is_waiting_and_never_typed_into(self):
         self.add("prompt-task")
-        (self.state / "screen-%1").write_text(" Do you want to proceed?\n \u276f 1. Yes\n   2. No\n")
+        (self.state / "screen-%1").write_text("Do you want to proceed with the plan? I can.\n> ")
+        self.assertRegex(self.theseus("agents").stdout, r"worker-a\s+%1\s+free", "an agent's own prose is no prompt")
+        (self.state / "screen-%1").write_text(" \u2502 Do you want to proceed?\n \u2502 \u276f 1. Yes\n \u2502   2. No\n")
         out = self.theseus("queue", "tick").stdout
         self.assertNotIn("assigned", out)
         self.assertEqual("", self.typed())

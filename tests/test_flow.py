@@ -386,7 +386,7 @@ class TaskFlowTests(Sandbox):
         self.assertEqual("in_progress", self.record()["status"])
         self.assertEqual("", self.git("status", "--porcelain").stdout)
 
-    def test_reopen_refuses_while_the_agent_works_on_another_task(self):
+    def test_reopen_releases_the_task_when_its_agent_works_on_another(self):
         self.add_task()
         self.add_task("second-task", owned=("docs/investigations/second-task.md",))
         self.git("commit", "-q", "-am", "queue two")
@@ -394,9 +394,11 @@ class TaskFlowTests(Sandbox):
         self.deliver(self.tmp / "worktrees/worker-1-a")
         self.theseus("tasks", "deliver", TASK, "--handoff", self.tmp / "worktrees/worker-1-a/.theseus/handoff.md")
         self.theseus("instance", "assign", "second-task", "worker-1", "b")
-        refused = self.theseus("tasks", "reopen", TASK, "--reason", "premature", check=False)
-        self.assertIn("worker-1, which held parse-capture-header, now works on second-task", refused.stderr)
-        self.assertEqual("verification", self.record()["status"])
+        out = self.theseus("tasks", "reopen", TASK, "--reason", "premature").stdout
+        self.assertIn("worker-1 already works on second-task, so parse-capture-header went back to pending", out)
+        self.assertEqual("pending", self.record()["status"])
+        from theseus import agents, config as cfg
+        self.assertEqual("second-task", agents.current_task(cfg.load(root=self.project), "worker-1")["id"])
 
     def test_reassigning_to_the_same_agent_moves_the_previous_worktree_aside(self):
         self.add_task()

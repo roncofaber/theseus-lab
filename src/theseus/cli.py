@@ -339,7 +339,7 @@ def cmd_instance(args):
             print(f"{named['name']}: {detail}", file=sys.stdout if ok else sys.stderr)
             sys.exit(0 if ok else 1)
         from . import profiles
-        prompt = agents.pane_prompt(conf, args.pane, (named or {}).get("provider") or profiles.default_name(conf))
+        prompt = agents.pane_prompt(conf, named or args.pane, (named or {}).get("provider") or profiles.default_name(conf))
         if prompt:
             sys.exit(f"theseus: {args.pane} shows a prompt that needs a human ({prompt[:80]}); answer it in the pane "
                      f"first, since typed text would answer it")

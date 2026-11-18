@@ -24,11 +24,6 @@ CLAIM_TTL = store.CLAIM_TTL
 LEASE_TTL = store.LEASE_TTL
 
 
-def config_path():
-    """The deprecated pools.toml."""
-    return hostconfig.pools_path()
-
-
 def state_dir():
     """The directory of the pre-store <pool>.json state files, read once by the store migration."""
     if os.environ.get("THESEUS_POOL_STATE"):
@@ -72,11 +67,6 @@ def acquire(conf, pool, agent, task):
     """may_start and take atomically across processes; release() the slot if the assignment then fails."""
     with store.for_host() as conn:
         return store.acquire(conn, pool, conf.name, agent, task, spec=spec_of(pool))
-
-
-def take(conf, pool, agent, task):
-    with store.for_host() as conn:
-        store.take(conn, pool, conf.name, agent, task)
 
 
 def hold(project, pool, agent, task, hours=4.0):

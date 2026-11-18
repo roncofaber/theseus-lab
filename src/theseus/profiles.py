@@ -63,7 +63,7 @@ CLAUDE_INTERACTIVE = {
     "startup_dialogs": ["Is this a project you created or one you trust", "Yes, I trust this folder",
                         "New MCP server found"],
     "paste_placeholder": r"\[Pasted text #\d+",
-    "prompt_patterns": [r"Do you want to (?:proceed|make this edit|create|allow|run|use)\b", r"^\s*[>\u276f]\s*1\.\s*Yes\b"],
+    "prompt_patterns": [r"[>\u276f]\s*1\.\s*Yes\b"],
 }
 
 PRESETS = {

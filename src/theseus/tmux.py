@@ -136,6 +136,9 @@ class Server:
                                     timeout=timeout)
         except FileNotFoundError as error:
             raise TmuxError("tmux is not installed; theseus needs it for persistent agents") from error
+        except subprocess.TimeoutExpired as error:
+            # Not a failed result: callers read a non-zero exit as "no such pane", and a slow server is not a lost agent.
+            raise TmuxError(f"tmux {args[0]}: no answer within {timeout:g}s") from error
         if check and result.returncode != 0:
             raise TmuxError(f"tmux {args[0]}: {(result.stderr or '').strip()[:200]}")
         return result

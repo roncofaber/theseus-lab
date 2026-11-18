@@ -440,16 +440,17 @@ def record_send_failed(conf, name, task, text, detail):
 
 
 def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, record=True, sleep=None,
-                  kind="plain", **extra):
+                  kind="plain", into_prompt=False, **extra):
     """Type text into an agent's pane and confirm it was submitted: within instances.send_verify_seconds the pane must
     show the profile's busy marker (expect_busy) or, for slash commands, no longer hold the text in its input line.
     If the text is still in the input line, Enter is pressed once more and the pane checked again. Returns (ok, detail);
     a failure records a send_failed event unless record is False. Profiles without a busy marker are sent unverified.
     Inside a queue tick (batched) the text is typed at once and Enter and the verification are left to the tick, which
     does them for all its sends together: the result is (True, "typed; verifying") and kind with extra says what to do
-    once it resolves (workqueue.settle_send)."""
+    once it resolves (workqueue.settle_send). Nothing is typed into a pane that shows a prompt for a human
+    (pane_prompt) unless into_prompt says a human is answering it."""
     ctx = send_context(conf, agent, profile)
-    prompt = pane_prompt(conf, ctx["pane"], ctx["profile"], server=ctx["server"])
+    prompt = None if into_prompt else pane_prompt(conf, ctx["pane"], ctx["profile"], server=ctx["server"])
     if prompt:
         detail = f"not typed: the pane shows a prompt that needs a human ({prompt[:80]})"
         if record:

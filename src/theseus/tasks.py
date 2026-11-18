@@ -403,12 +403,12 @@ def reopen(queue, task_id, reason):
         raise TaskError(f"{task_id} is merged; take it back with `theseus tasks unmerge {task_id}`")
     if task["status"] != "verification":
         raise TaskError(f"{task_id} is {task['status']}, not verification")
-    refuse_second_task(document, task)
+    other = second_task(document, task)
     task["status"] = "in_progress"
     task.setdefault("previousAttempts", []).append({"reopenedAt": now(), "reason": reason, "handoff": set_aside_handoff(task)})
     queue.save(document)
     record(queue, "reopened", task, reason)
-    return f"{task_id} -> in_progress again ({reason})"
+    return release_if_taken(queue, task, other, f"{task_id} -> in_progress again ({reason})")
 
 
 def second_task(document, task):
@@ -421,11 +421,14 @@ def second_task(document, task):
     return None
 
 
-def refuse_second_task(document, task):
-    other = second_task(document, task)
-    if other:
-        raise TaskError(f"{agent_of(task)}, which held {task['id']}, now works on {other['id']}; release one of them first "
-                        f"(`theseus tasks release ID`), so the agent never holds two tasks in progress")
+def release_if_taken(queue, task, other, message):
+    """After task went back to in_progress: when its agent already works on other, release task to pending for the next
+    free agent instead, so no agent holds two tasks in progress."""
+    if not other:
+        return message
+    release(queue, task["id"], f"{agent_of(task)} works on {other['id']}")
+    return (f"{message}; {agent_of(task)} already works on {other['id']}, so {task['id']} went back to pending for the next "
+            f"free agent (its worktree moves aside on assignment)")
 
 
 def set_aside_handoff(task):
@@ -447,7 +450,7 @@ def unmerge(queue, task_id, reason, revert_commit=None):
     task = queue.open_task(document, task_id)
     if task["status"] != "merged":
         raise TaskError(f"{task_id} is {task['status']}, not merged")
-    refuse_second_task(document, task)
+    other = second_task(document, task)
     attempt = {"merge": task.pop("merge", None), "unmergedAt": now(), "reason": reason, "handoff": set_aside_handoff(task)}
     if revert_commit:
         attempt["revertCommit"] = revert_commit
@@ -457,6 +460,8 @@ def unmerge(queue, task_id, reason, revert_commit=None):
     task["status"] = "in_progress"
     queue.save(document)
     record(queue, "unmerged", task, f"{reason} (revert {revert_commit or 'by hand'})")
+    if other:
+        return release_if_taken(queue, task, other, f"{task_id} unmerged")
     return (f"{task_id} -> in_progress again; redeliver in {task.get('worktree')} and merge as usual, or release it"
             + kept_worktree(queue, task_id, task.get("worktree")))
 

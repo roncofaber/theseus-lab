@@ -1090,7 +1090,7 @@ def task_sheet(task, project):
 def send_verified(conf, agent, text, expect_busy=True):
     """Type text into the agent's pane through the queue's verified send; returns the message to show."""
     from .. import agents
-    ok, detail = agents.send_verified(conf, agent, text, expect_busy=expect_busy)
+    ok, detail = agents.send_verified(conf, agent, text, expect_busy=expect_busy, into_prompt=True)
     return f"{'sent' if ok else 'send failed'} to {agent['name']}: {detail}"
 
 

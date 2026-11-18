@@ -1438,12 +1438,13 @@ def capture(agent, history=0, ansi=True):
 
 
 def send(conf, name, text, expect_busy=True):
-    """Type a line into a managed agent through the queue's verified send. Returns (ok, detail)."""
+    """Type a line from a human into a managed agent through the queue's verified send; it may answer a prompt on
+    screen. Returns (ok, detail)."""
     from . import agents
     rec = record(conf, name)
     if not rec:
         raise SupervisorError(f"no agent {name}")
-    return agents.send_verified(conf, agents.entry(rec), text, expect_busy=expect_busy)
+    return agents.send_verified(conf, agents.entry(rec), text, expect_busy=expect_busy, into_prompt=True)
 
 
 MIN_FIT = (20, 5)
