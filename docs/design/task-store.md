@@ -279,3 +279,28 @@ Questions for the coordinator:
 - Q9: coordinator MCP tools in this round are reads plus add, edit, hold, release, reopen and note. Merge, unmerge, verify and complete stay CLI-only until there is a clear need.
 - Q10: no path-based identity. Hand-made panes read their task through the read-only `theseus tasks show ID` (reads need no credentials) and deliver through the permanent handoff fallback; `agents migrate` is recommended before cutover but not required.
 - The dependency rule landing on main now (a dependency is satisfied only when its merge is an ancestor of the assignment base) moves into `ready()` and `claim()` in phase 2.
+
+## 17. Phase 0 findings (2026-11-18)
+
+### MCP Python SDK
+
+Verified from the PyPI metadata and the source of the published wheel `mcp-2.3.0-py3-none-any.whl` (released 2026-10-02, requires Python 3.10 or later), not from a summary. The 2.x line started with 2.0.0 on 2026-07-28; 1.x is still maintained in parallel (1.30.0 on 2026-09-07).
+
+- The high-level server is `mcp.server.mcpserver.MCPServer`, also exported as `mcp.server.MCPServer`. Tools register with the `@server.tool()` decorator (name, title, description, annotations, `structured_output`), and the input schema comes from the function signature. `server.run()` defaults to the stdio transport; `run_stdio_async()` is the async form.
+- `FastMCP` is gone in 2.x: `mcp.server.fastmcp` exists only to raise `ModuleNotFoundError` with a pointer to the migration guide, so code written against 1.x tutorials fails at import, not silently.
+- Tests can connect in process: `mcp.Client(server)` accepts an `MCPServer` instance as well as a URL or `StdioServerParameters`, then `await client.list_tools()` and `await client.call_tool(name, args)`. Test 7 in section 13 needs no subprocess.
+- The dependency set is heavy for an optional extra: pydantic, starlette, uvicorn, sse-starlette, httpx2, jsonschema, pyjwt[crypto], opentelemetry-api and `mcp-types` pinned to the same version. That supports keeping it out of the base install.
+- Pin: `theseus-lab[mcp]` depends on `mcp>=2.3,<3`. Only 2.3.0 was read, so the floor is the verified version rather than 2.0.
+
+### Environment of stdio MCP servers
+
+Each client was probed with a stub stdio server that writes its environment to a file. The probes ran against throwaway config directories (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`) and dead API endpoints, so no real configuration changed and no prompt left the machine. The parent environment carried `THESEUS_AGENT_ID`, `THESEUS_CREDENTIALS` and an unrelated variable, and the server entry set one explicit `env` variable.
+
+- Claude Code 2.1.327 passes the whole parent environment plus the entry's `env`. That held for a user-scope entry checked by `claude mcp list` and for `claude -p --strict-mcp-config --mcp-config FILE`, the path the per-agent config uses: the server saw all four variables, 131 in total.
+- Codex CLI 0.167.0 passes only a fixed allow list (`HOME`, `LANG`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER`) plus the entry's `env` table. `THESEUS_AGENT_ID` and `THESEUS_CREDENTIALS` did not arrive. The entry's `env_vars = ["NAME", ...]` list forwards named variables from the parent, and with it both arrived.
+- The SDK's own stdio client (`mcp.client.stdio.get_default_environment`) also passes only `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM` and `USER` plus `env`, so any client built on it behaves like Codex.
+
+Consequences:
+
+- Writing `env = {"THESEUS_CREDENTIALS": <path>}` into each per-agent entry (section 5) is required, not a precaution. It is the only path that works for Codex and SDK-based clients. For Codex, `env_vars = ["THESEUS_AGENT_ID"]` could forward the agent id as well, but the credentials file already names the agent.
+- The Q5 caveat is real for Claude Code. A worker that loads the coordinator's local-scope entry starts that server with the worker's own environment, `THESEUS_AGENT_ID` included. Under the deny-by-default rule (section 16), that server refuses to act as coordinator. It does not quietly become one, which is the outcome the decision wanted.
