@@ -312,6 +312,67 @@ def drop_stash(worktree, stash):
         g.git(worktree, "stash", "drop", "-q", f"stash@{{{entries.index(stash)}}}")
 
 
+def worktree_branches(conf):
+    """Resolved path -> checked-out ref ("" when detached) of every git worktree of the repository."""
+    found, path = {}, None
+    for line in g.out(conf.root, "worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            path = Path(line[len("worktree "):]).resolve()
+            found[path] = ""
+        elif line.startswith("branch ") and path is not None:
+            found[path] = line[len("branch "):]
+    return found
+
+
+def attempts_at(task, worktree):
+    """The records of task (its earlier attempts and the task itself) whose attempt used worktree."""
+    target = Path(worktree).resolve()
+
+    def used(record):
+        paths = [record.get("worktree"), (record.get("execution") or {}).get("logDir")]
+        return any(p and (Path(p).resolve() == target or target in Path(p).resolve().parents) for p in paths)
+
+    return [r for r in [*(task.get("previousAttempts") or []), task] if used(r)]
+
+
+def check_previous_attempt(conf, task, worktree):
+    """Refuse an existing worktree path unless it is a git worktree a previous attempt of this task left there."""
+    if not (attempts_at(task, worktree) and Path(worktree).resolve() in worktree_branches(conf)):
+        raise IntegrationError(f"worktree already exists: {worktree} (not a previous attempt of {task['id']}; retire "
+                               "the old task or pick another name)")
+
+
+def move_previous_attempt(conf, queue, task_id, worktree):
+    """Move the worktree a previous attempt of task_id left at worktree, and its work/<name> branch, aside to
+    <worktree>-attemptN and record the new path on that attempt. Returns the new path, or None when worktree is free."""
+    worktree = Path(worktree)
+    if not worktree.exists():
+        return None
+    document = queue.load()
+    task = queue.open_task(document, task_id)
+    check_previous_attempt(conf, task, worktree)
+    records = attempts_at(task, worktree)
+    branch = worktree_branches(conf)[worktree.resolve()]
+    own = f"refs/heads/work/{worktree.name}"
+    n = 1
+    while Path(f"{worktree}-attempt{n}").exists() or (
+            branch == own and g.git(conf.root, "rev-parse", "--verify", "-q", f"{own}-attempt{n}", check=False).returncode == 0):
+        n += 1
+    aside = Path(f"{worktree}-attempt{n}")
+    g.git(conf.root, "worktree", "move", str(worktree), str(aside))
+    if branch == own:
+        g.git(conf.root, "branch", "-m", f"work/{worktree.name}", f"work/{worktree.name}-attempt{n}")
+    old = str(worktree)
+    for record in records:
+        record["worktree"] = str(aside)
+        execution = record.get("execution") or {}
+        for key in ("logDir", "handoff"):
+            if isinstance(execution.get(key), str) and execution[key].startswith(old + os.sep):
+                execution[key] = str(aside) + execution[key][len(old):]
+    queue.save(document)
+    return aside
+
+
 def create_worktree(conf, name, base):
     worktree = conf.worktrees / name
     if worktree.exists():
@@ -350,11 +411,14 @@ def assign(conf, task_id, name, provider, model, owner=None, commit=True, instan
     base = base_commit(conf)
     if not record_committed(conf, task_id, base):
         raise IntegrationError(base_mismatch(conf, task_id, base))
+    aside = move_previous_attempt(conf, queue, task_id, conf.worktrees / name)
     worktree = create_worktree(conf, name, base)
     rooms.exclude_dirty(conf, task, worktree)
     try:
         message = t.assign(queue, task_id, owner or f"{provider}:{model}:{name}", provider, model, worktree, base[:12],
                            worktree / cfg.WORKER_LOG, owner_id=owner_id)
+        if aside:
+            message += f"; the previous attempt's worktree moved to {aside}"
     except t.TaskError:
         g.git(conf.root, "worktree", "remove", "--force", str(worktree), check=False)
         g.git(conf.root, "branch", "-D", f"work/{name}", check=False)

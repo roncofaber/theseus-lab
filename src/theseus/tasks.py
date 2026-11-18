@@ -334,6 +334,18 @@ def migrate_ids(queue):
     return f"ownerId recorded on {owners} task(s), agentId on {attempts} attempt(s)"
 
 
+def kept_worktree(queue, task_id, worktree):
+    """Where an attempt's worktree stays and what the next assignment of the task does with it."""
+    path = Path(worktree) if worktree else None
+    if path is None or not path.is_dir() or path.resolve() == Path(queue.root).resolve():
+        return ""
+    n = 1
+    while Path(f"{path}-attempt{n}").exists():
+        n += 1
+    return (f"\nthe worktree stays at {path}; the next assignment of {task_id} to the same name moves it to "
+            f"{path}-attempt{n}")
+
+
 def release(queue, task_id, reason):
     document = queue.load()
     task = queue.open_task(document, task_id)
@@ -348,7 +360,7 @@ def release(queue, task_id, reason):
     queue.save(document)
     record(queue, "released", {**task, "owner": attempt.get("owner"), "ownerId": attempt.get("agentId"),
                                "execution": attempt.get("execution")}, reason)
-    return f"{task_id} -> pending (attempt recorded in previousAttempts)"
+    return f"{task_id} -> pending (attempt recorded in previousAttempts)" + kept_worktree(queue, task_id, attempt.get("worktree"))
 
 
 HANDOFF_RESULT = re.compile(r"^\W*Result\W*:?\W*(delivered|partial|blocked)\b", re.IGNORECASE | re.MULTILINE)
@@ -414,7 +426,8 @@ def unmerge(queue, task_id, reason, revert_commit=None):
     task["status"] = "in_progress"
     queue.save(document)
     record(queue, "unmerged", task, f"{reason} (revert {revert_commit or 'by hand'})")
-    return f"{task_id} -> in_progress again; redeliver in {task.get('worktree')} and merge as usual"
+    return (f"{task_id} -> in_progress again; redeliver in {task.get('worktree')} and merge as usual, or release it"
+            + kept_worktree(queue, task_id, task.get("worktree")))
 
 
 def rebase(queue, task_id, base):

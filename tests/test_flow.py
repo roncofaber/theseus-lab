@@ -356,6 +356,36 @@ class TaskFlowTests(Sandbox):
         self.assertEqual("in_progress", self.record()["status"])
         self.assertEqual("", self.git("status", "--porcelain").stdout)
 
+    def test_reassigning_to_the_same_agent_moves_the_previous_worktree_aside(self):
+        self.add_task()
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        worktree = self.tmp / "worktrees/worker-1-a"
+        self.deliver(worktree)
+        self.theseus("merge", TASK)
+        self.git("revert", "--no-edit", self.record()["merge"]["commit"])
+        self.theseus("tasks", "unmerge", TASK, "--no-revert", "--reason", "reverted by hand")
+        released = self.theseus("tasks", "release", TASK, "--reason", "start over").stdout
+        aside = self.tmp / "worktrees/worker-1-a-attempt1"
+        self.assertIn(f"the worktree stays at {worktree}", released)
+        self.assertIn(str(aside), released)
+
+        out = self.theseus("instance", "assign", TASK, "worker-1", "a").stdout
+        self.assertIn(f"previous attempt's worktree moved to {aside}", out)
+        record = self.record()
+        self.assertEqual(("in_progress", str(worktree)), (record["status"], record["worktree"]))
+        self.assertEqual(str(aside), record["previousAttempts"][-1]["worktree"])
+        self.assertEqual(str(aside / ".theseus"), record["previousAttempts"][-1]["execution"]["logDir"])
+        self.assertEqual("work/worker-1-a", self.git("branch", "--show-current", cwd=worktree).stdout.strip())
+        self.assertEqual("work/worker-1-a-attempt1", self.git("branch", "--show-current", cwd=aside).stdout.strip())
+        self.assertTrue((aside / "src/capture/header.py").exists(), "the earlier work is kept")
+        self.assertEqual("", self.git("status", "--porcelain").stdout)
+
+        self.theseus("tasks", "release", TASK, "--reason", "elsewhere")
+        (self.tmp / "worktrees/worker-2-a").mkdir()
+        refused = self.theseus("instance", "assign", TASK, "worker-2", "a", check=False)
+        self.assertIn("worktree already exists", refused.stderr)
+        self.assertIn("not a previous attempt", refused.stderr)
+
     def test_in_place_copies_of_several_patches_merge_once_but_a_stale_copy_is_refused(self):
         lines = "".join(f"line {n}\n" for n in range(1, 13))
         self.write("shared.txt", lines)

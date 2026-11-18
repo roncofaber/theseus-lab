@@ -152,6 +152,19 @@ class QueueTests(Sandbox):
         result = self.theseus("queue", "wait", "--timeout", "20", "--interval", "1")
         self.assertIn("delivered", result.stdout)
 
+    def test_an_assignment_failure_backs_off_that_task_and_the_queue_keeps_going(self):
+        self.add("blocked-task")
+        self.add("other-task")
+        (self.tmp / "worktrees/worker-a-blocked-task").mkdir(parents=True)
+        out = self.theseus("queue", "tick").stdout
+        self.assertRegex(out, r"error\s+worker-a\s+blocked-task worktree already exists")
+        out = self.theseus("queue", "tick").stdout
+        self.assertRegex(out, r"assigned\s+worker-a\s+other-task")
+        self.assertNotIn("error", out, "the failed task waits out its backoff")
+        from theseus import config as cfg, workqueue
+        self.assertEqual(1, len(workqueue.events(cfg.load(root=self.project), kinds=["error"])))
+        self.assertEqual("pending", json.loads(self.theseus("tasks", "show", "blocked-task").stdout)["status"])
+
 
 class WakeTests(Sandbox):
     """`theseus queue wait` sleeps until the earlier of its interval and the next pending wake time, so a gateway resend

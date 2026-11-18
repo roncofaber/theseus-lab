@@ -11,7 +11,8 @@ A tick looks at every registered agent and acts on its state:
   once for a fatal error;
 - free (enabled, no open task, its gateway pool not paused): if a ready task fits its room, the agent is reset (a full
   /clear when it carries dirty context into clean work, a /compact otherwise), the task is assigned on a fresh
-  worktree, and its message is sent.
+  worktree, and its message is sent. A task whose assignment fails gets an `error` event and is skipped for
+  queue.assign_backoff_seconds (default 300) while the queue keeps driving other work.
 A task with "minCapability" goes only to agents whose profile capability ([workers.<name>] capability, default 1) is at
 least that, unless they are registered with exactly the task's profile.
 A task with a "profile" goes only to agents registered with that profile, or to agents whose profile differs from it only in
@@ -65,6 +66,23 @@ def runtime(conf):
 
 def save_runtime(conf, data):
     (queue_dir(conf) / "agents-state.json").write_text(json.dumps(data, indent=2) + "\n")
+
+
+def assign_failures(conf, now=None):
+    """Task ID -> epoch until which the queue skips it after a failed assignment (<data>/queue/assign-failures.json)."""
+    now = time.time() if now is None else now
+    try:
+        failures = json.loads((queue_dir(conf) / "assign-failures.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return {task_id: until for task_id, until in failures.items() if float(until) > now}
+
+
+def back_off(conf, task_id, now=None):
+    now = time.time() if now is None else now
+    failures = assign_failures(conf, now)
+    failures[task_id] = now + float(conf.section("queue").get("assign_backoff_seconds", 300))
+    (queue_dir(conf) / "assign-failures.json").write_text(json.dumps(failures, indent=2) + "\n")
 
 
 def paused(conf):
@@ -162,9 +180,10 @@ def next_task(conf, agent, info, claimed):
     queue = t.Queue(conf)
     order = {task["id"]: n for n, task in enumerate(queue.load()["tasks"])}
     candidates = []
+    skipped = assign_failures(conf)
     for task_id in t.ready(queue):
         task = queue.get(task_id)
-        if task.get("hold") or task_id in claimed:
+        if task.get("hold") or task_id in claimed or task_id in skipped:
             continue
         ok, reset = fits(conf, agent, task, info)
         if ok:
@@ -396,6 +415,8 @@ def tick(conf, assign=True):
                         ok, detail = assign_and_send(conf, agent, task)
                     except Exception as error:
                         ok, detail = False, str(error)
+                    if not ok:
+                        back_off(conf, task["id"])
                     recorded.append(events(conf, 1)[-1] if ok else event(conf, "error", name, task["id"], detail))
                 finally:
                     if pool and not ok:

@@ -66,7 +66,7 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
     record_dir = conf.workers_dir / name
     log_dir = worktree / cfg.WORKER_LOG
     if worktree.exists():
-        raise integrate.IntegrationError(f"worktree already exists: {worktree} (retire the old task or pass --name)")
+        integrate.check_previous_attempt(conf, task, worktree)
     from . import rooms
     prompt = WORKER_NOTES.format(worktree=worktree, root=conf.root) + t.render_prompt(queue, task_id, base[:12], worktree, log_dir)
     room_rules = rooms.message(conf, task) if rooms.enabled(conf) else ""
@@ -92,6 +92,9 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
         return lines
     record_dir.mkdir(parents=True, exist_ok=True)
     (record_dir / "prompt.md").write_text(prompt + "\n")
+    aside = integrate.move_previous_attempt(conf, queue, task_id, worktree)
+    if aside:
+        lines.append(f"the previous attempt's worktree moved to {aside}")
     integrate.create_worktree(conf, name, base)
     rooms.exclude_dirty(conf, task, worktree)
     try:
