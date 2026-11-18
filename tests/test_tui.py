@@ -346,13 +346,38 @@ class ConsoleTests(DashboardBase):
             await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen) and self.fits[-1][1])
         self.assertEqual(("worker-a", None, None), self.fits[-1], "quitting with the popup open restores the size")
 
+    async def test_the_agent_popup_has_four_buttons_that_fit_and_the_rest_in_keys_and_the_palette(self):
+        from textual.command import CommandPalette
+        from textual.widgets import Button, Input
+        from theseus.tui.popups import AgentScreen
+        async with self.app.run_test(size=(80, 40)) as pilot:
+            await self.start(pilot)
+            await pilot.press("a", "enter")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, AgentScreen))
+            popup = self.app.screen
+            buttons = list(popup.query_one("#buttons").query(Button))
+            self.assertEqual(["attach", "type", "interrupt", "close"], [b.id for b in buttons])
+            await self.settle(pilot, lambda: buttons[-1].region.width > 0)
+            self.assertLessEqual(buttons[-1].region.right, popup.query_one("#dialog").content_region.right)
+            self.assertEqual(["Send Enter", "Send Escape (E)", "Compact (K)", "Open in my tmux (o)", "Restart (R)",
+                              "Stop (X)", "Start (U)"], [title.split(": ", 1)[1] for title, _, _ in popup.palette()])
+            await pilot.press("E")
+            await self.settle(pilot, lambda: ("%1", ("Escape",)) in self.keys)
+            await pilot.press("ctrl+p")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, CommandPalette))
+            self.app.screen.query_one(Input).value = "fake-1: send enter"
+            await pilot.pause(0.3)
+            await pilot.press("enter")
+            await self.settle(pilot, lambda: ("%1", ("Enter",)) in self.keys)
+
     async def test_the_conversation_tab_folds_tool_calls_and_follows_new_entries_unless_scrolled_up(self):
         from textual import events
-        from theseus.tui.popups import AgentScreen, Fold
+        from theseus.tui.popups import AgentScreen, Fold, plain
         def turn(n):
-            return [{"kind": "user", "text": f"question {n}"}, {"kind": "assistant", "text": f"answer {n}\nsecond line"},
-                    {"kind": "tool", "name": "Read", "text": '{\n "file_path": "f%d.py"\n}' % n},
-                    {"kind": "result", "text": "a\nb\nc", "error": n == 0}]
+            return [{"kind": "user", "text": f"question {n}"},
+                    {"kind": "assistant", "text": f"**answer** {n}\n\n- second line", "format": "markdown"},
+                    {"kind": "tool", "name": "Read", "summary": f"f{n}.py", "text": f"file_path: f{n}.py\nlimit: 2"},
+                    {"kind": "result", "summary": "a", "text": "a\nb\nc", "error": n == 0}]
         self.conversation.extend(turn(0))
         async with self.app.run_test(size=(170, 60)) as pilot:
             await self.start(pilot)
@@ -362,15 +387,16 @@ class ConsoleTests(DashboardBase):
             await pilot.press("c")
             log = popup.query_one("#conversation")
             await self.settle(pilot, lambda: len(log.query(".turn, .fold")) == 4)
-            texts = [str(w.render()) for w in log.query(".turn, .fold")]
+            texts = [plain(w.content) for w in log.query(".turn, .fold")]
             self.assertIn("question 0", texts[0])
-            self.assertIn("answer 0", texts[1])
+            self.assertEqual(["answer 0", "• second line"], [line.strip() for line in texts[1].splitlines() if line.strip()],
+                             "assistant text is Markdown")
+            self.assertEqual("▸ Read: f0.py", texts[2].strip())
+            self.assertEqual("↳ error: a  (3 lines)", texts[3].strip())
             fold = log.query(Fold).first()
             await self.settle(pilot, lambda: fold.region.height == 1)
-            self.assertIn("Read", str(fold.render()))
-            self.assertIn("f0.py", str(fold.render()))
             await pilot.click(fold)
-            await self.settle(pilot, lambda: fold.expanded and fold.region.height == 3)
+            await self.settle(pilot, lambda: fold.expanded and fold.region.height == 2)
             for n in range(1, 8):
                 self.conversation.extend(turn(n))
             await self.settle(pilot, lambda: len(log.query(".turn, .fold")) == 32 and log.max_scroll_y > 0
@@ -445,30 +471,40 @@ class TranscriptTests(Sandbox):
         from theseus.adapters import claude_code as transcripts
         path = self.tmp / "c.jsonl"
         path.write_text(
-            self.entry(type="user", message={"content": "decode the frame"}, timestamp="t1")
+            self.entry(type="user", message={"content": "decode the frame<system-reminder>hint</system-reminder>"},
+                       timestamp="t1")
             + self.entry(type="user", isMeta=True, message={"content": "<command caveat>"})
-            + self.entry(type="assistant", message={"content": [
+            + self.entry(type="user", message={"content": "<local-command-stdout>Compacted</local-command-stdout>"})
+            + self.entry(type="user", message={"content": [{"type": "text", "text": "<task-notification>x</task-notification>"}]})
+            + self.entry(type="user", isCompactSummary=True, message={"content": "This session is being continued"})
+            + self.entry(type="system", content="hook ran")
+            + self.entry(type="assistant", cwd="/work", message={"content": [
                 {"type": "thinking", "thinking": "private reasoning"},
                 {"type": "text", "text": "Reading the decoder."},
-                {"type": "tool_use", "id": "u1", "name": "Read", "input": {"file_path": "src/status.py"}}]})
+                {"type": "tool_use", "id": "u1", "name": "Read", "input": {"file_path": "/work/src/status.py",
+                                                                           "limit": 20}}]})
             + self.entry(type="user", message={"content": [
                 {"type": "tool_result", "tool_use_id": "u1", "content": [{"type": "text", "text": "line 1\nline 2"}]}]})
             + self.entry(type="assistant", isSidechain=True, message={"content": [{"type": "text", "text": "subagent"}]})
             + self.entry(type="user", message={"content": [{"type": "tool_result", "tool_use_id": "u2", "is_error": True,
-                                                            "content": "no such file"}]}))
+                                                            "content": "no such file"}]})
+            + self.entry(type="user", message={"content": "<command-name>/compact</command-name>\n<command-message>compact"
+                                                          "</command-message>\n<command-args>keep notes</command-args>"}))
         state = transcripts.read(path)
-        self.assertEqual(5, state["total"])
+        self.assertEqual(6, state["total"])
         self.assertEqual([("user", "decode the frame"), ("assistant", "Reading the decoder."), ("tool", None),
-                          ("result", "line 1\nline 2"), ("result", "no such file")],
+                          ("result", "line 1\nline 2"), ("result", "no such file"), ("user", "/compact keep notes")],
                          [(e["kind"], None if e["kind"] == "tool" else e["text"]) for e in state["entries"]])
-        self.assertEqual("Read", state["entries"][2]["name"])
-        self.assertIn('"file_path": "src/status.py"', state["entries"][2]["text"])
+        self.assertEqual("markdown", state["entries"][1]["format"])
+        self.assertEqual(("Read", "src/status.py"), (state["entries"][2]["name"], state["entries"][2]["summary"]))
+        self.assertEqual("file_path: /work/src/status.py\nlimit: 20", state["entries"][2]["text"])
+        self.assertEqual("line 1", state["entries"][3]["summary"])
         self.assertTrue(state["entries"][4]["error"])
         self.assertNotIn("private reasoning", json.dumps(state["entries"]))
         with open(path, "a") as handle:
             handle.write(self.entry(type="assistant", message={"content": [{"type": "text", "text": "x" * 9000}]}))
         state = transcripts.read(path)
-        self.assertEqual(6, state["total"])
+        self.assertEqual(7, state["total"])
         self.assertIn("1000 more characters", state["entries"][-1]["text"])
 
     def test_the_console_conversation_is_redacted_and_read_from_where_it_left_off(self):
@@ -480,7 +516,7 @@ class TranscriptTests(Sandbox):
         state = {"total": 3, "key": "a", "entries": [
             {"kind": "user", "text": "first", "n": 1},
             {"kind": "assistant", "text": f"key {secret} for someone@example.org", "n": 2},
-            {"kind": "tool", "name": "Read", "text": "ok", "n": 3}]}
+            {"kind": "tool", "name": "Bash", "summary": f"curl -H {secret}", "text": "ok", "n": 3}]}
         with mock.patch.object(agents, "get", return_value={"name": "w"}), \
                 mock.patch.object(agents, "session_transcript", return_value=state):
             read = conversation_reader(self.project, "w", "%1", "claude-code-jsonl")
@@ -488,6 +524,7 @@ class TranscriptTests(Sandbox):
             self.assertEqual((3, False), (total, reset))
             self.assertNotIn(secret, entries[1]["text"])
             self.assertNotIn("someone@example.org", entries[1]["text"])
+            self.assertNotIn(secret, entries[2]["summary"], "the folded line is redacted like what it unfolds to")
             self.assertEqual(["ok"], [e["text"] for e in read(2)[1]])
             self.assertEqual((3, 3, True), (read(5)[0], len(read(5)[1]), read(5)[2]))
             state.update(key="b", entries=[{"kind": "user", "text": "new session", "n": 1}], total=1)
@@ -779,7 +816,7 @@ class ChartTests(unittest.TestCase):
 
     def test_agent_rows_show_plain_cpu_memory_and_a_context_meter(self):
         from theseus.tui import rows, theme
-        self.assertEqual(("CPU (core %)", "MEM (RAM)", "context"), rows.AGENT_COLUMNS[3:6])
+        self.assertEqual(("CPU (core %)", "MEM (RAM)", "context"), rows.AGENT_COLUMNS[4:7])
         agent = {"name": "a", "pane": "%1", "state": "working", "task": None, "room": None, "idleMinutes": None}
         state = {"agents": [{**agent, "cpu": 250.0, "rss": 2 * 2**30,
                              "context": {"tokens": 170000, "limit": 200000, "source": "transcript"}},
@@ -789,7 +826,7 @@ class ChartTests(unittest.TestCase):
                             {**agent, "name": "d", "cpu": 5.0, "rss": 2**28,
                              "context": {"tokens": 120000, "limit": 200000, "source": "transcript"}}],
                  "workers": [], "events": [], "host": {"memTotal": 8 * 2**30}}
-        found = {key.split(":")[1]: cells[3:6] for key, cells, _ in rows.agent_rows(state)}
+        found = {key.split(":")[1]: cells[4:7] for key, cells, _ in rows.agent_rows(state)}
         cells = {name: [c.plain for c in triple] for name, triple in found.items()}
         self.assertEqual(["250%", "2.0G 25%", "███▍ 170k/200k"], cells["a"])
         self.assertEqual(["40%", "1.0G 12%", "█▋░░ 87k/200k ~"], cells["b"])
@@ -798,6 +835,31 @@ class ChartTests(unittest.TestCase):
         self.assertEqual("right", found["a"][0].justify)
         self.assertEqual([theme.RED, theme.YELLOW, ""], [found[name][1].style for name in ("a", "b", "d")])
         self.assertEqual([theme.RED, theme.GREEN, theme.YELLOW], [found[name][2].style for name in ("a", "b", "d")])
+
+    def test_agent_capability_and_task_minimum_columns_are_narrow_and_drop_out_first(self):
+        from types import SimpleNamespace
+        from theseus.tui import rows
+        from theseus.tui.app import Table
+        state = {"agents": [{"name": "a", "pane": "%1", "state": "free", "capability": 2}], "workers": [], "events": [],
+                 "host": {}}
+        self.assertEqual("2", rows.agent_rows(state)[0][1][rows.AGENT_COLUMNS.index("cap")].plain)
+        queue = {key: [] for key in ("review", "merged", "ready", "blocked", "held", "in_progress")}
+        queue["ready"] = ["t1", "t2"]
+        state = {"queue": queue, "rooms": {}, "times": {}, "capabilities": {"t1": 3}, "events": [], "eligible": {},
+                 "gated": {}, "blocked": {}, "paused": False, "agents": []}
+        found = {key.split(":")[2]: cells[rows.WAITING_COLUMNS.index("min")].plain
+                 for key, cells, _ in rows.waiting_rows(state)}
+        self.assertEqual({"t1": "3", "t2": ""}, found)
+        for name, columns in (("agents", rows.AGENT_COLUMNS), ("waiting", rows.WAITING_COLUMNS)):
+            short = {"agents": "cap", "waiting": "min"}[name]
+            table = SimpleNamespace(names=columns, widths=rows.WIDTHS[name], optional=rows.OPTIONAL[name])
+            self.assertIn(short, Table.fit(table, 200)[0])
+            self.assertEqual(3, Table.fit(table, 200)[1][short])
+            widths = rows.WIDTHS[name]
+            rest = [c for c in columns if c != short]
+            fits_rest = 1 + 2 * len(rest) + sum(widths[c] if isinstance(widths[c], int) else 6 for c in rest)
+            self.assertEqual(rest, Table.fit(table, fits_rest)[0], f"{short} drops out before any other column")
+            self.assertEqual(list(columns), Table.fit(table, fits_rest + 5)[0])
 
     def test_history_and_meters(self):
         from theseus.tui import charts

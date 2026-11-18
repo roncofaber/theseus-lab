@@ -209,7 +209,7 @@ What theseus reads from a CLI's record of its own session goes through one adapt
 
 | Adapter | Reads |
 | --- | --- |
-| `claude-code-jsonl` | Claude Code's JSONL transcript: the session of a supervised agent from its stored session id, of another pane from the client's `interactive.sessions_dir`; user and assistant text, tool calls and results (folded to one line in the console), never thinking |
+| `claude-code-jsonl` | Claude Code's JSONL transcript: the session of a supervised agent from its stored session id, of another pane from the client's `interactive.sessions_dir`; user prompts and slash commands as typed, assistant text as Markdown, each tool call as one `Tool: key argument` line and each result as a one-line preview (both unfold), never thinking, system reminders, command output or compaction summaries |
 | `pane-history` | Nothing; the console shows the pane's scrollback (`capture-pane -S`) |
 | `none` | Nothing; no Conversation tab |
 
@@ -222,7 +222,7 @@ A state is a dict with:
 - `tokens` and `model`: the context in use after the last answer and its model, or None;
 - `errors`: the newest API errors as `{"time", "error", "text"}`, where `error` is the CLI's own error kind or None;
 - `last`: `answer`, `error` or None, for the newest assistant entry;
-- `entries`: the newest conversation entries as `{"kind", "text", "time", "n"}`, with `kind` one of `user`, `assistant`, `tool` (plus `name`) and `result` (plus `error`), and `n` numbering the entries of the record from 1 so the console asks only for new ones; the list is replaced, never changed in place;
+- `entries`: the newest conversation entries as `{"kind", "text", "time", "n"}`, with `kind` one of `user`, `assistant`, `tool` (plus `name`) and `result` (plus `error`), and `n` numbering the entries of the record from 1 so the console asks only for new ones; optionally `"format": "markdown"` for text the console renders as Markdown and `summary`, the one line a folded entry shows (a tool call's key argument, shown as `Tool: argument`; a result's first line) while `text` is what unfolds; thinking and system or meta entries are left out; the list is replaced, never changed in place;
 - `total`: how many entries were ever read;
 - `key`: names the record; a new key (a new session, a rewritten file) makes the console start over.
 

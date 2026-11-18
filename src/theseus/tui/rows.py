@@ -8,20 +8,20 @@ from rich.text import Text
 from .. import host, top
 from . import charts, theme
 
-AGENT_COLUMNS = ("agent", "state", "task", "CPU (core %)", "MEM (RAM)", "context", "room", "on task", "quiet",
+AGENT_COLUMNS = ("agent", "state", "cap", "task", "CPU (core %)", "MEM (RAM)", "context", "room", "on task", "quiet",
                  "up", "restarts", "session", "model", "pool", "note")
 PROJECT_COLUMNS = ("project", "milestone", "coordinator", "watcher", "ready", "working on", "review", "attention", "agents",
                    "pool", "gateway", "today")
 # Columns that drop out, first to last, when a table is too narrow for all of them.
-OPTIONAL = {"agents": ("model", "pool", "session", "note", "restarts", "up", "room", "quiet", "on task", "context"),
+OPTIONAL = {"agents": ("cap", "model", "pool", "session", "note", "restarts", "up", "room", "quiet", "on task", "context"),
             "projects": ("watcher", "today", "gateway", "pool", "working on", "ready", "attention"),
-            "gateway": ("pool", "attempt", "outcome"), "waiting": ("posted", "room")}
+            "gateway": ("pool", "attempt", "outcome"), "waiting": ("min", "posted", "room")}
 # Stable column widths: an int is fixed, a float shares the remaining width in proportion.
 WIDTHS = {
-    "agents": {"agent": 14, "state": 10, "task": 1.0, "CPU (core %)": 12, "MEM (RAM)": 11, "context": 14,
+    "agents": {"agent": 14, "state": 10, "cap": 3, "task": 1.0, "CPU (core %)": 12, "MEM (RAM)": 11, "context": 14,
                "room": 6, "on task": 8, "quiet": 6, "up": 6, "restarts": 8, "session": 8, "model": 0.8, "pool": 8,
                "note": 0.5},
-    "waiting": {"status": 10, "task": 1.0, "room": 6, "for": 8, "posted": 12, "reason": 1.2},
+    "waiting": {"status": 10, "task": 1.0, "min": 3, "room": 6, "for": 8, "posted": 12, "reason": 1.2},
     "events": {"time": 8, "kind": 11, "agent": 16, "task": 0.7, "detail": 1.6},
     "host-events": {"time": 8, "project": 12, "kind": 11, "agent": 24, "task": 0.7, "detail": 1.6},
     "pools": {"pool": 12, "working": 1.0, "holders": 1.5, "claims": 1.0},
@@ -29,7 +29,7 @@ WIDTHS = {
     "projects": {"project": 14, "milestone": 1.0, "coordinator": 13, "watcher": 9, "ready": 6, "working on": 10,
                  "review": 13, "attention": 1.0, "agents": 1.0, "pool": 10, "gateway": 9, "today": 11},
 }
-WAITING_COLUMNS = ("status", "task", "room", "for", "posted", "reason")
+WAITING_COLUMNS = ("status", "task", "min", "room", "for", "posted", "reason")
 EVENT_COLUMNS = ("time", "kind", "agent", "task", "detail")
 HOST_EVENT_COLUMNS = ("time", "project", "kind", "agent", "task", "detail")
 POOL_COLUMNS = ("pool", "working", "holders", "claims")
@@ -108,6 +108,7 @@ def agent_rows(state):
         restarts = agent.get("restarts")
         rows.append(row(f"agent:{agent['name']}:{agent['pane']}", [
             marked(agent.get("display") or agent["name"], color), cell(agent["state"], color),
+            cell("" if agent.get("capability") is None else str(agent["capability"]), "dim"),
             cell(agent.get("task") or "-", "bold"), cpu, mem, context(agent.get("context")),
             cell(agent.get("room") or "-", theme.ROOM.get(agent.get("room"), "")),
             cell(top.duration(on_task), theme.aged(on_task, top.SLOW, top.VERY_SLOW)),
@@ -120,7 +121,7 @@ def agent_rows(state):
     for worker in state.get("workers", []):
         on_task = top.age(times.get(worker["task"], (None, None))[1])
         rows.append(row(f"worker:{worker['name']}:{worker['task']}", [
-            marked(worker["name"], theme.CYAN, marker="◆"), cell(worker["kind"], theme.CYAN), cell(worker["task"], "bold"),
+            marked(worker["name"], theme.CYAN, marker="◆"), cell(worker["kind"], theme.CYAN), "", cell(worker["task"], "bold"),
             "-", "-", "-", cell(worker.get("room") or "-", theme.ROOM.get(worker.get("room"), "")),
             cell(top.duration(on_task), theme.aged(on_task, top.SLOW, top.VERY_SLOW)), "-", "-", "-", "-",
             cell(worker.get("model") or "-", "dim"), "-", ""]))
@@ -129,6 +130,7 @@ def agent_rows(state):
 
 def waiting_rows(state):
     rows = []
+    minimums = state.get("capabilities") or {}
     for number, entry in enumerate(top.waiting_entries(state)):
         label = entry["label"]
         room = entry["room"] or "-"
@@ -143,6 +145,7 @@ def waiting_rows(state):
         strong = label in ("review", "merged", "ready")
         rows.append(row(f"wait:{entry['label']}:{entry['task']}", [
             marked(label, style, f"bold {style}" if strong else style), cell(entry["shown_id"], "bold" if strong else ""),
+            cell(str(minimums.get(entry["task"]) or ""), theme.YELLOW if entry["task"] in (state.get("gated") or {}) else ""),
             cell(room, theme.ROOM.get(room, "")), shown, cell(top.posted_label(entry["posted"]), "dim"), reason]))
     return rows
 

@@ -781,11 +781,11 @@ class TopApp(App):
                     ("Mouse", list(MOUSE_HELP)),
                     ("Agent popup", popups.binding_rows(popups.AgentScreen.BINDINGS,
                                                         lambda key: display(Binding(key, "")))
-                     + [("buttons", "Type into pane, Enter, Escape, Interrupt (asks first), Compact (the profile's compact "
-                                    "command), Attach, Open tmux pane, Restart, Stop, Start (supervised agents; each asks "
-                                    "first)"),
+                     + [("buttons", "Attach (supervised agents), Type, Interrupt (asks first), Close"),
+                        ("Ctrl+P", "in the popup also: send Enter or Escape, compact, open in your tmux, restart, stop, "
+                                   "start (each asks first)"),
                         ("tabs", "Live: the pane mirror and a send line; Conversation (c): the session transcript, "
-                                 "tool calls folded to one line (click or Enter expands); Diff: the task worktree against its base, "
+                                 "each tool call and result folded to one line (click or Enter expands); Diff: the task worktree against its base, "
                                  "refreshed every 5 s while shown; Task: the record and its handoff; Events: this agent's"),
                         ("type-through", "every key goes to the pane: text, Enter, Backspace, arrows, Tab, Ctrl-<key>;"
                                          " Ctrl-C asks first; Esc Esc or Ctrl-] leaves (the INSERT border)"),
@@ -1026,10 +1026,7 @@ def conversation_reader(root, name, pane=None, mode="none"):
         reset = reset or total < after
         shown = []
         for entry in entries if reset else [e for e in entries if e["n"] > after]:
-            entry = {**entry, "text": gateway.scrub(entry.get("text"))}
-            if entry.get("name"):
-                entry["name"] = gateway.scrub(entry["name"])
-            shown.append(entry)
+            shown.append({key: gateway.scrub(value) if isinstance(value, str) else value for key, value in entry.items()})
         return total, shown, reset
     return history if mode == adapters.PANE_HISTORY else conversation
 

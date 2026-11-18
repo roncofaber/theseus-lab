@@ -94,30 +94,102 @@ def clip(text):
     return text if len(text) <= ENTRY_CHARS else text[:ENTRY_CHARS] + f"\n... ({len(text) - ENTRY_CHARS} more characters)"
 
 
+KEY_ARGUMENTS = ("file_path", "notebook_path", "command", "pattern", "path", "url", "query", "skill", "description",
+                 "prompt", "subject")
+SUMMARY_CHARS = 200
+SYSTEM_TAGS = ("task-notification", "local-command-stdout", "local-command-stderr", "local-command-caveat", "bash-stdout",
+               "bash-stderr")
+HIDDEN_FLAGS = ("isSidechain", "isMeta", "isCompactSummary", "isVisibleInTranscriptOnly")
+
+
+def one_line(text):
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= SUMMARY_CHARS else text[:SUMMARY_CHARS - 1] + "…"
+
+
+def user_text(text):
+    """What the user typed: slash commands and shell escapes as typed, system reminders dropped, and "" for messages
+    the CLI writes on the user's behalf (command output, background task notices)."""
+    text = re.sub(r"<system-reminder>.*?</system-reminder>", "", text, flags=re.S).strip()
+    command = re.search(r"<command-name>(.*?)</command-name>", text, re.S)
+    if command:
+        args = re.search(r"<command-args>(.*?)</command-args>", text, re.S)
+        return f"{command.group(1).strip()} {args.group(1).strip() if args else ''}".strip()
+    shell = re.fullmatch(r"<bash-input>(.*?)</bash-input>", text, re.S)
+    if shell:
+        return f"! {shell.group(1).strip()}"
+    tag = re.match(r"<([a-z-]+)>", text)
+    return "" if tag and tag.group(1) in SYSTEM_TAGS else text
+
+
+def key_argument(data, cwd):
+    """The argument that names what a tool call works on (a path relative to the session's directory, a command, a
+    pattern), on one line."""
+    if not isinstance(data, dict):
+        return ""
+    value = next((data[k] for k in KEY_ARGUMENTS if isinstance(data.get(k), str) and data[k].strip()), None)
+    if value is None:
+        value = next((v for v in data.values() if isinstance(v, str) and v.strip()), "")
+    base = str(cwd or "").rstrip("/")
+    if base and value.startswith(base + "/"):
+        value = value[len(base) + 1:]
+    return one_line(value)
+
+
+def tool_input(data):
+    """A tool call's input as `key: value` lines, multi-line values indented below their key."""
+    if not isinstance(data, dict):
+        return json.dumps(data, ensure_ascii=False)
+    lines = []
+    for key, value in data.items():
+        if isinstance(value, str) and "\n" in value:
+            lines += [f"{key}:", *(f"  {line}" for line in value.splitlines())]
+        else:
+            lines.append(f"{key}: {value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)}")
+    return "\n".join(lines)
+
+
+def result_text(content):
+    if isinstance(content, str):
+        return content
+    parts = []
+    for part in content or []:
+        if isinstance(part, dict):
+            parts.append(part.get("text", "") if part.get("type") == "text" else f"[{part.get('type') or 'part'}]")
+    return "\n".join(parts)
+
+
 def entries_of(record):
-    """The conversation entries of one transcript record: {"kind": "user" | "assistant" | "tool" | "result", "text",
-    "time"} plus "name" for a tool call and "error" for a result. Sidechain (subagent) and meta records, thinking and
-    images are left out."""
+    """The conversation entries of one transcript record (see theseus.adapters). Sidechain (subagent), meta and
+    compaction records, thinking and messages the CLI writes on the user's behalf are left out."""
     kind = record.get("type")
-    if kind not in ("user", "assistant") or record.get("isSidechain") or record.get("isMeta"):
+    if kind not in ("user", "assistant") or any(record.get(flag) for flag in HIDDEN_FLAGS):
         return []
     content = (record.get("message") or {}).get("content")
     time = record.get("timestamp")
     if isinstance(content, str):
-        return [{"kind": kind, "text": clip(content), "time": time}] if content.strip() else []
+        content = [{"type": "text", "text": content}]
     found = []
     for part in content or []:
         if not isinstance(part, dict):
             continue
-        if part.get("type") == "text" and str(part.get("text") or "").strip():
-            found.append({"kind": kind, "text": clip(part["text"]), "time": time})
+        if part.get("type") == "text":
+            text = str(part.get("text") or "")
+            text = user_text(text) if kind == "user" else text.strip()
+            if text:
+                entry = {"kind": kind, "text": clip(text), "time": time}
+                if kind == "assistant":
+                    entry["format"] = "markdown"
+                found.append(entry)
         elif part.get("type") == "tool_use":
+            data = part.get("input")
             found.append({"kind": "tool", "name": str(part.get("name") or "tool"), "time": time,
-                          "text": clip(json.dumps(part.get("input"), indent=1, ensure_ascii=False))})
+                          "summary": key_argument(data, record.get("cwd")), "text": clip(tool_input(data))})
         elif part.get("type") == "tool_result":
-            result = part.get("content")
-            text = result if isinstance(result, str) else content_text({"content": result})
-            found.append({"kind": "result", "error": bool(part.get("is_error")), "text": clip(text), "time": time})
+            text = result_text(part.get("content"))
+            first = next((line for line in text.splitlines() if line.strip()), "")
+            found.append({"kind": "result", "error": bool(part.get("is_error")), "summary": one_line(first),
+                          "text": clip(text), "time": time})
     return found
 
 

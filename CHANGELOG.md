@@ -55,6 +55,9 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- The agent popup keeps four buttons on one row: Attach (Enter, supervised agents), Type (i), Interrupt (asks first) and Close. Sending Enter or Escape (`E`), compact (`K`, `theseus instance compact`), open in your tmux (`o`) and restart, stop, start (`R`, `X`, `U`) are keys and Ctrl+P commands of the popup, listed in `?`.
+- The Conversation tab reads like a conversation: assistant text renders as Markdown, each tool call is one `Tool: key argument` line (`Read: src/camera.c`, `Bash: theseus build`) that unfolds to its input as `key: value` lines, each result a one-line preview that unfolds; system reminders, command output, background task notices and compaction summaries are left out and slash commands show as typed. Transcript adapters supply this through two optional entry fields, `format` and `summary`; the console renders them for any adapter.
+- AGENTS shows each agent's profile capability (`cap`) and WAITING each task's minimum capability (`min`, blank when unset, yellow when it is what keeps the task waiting); both are narrow and the first columns to drop out on a narrow console.
 - The context meter and the gateway classification read transcripts through the profile's transcript adapter (`theseus.transcripts` moved to `theseus.adapters.claude_code`), so profiles of other CLIs fall back to the pane instead of being read as Claude Code transcripts.
 - An unknown top-level section in the host `config.toml` or a project's `theseus.toml` or `theseus.local.toml` is ignored with a warning on stderr, printed once per process, instead of stopping the command, so a long-running `theseus queue wait` or `queue run` survives a newer release adding a section; `theseus config check` still reports it as an error.
 - The console's AGENTS table has no pane column (every agent is private); the agent popup lists the pane.

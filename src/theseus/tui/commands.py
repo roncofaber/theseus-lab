@@ -97,3 +97,23 @@ class ConsoleCommands(Provider):
             score = matcher.match(title)
             if score > 0:
                 yield Hit(score, matcher.highlight(title), callback, help=help_text)
+
+
+class AgentCommands(Provider):
+    """The agent popup's commands without a button (send Enter or Escape, compact, open in your tmux, restart, stop,
+    start), from the popup the palette was opened on."""
+
+    def entries(self):
+        palette = getattr(self.screen, "palette", None)
+        return palette() if palette else []
+
+    async def discover(self):
+        for title, help_text, callback in self.entries():
+            yield DiscoveryHit(title, callback, help=help_text)
+
+    async def search(self, query):
+        matcher = self.matcher(query)
+        for title, help_text, callback in self.entries():
+            score = matcher.match(title)
+            if score > 0:
+                yield Hit(score, matcher.highlight(title), callback, help=help_text)

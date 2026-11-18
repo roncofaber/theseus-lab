@@ -5,6 +5,7 @@ import queue
 import threading
 
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
@@ -14,7 +15,7 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static, TabbedContent, TabPane
 
-from . import theme
+from . import commands, theme
 
 MIRROR_LINES = 200
 DIFF_SECONDS = 5.0
@@ -173,18 +174,22 @@ class Fold(Static, can_focus=True):
 
 
 def conversation_widget(entry):
-    """The widget of one conversation entry: user and assistant text in full, a tool call or result as a Fold."""
+    """The widget of one conversation entry: user and assistant text in full (Markdown when the entry says so), a tool
+    call (`Tool: summary`) or result (its summary line) as a Fold that unfolds to the entry's text."""
     text = entry.get("text") or ""
     if entry["kind"] == "history":
         return Static(Text.from_ansi(text.rstrip("\n")), classes="turn history")
     if entry["kind"] in ("user", "assistant"):
-        return Static(Text(text), classes=f"turn {entry['kind']}")
+        body = Markdown(text) if entry.get("format") == "markdown" else Text(text)
+        return Static(body, classes=f"turn {entry['kind']}")
     lines = text.splitlines() or [""]
+    summary = " ".join(str(entry.get("summary") or "").split())
     if entry["kind"] == "tool":
-        head = f"▸ {entry.get('name') or 'tool'}  {' '.join(text.split())}"
+        head = f"▸ {entry.get('name') or 'tool'}: {summary or ' '.join(text.split())}"
         style = "dim"
     else:
-        head = f"  ↳ {'error: ' if entry.get('error') else ''}{lines[0].strip()}" + (f"  ({len(lines)} lines)" if len(lines) > 1 else "")
+        head = (f"  ↳ {'error: ' if entry.get('error') else ''}{summary or lines[0].strip()}"
+                + (f"  ({len(lines)} lines)" if len(lines) > 1 else ""))
         style = "red" if entry.get("error") else "dim"
     return Fold(Text(head, style=style, no_wrap=True, overflow="ellipsis"), Text(text, style=style),
                 classes=f"fold {entry['kind']}")
@@ -219,17 +224,21 @@ class AgentScreen(Dialog):
     tmux pane) and optionally conversation(after) ((total, entries after the first `after`, reset) or None, entries
     already redacted, in the form of theseus.adapters plus a "history" kind for plain scrollback; None hides the
     tab), diff(), task(), events(),
-    attach() (a callable run while the app is suspended, None for panes it cannot attach), restart(), stop(),
+    attach() (a callable run while the app is suspended, None for panes it cannot attach), compact(), restart(), stop(),
     start() (None hides them; each asks first) and fit(columns, rows) (None for panes it must not resize), which sizes
     the agent's window to the mirror while it is shown, follows the mirror's size fit_seconds after it changes and on
     every poll, and fit(None, None) restores the pinned size on close. Everything but attach and that restore runs in
-    a worker thread."""
+    a worker thread. The buttons are Attach, Type, Interrupt and Close; the rest are keys and palette commands."""
+
+    COMMANDS = {commands.AgentCommands}
 
     BINDINGS = [Binding("escape", "close", "Close the popup"),
                 Binding("i", "type_through", "Type into the pane (Esc Esc or Ctrl-] leaves)"),
                 Binding("enter", "attach", "Attach to the pane here (C-q detaches)"),
-                Binding("o", "open_pane", "Open tmux pane"),
+                Binding("o", "open_pane", "Open the pane in a new window of your own tmux"),
                 Binding("s", "focus_send", "Type a line to send"),
+                Binding("E", "send_key('Escape')", "Send Escape to the pane"),
+                Binding("K", "compact", "Compact the agent's context (theseus instance compact)"),
                 Binding("R", "lifecycle('restart')", "Restart the agent (asks first)"),
                 Binding("X", "lifecycle('stop')", "Stop the agent (asks first)"),
                 Binding("U", "lifecycle('start')", "Start the agent (asks first)"),
@@ -299,19 +308,25 @@ class AgentScreen(Dialog):
                     yield ScrollableContainer(Static(Text("…", style="dim"), id=f"{name}-text"), classes="sheet")
 
     def buttons(self):
-        yield Button("Type into pane (i)", id="type", variant="warning", compact=True)
-        yield Button("Enter", id="key-enter", compact=True)
-        yield Button("Escape", id="key-escape", compact=True)
-        yield Button("Interrupt", id="interrupt", variant="error", compact=True)
-        if self.action_of("compact") is not None:
-            yield Button("Compact", id="compact", compact=True)
         if self.action_of("attach") is not None:
             yield Button("Attach (Enter)", id="attach", variant="primary", compact=True)
+        yield Button("Type (i)", id="type", variant="warning", compact=True)
+        yield Button("Interrupt", id="interrupt", variant="error", compact=True)
+
+    def palette(self):
+        """(title, help, callback) of the popup's commands that have no button, for the command palette."""
+        found = [("Send Enter", "press Enter in the pane", lambda: self.action_send_key("Enter")),
+                 ("Send Escape (E)", "press Escape in the pane", lambda: self.action_send_key("Escape"))]
+        if self.action_of("compact") is not None:
+            found.append(("Compact (K)", "theseus instance compact: the profile's compact command", self.action_compact))
         if self.actions.jump is not None:
-            yield Button("Open tmux pane (o)", id="open", variant="primary", compact=True)
-        for name, label in (("restart", "Restart (R)"), ("stop", "Stop (X)"), ("start", "Start (U)")):
+            found.append(("Open in my tmux (o)", "the pane in a new window of your own tmux", self.action_open_pane))
+        for name, key in (("restart", "R"), ("stop", "X"), ("start", "U")):
             if self.action_of(name) is not None:
-                yield Button(label, id=f"life-{name}", variant="error" if name == "stop" else "default", compact=True)
+                found.append((f"{name.capitalize()} ({key})", f"theseus agents {name}; asks first",
+                              lambda name=name: self.action_lifecycle(name)))
+        shown = self.heading.split(" ", 1)[-1]
+        return [(f"{shown}: {title}", help_text, callback) for title, help_text, callback in found]
 
     def on_mount(self):
         super().on_mount()
@@ -449,18 +464,6 @@ class AgentScreen(Dialog):
                 self.in_thread(function)
         self.app.push_screen(Confirm(self.QUESTIONS[name].format(name=self.heading.split(" ", 1)[-1])), answered)
 
-    @on(Button.Pressed, "#life-restart")
-    def restart_pressed(self):
-        self.action_lifecycle("restart")
-
-    @on(Button.Pressed, "#life-stop")
-    def stop_pressed(self):
-        self.action_lifecycle("stop")
-
-    @on(Button.Pressed, "#life-start")
-    def start_pressed(self):
-        self.action_lifecycle("start")
-
     def press(self, *keys):
         """Queue tmux keys for the pane; one worker sends them in order and ends when the queue is empty."""
         self.outbox.put(keys)
@@ -473,7 +476,9 @@ class AgentScreen(Dialog):
     def check_action(self, action, parameters):
         if action == "open_pane" and self.actions.jump is None:
             return False
-        if self.typing and action in ("attach", "lifecycle", "show_tab", "focus_send", "open_pane"):
+        if action == "compact" and self.action_of("compact") is None:
+            return False
+        if self.typing and action in ("attach", "lifecycle", "show_tab", "focus_send", "open_pane", "send_key", "compact"):
             return False
         return True
 
@@ -639,17 +644,12 @@ class AgentScreen(Dialog):
             event.input.value = ""
             self.in_thread(self.actions.send, text)
 
-    @on(Button.Pressed, "#key-enter")
-    def press_enter(self):
-        self.in_thread(self.actions.keys, "Enter")
+    def action_send_key(self, key):
+        self.in_thread(self.actions.keys, key)
 
-    @on(Button.Pressed, "#key-escape")
-    def press_escape(self):
-        self.in_thread(self.actions.keys, "Escape")
-
-    @on(Button.Pressed, "#compact")
-    def compact(self):
-        self.in_thread(self.actions.compact)
+    def action_compact(self):
+        if self.action_of("compact") is not None:
+            self.in_thread(self.actions.compact)
 
     @on(Button.Pressed, "#interrupt")
     def interrupt(self):
@@ -658,10 +658,6 @@ class AgentScreen(Dialog):
                 self.press("C-c")
         self.app.push_screen(Confirm(f"Interrupt {self.heading.split(' ', 1)[-1]} (Ctrl-C)?"),
                              answered)
-
-    @on(Button.Pressed, "#open")
-    def open_pressed(self):
-        self.action_open_pane()
 
     def action_open_pane(self):
         if self.actions.jump is not None:

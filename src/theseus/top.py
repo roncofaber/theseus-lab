@@ -411,7 +411,8 @@ def profile_facts(conf, states):
             profile = {}
         use = info.get("context") or {}
         info.update({"model": use.get("model") or profile.get("model") or None, "command": profile.get("command") or None,
-                     "pool": profile.get("pool") or None, "profile": profile_name})
+                     "pool": profile.get("pool") or None, "profile": profile_name,
+                     "capability": profiles.capability(conf, wq.registered_profile(conf, info))})
         if info.get("task"):
             if not tasks:
                 tasks = {x["id"]: x for x in t.Queue(conf).load().get("tasks", [])}

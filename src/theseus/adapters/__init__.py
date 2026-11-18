@@ -18,7 +18,10 @@ A state is a dict with:
 - last: "answer", "error" or None, for the newest assistant entry;
 - entries: the newest conversation entries, as {"kind", "text", "time", "n"}. kind is "user", "assistant", "tool"
   (with "name") or "result" (with "error"); n numbers the entries of the record from 1, so a reader asks only for
-  what is new; thinking is never included. The list is replaced, never changed in place;
+  what is new. Optional fields: "format": "markdown" for text written in Markdown, and "summary", one line standing
+  for the entry while it is folded (a tool call's key argument, such as the path it reads or the command it runs;
+  a result's first line), "text" then being what unfolds (the call's input, the whole result). Thinking and system
+  or meta entries are never included. The list is replaced, never changed in place;
 - total: how many entries were ever read;
 - key: names the record (a new key means a new session or a rewritten file, so a reader starts over).
 
