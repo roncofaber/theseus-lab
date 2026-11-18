@@ -1,11 +1,13 @@
-"""Long-running queue commands outliving a store upgrade: when `theseus queue run` or `queue wait` finds the host store
+"""Long-running queue commands outliving an upgrade: when `theseus queue run` or `queue wait` finds the host store
 migrated by a newer theseus, it becomes the installed `theseus` (same arguments) if that one knows the new schema, and
-otherwise waits for an upgrade instead of exiting."""
+otherwise waits for an upgrade instead of exiting. When the theseus code on disk changes under it, it restarts itself
+the same way it was started, so a release never runs beside logic still loaded from the old one."""
 import os
 import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 _told = set()
 
@@ -35,6 +37,23 @@ def schema_of(script):
     except (OSError, subprocess.TimeoutExpired):
         return None
     return int(result.stdout.strip()) if result.returncode == 0 and result.stdout.strip().isdigit() else None
+
+
+class CodeChanged(Exception):
+    """The theseus package on disk changed since this process loaded it."""
+
+
+def code_stamp():
+    """(file count, newest mtime) of the theseus package's Python sources, which any reinstall or edit changes."""
+    files = list(Path(__file__).resolve().parent.rglob("*.py"))
+    return len(files), max((f.stat().st_mtime_ns for f in files), default=0)
+
+
+def restart(argv, execv=None):
+    """Become a fresh process of the same entry point (`python -m theseus` or the console script) with argv."""
+    entry = ["-m", "theseus"] if Path(sys.argv[0]).name == "__main__.py" else [sys.argv[0]]
+    print("theseus: the installed theseus code changed; restarting with the same arguments", file=sys.stderr, flush=True)
+    (execv or os.execv)(sys.executable, [sys.executable, *entry, *argv])
 
 
 def newer_store(error, argv, interval=30, sleep=time.sleep, execv=os.execv):

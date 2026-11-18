@@ -1259,7 +1259,7 @@ def main(argv=None):
         sys.exit(run_script(SHELL_COMMANDS[argv[0]], argv[1:]))
     parser = build_parser()
     args = parser.parse_args(argv)
-    from . import store
+    from . import store, upgrade
     while True:
         try:
             args.func(args)
@@ -1269,6 +1269,9 @@ def main(argv=None):
                 sys.exit(f"theseus: {error}")
             from . import upgrade
             upgrade.newer_store(error, argv, interval=args.interval or 30)
+        except upgrade.CodeChanged:
+            upgrade.restart(argv)
+            return
         except store.StoreError as error:
             sys.exit(f"theseus: {error}")
 

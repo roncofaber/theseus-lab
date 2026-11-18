@@ -236,5 +236,20 @@ printf '%s\\n' "$*" > "{self.record}"
         self.assertIn("newer than", result.stderr)
 
 
+
+class CodeChangeTests(Sandbox):
+    def test_wait_restarts_itself_when_the_installed_code_changes(self):
+        from unittest import mock
+        from theseus import cli, upgrade
+        self.scaffold()
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(self.project)
+        argv = ["queue", "wait", "--interval", "1", "--timeout", "5"]
+        with mock.patch.object(upgrade, "code_stamp", side_effect=[(1, 1), (1, 2)]), \
+                mock.patch("os.execv") as execv, mock.patch("sys.argv", ["/bin/theseus"]):
+            cli.main(argv)
+        execv.assert_called_once()
+        self.assertEqual(["/bin/theseus", *argv], execv.call_args[0][1][1:])
+
 if __name__ == "__main__":
     unittest.main()
