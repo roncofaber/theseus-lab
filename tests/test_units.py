@@ -211,6 +211,23 @@ class TaskRuleTests(Sandbox):
         self.assertEqual([], rules.scratch_script_references(self.conf, files=[self.project / "AGENTS.md"]))
 
 
+class OwnershipPatternTests(unittest.TestCase):
+    def test_patterns_conflict_only_when_some_path_matches_both(self):
+        pairs = [("scripts/**/Tests/**", "scripts/Loot/Pickup/X.cs", False),
+                 ("scripts/**/Tests/**", "scripts/A/B/Tests/x.cs", True),
+                 ("scripts/**/Tests/**", "scripts/Tests/x.cs", True),
+                 ("src/", "src/x.py", True), ("src", "src/x.py", True), ("src/x.py", "src/y.py", False),
+                 ("src/*.cs", "src/a/b.cs", False), ("src/*.cs", "src/a.cs", True),
+                 ("src/a*", "src/*b", True), ("src/a*", "src/b*", False),
+                 ("docs/investigations/a.md", "docs/investigations/ab.md", False),
+                 ("src/**/x.py", "src/a/**/y.py", False), ("src/**/x.py", "src/a/**", True),
+                 ("a/*/c", "a/b/*", True), ("a/*/c", "a/b/d/c", False), ("src/**", "src", True)]
+        for a, b, expected in pairs:
+            with self.subTest(a=a, b=b):
+                self.assertEqual(expected, t.patterns_intersect(a, b))
+                self.assertEqual(expected, t.patterns_intersect(b, a))
+
+
 class RepointTests(Sandbox):
     def test_links_to_archived_reports_are_repointed_everywhere(self):
         from theseus import integrate

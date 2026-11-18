@@ -10,6 +10,7 @@ merged, observed at runtime and user-tested are different claims.
 import contextlib
 import contextvars
 import datetime
+import functools
 import hashlib
 import json
 import os
@@ -85,6 +86,16 @@ def acting(principal):
         yield principal
     finally:
         ACTING.reset(token)
+
+
+def refreshes_inbox(function):
+    """After a change to an in-progress task (function(queue, task_id, ...)), rewrite its worker's copy."""
+    @functools.wraps(function)
+    def wrapper(queue, task_id, *args, **kwargs):
+        result = function(queue, task_id, *args, **kwargs)
+        write_inbox(queue, task_id)
+        return result
+    return wrapper
 
 
 class Queue:
@@ -280,6 +291,7 @@ def assign(queue, task_id, owner, provider, model, worktree, base, log_dir, forc
                       capacity=provider_capacity(queue.conf, provider),
                       reach=merge_reach(queue.conf, base) if base != "uncommitted" else None)
     svc.activate(principal, claim["attempt"], worktree=worktree, base=base, log_dir=log_dir)
+    write_inbox(queue, task_id)
     return f"{task_id} -> in_progress ({owner})"
 
 
@@ -334,6 +346,7 @@ def deliver(queue, task_id, handoff, principal=None):
     return f"{task_id} -> verification; the worker slot is free, dependents wait for the merge"
 
 
+@refreshes_inbox
 def reopen(queue, task_id, reason):
     """Undo a premature delivery: verification back to in_progress, keeping the note in previousAttempts."""
     task = queue.get(task_id)
@@ -373,6 +386,7 @@ def set_aside_handoff(task):
     return str(aside)
 
 
+@refreshes_inbox
 def unmerge(queue, task_id, reason, revert_commit=None):
     """Merged back to in_progress after the merge was reverted; owner and worktree stay for a redelivery."""
     task = queue.get(task_id)
@@ -384,6 +398,7 @@ def unmerge(queue, task_id, reason, revert_commit=None):
             + kept_worktree(queue, task_id, task.get("worktree")))
 
 
+@refreshes_inbox
 def rebase(queue, task_id, base):
     """Record a new base after the worker moved its worktree HEAD along the base branch."""
     rebased = queue.service.rebase(acting_principal(None), task_id, base)
@@ -510,13 +525,47 @@ def owned_pattern(pattern):
 
 
 def ownership_overlaps(first, second):
-    """True when any owned pattern of one task could match a path owned by the other."""
-    for a in first:
-        for b in second:
-            stem_a, stem_b = a.split("*")[0], b.split("*")[0]
-            if stem_a.startswith(stem_b) or stem_b.startswith(stem_a):
-                return True
-    return False
+    """True when some path is owned by a pattern of each task (patterns_intersect)."""
+    return any(patterns_intersect(a, b) for a in first for b in second)
+
+
+def pattern_segments(pattern):
+    """An owned pattern as path segments. A trailing slash, or a directory name without wildcards, also owns
+    everything below (a final `**`); a wildcard-free last segment with a dot is taken for a file."""
+    segments = tuple(part for part in pattern.split("/") if part)
+    if pattern.endswith("/") or ("*" not in pattern and "." not in (segments[-1] if segments else "")):
+        segments += ("**",)
+    return segments
+
+
+def patterns_intersect(a, b):
+    """True when some path matches both owned patterns: compared segment by segment, `**` standing for any number of
+    segments and `*` for any text within one."""
+    return segments_meet(pattern_segments(a), pattern_segments(b))
+
+
+@functools.lru_cache(maxsize=65536)
+def segments_meet(a, b):
+    if not a or not b:
+        rest = a or b
+        return all(part == "**" for part in rest)
+    if a[0] == "**":
+        return segments_meet(a[1:], b) or segments_meet(a, b[1:])
+    if b[0] == "**":
+        return segments_meet(a, b[1:]) or segments_meet(a[1:], b)
+    return segment_meets(a[0], b[0]) and segments_meet(a[1:], b[1:])
+
+
+@functools.lru_cache(maxsize=65536)
+def segment_meets(a, b):
+    """True when some segment text matches both globs (only `*` is special within a segment)."""
+    if not a or not b:
+        return set(a or b) <= {"*"}
+    if a[0] == "*":
+        return segment_meets(a[1:], b) or segment_meets(a, b[1:])
+    if b[0] == "*":
+        return segment_meets(a, b[1:]) or segment_meets(a[1:], b)
+    return a[0] == b[0] and segment_meets(a[1:], b[1:])
 
 
 def is_owned(path, patterns):
@@ -695,30 +744,35 @@ def import_(queue, replace=False, new_id=False):
     return "\n".join(lines + [f"warning: {warning}" for warning in report["warnings"]])
 
 
+@refreshes_inbox
 def note(queue, task_id, text):
     """Set the coordinator's assignment note, which task messages and prompts carry to the worker."""
     queue.service.note(acting_principal(None), task_id, text)
     return f"{task_id}: note set"
 
 
+@refreshes_inbox
 def edit(queue, task_id, changes, force=False):
     edited = queue.service.edit(acting_principal(None), task_id, changes, force=force)
     lines = [f"{task_id}: edited ({', '.join(sorted(changes))}), revision {edited['rev']}"]
     return "\n".join(lines + [f"warning: {warning}" for warning in edited["warnings"]])
 
 
+@refreshes_inbox
 def set_priority(queue, task_id, priority):
     """Higher priority is assigned first among ready tasks; equal priorities keep task-file order."""
     queue.service.edit(acting_principal(None), task_id, {"priority": int(priority)}, force=True)
     return f"{task_id}: priority {int(priority)}"
 
 
+@refreshes_inbox
 def set_profile(queue, task_id, profile):
     """The agent profile a task needs (only its agents, or ones the queue can relaunch onto it, take it); empty: any."""
     queue.service.edit(acting_principal(None), task_id, {"profile": profile or None}, force=True)
     return f"{task_id}: {f'needs profile {profile}' if profile else 'any profile'}"
 
 
+@refreshes_inbox
 def set_min_capability(queue, task_id, level):
     """The lowest profile capability an agent needs to take the task ([workers.<name>] capability); 0 removes it."""
     level = int(level)
@@ -760,6 +814,67 @@ def render_prompt(queue, task_id, base, worktree, log_dir):
     for key, value in replacements.items():
         template = template.replace(key, value)
     return template
+
+
+def task_prompt(queue, task):
+    """What a worker reads to start: the standing brief to follow and the task rendered from the worker prompt
+    template (the record alone when a project has no template)."""
+    execution = task.get("execution") or {}
+    worktree, log_dir = task.get("worktree") or "", execution.get("logDir") or ""
+    try:
+        body = render_prompt(queue, task["id"], task.get("baseCommit") or "", worktree, log_dir)
+    except OSError:
+        body = json.dumps(task, indent=2, ensure_ascii=False)
+    brief = queue.conf.section("instances").get("brief")
+    return (f"Read and follow {queue.root / brief} first.\n\n" if brief else "") + body
+
+
+INBOX = "task.json"
+OUTBOX = "outbox"
+
+
+def write_inbox(queue, task_id):
+    """Copy an in-progress task (record, notes, rendered prompt) into its log directory as task.json, which the worker
+    reads when it cannot open the host store. Returns the path, or None for a task with no live log directory."""
+    shown = queue.service.get(acting_principal(), task_id)
+    task = shown["task"]
+    log_dir = (task.get("execution") or {}).get("logDir")
+    if task["status"] != "in_progress" or not log_dir or not Path(log_dir).is_dir():
+        return None
+    copy = {"task": task, "notes": shown["notes"], "prompt": task_prompt(queue, task), "written": now()}
+    target = Path(log_dir) / INBOX
+    try:
+        cfg.write_atomic(target, json.dumps(copy, indent=2, ensure_ascii=False) + "\n")
+    except OSError:
+        return None
+    return target
+
+
+def find_inbox(start, task_id):
+    """The task.json copy of task_id in the worktree holding start (its .theseus/, or .theseus/TASK/ for in-place
+    work), or None."""
+    start = Path(start).resolve()
+    for directory in (start, *start.parents):
+        for candidate in (directory / cfg.WORKER_LOG / INBOX, directory / cfg.WORKER_LOG / task_id / INBOX):
+            if candidate.is_file():
+                try:
+                    copy = json.loads(candidate.read_text())
+                except (OSError, ValueError):
+                    continue
+                if (copy.get("task") or {}).get("id") == task_id:
+                    return candidate
+    return None
+
+
+def write_outbox(inbox, entry):
+    """Leave a report the worker could not write to the store (the store is not writable from its sandbox) next to
+    its task copy; the queue takes it in on its next tick."""
+    outbox = Path(inbox).parent / OUTBOX
+    outbox.mkdir(exist_ok=True)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    target = outbox / f"{stamp}-{entry['kind']}.json"
+    cfg.write_atomic(target, json.dumps({**entry, "written": now()}, ensure_ascii=False) + "\n")
+    return target
 
 
 def fail(error):

@@ -103,6 +103,7 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
         created = True
         rooms.exclude_dirty(conf, task, worktree)
         queue.service.activate(principal, claim["attempt"], worktree=worktree, base=base[:12], log_dir=log_dir)
+        t.write_inbox(queue, task_id)
     except Exception as error:
         if created:
             integrate.remove_worktree(conf, worktree, name)
@@ -112,6 +113,14 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
               "worktree": str(worktree), "session": session, "resume": resume, "env": extra_env,
               "started": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     if not launch:
+        from . import taskservice
+        credentials = record_dir / "credentials"
+        taskservice.grant(taskservice.QUEUE, worker_id, worker_id, credentials)
+        with open(record_dir / "prompt.md", "a") as handle:
+            handle.write(f"\nYour task commands need your credentials: read the record with `THESEUS_CREDENTIALS="
+                         f"{credentials} theseus task show {task_id}`, and when the handoff is written, report with "
+                         f"`THESEUS_CREDENTIALS={credentials} theseus task done {task_id} --handoff "
+                         f"{log_dir / 'handoff.md'}`. Never print the credentials file.\n")
         (record_dir / "launch.json").write_text(json.dumps(record) + "\n")
         lines += [f"prepared {task_id} in {worktree}. Launch a subagent{f' (model {model})' if model else ''} whose prompt says: "
                   f"read and follow {record_dir / 'prompt.md'}",

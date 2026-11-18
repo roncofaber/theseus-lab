@@ -155,6 +155,34 @@ class QueueTests(Sandbox):
         self.assertLess(typed.index("/compact"), typed.index("New task second-task"), "reset before the next task")
         self.assertEqual("in_progress", json.loads(self.theseus("tasks", "show", "second-task").stdout)["status"])
 
+    def test_a_sandboxed_worker_reads_its_task_copy_and_reports_through_its_outbox(self):
+        from pathlib import Path
+        from theseus import taskservice
+        self.add("first-task")
+        self.theseus("queue", "tick")
+        record = json.loads(self.theseus("tasks", "show", "first-task").stdout)
+        inbox = Path(record["execution"]["logDir"]) / "task.json"
+        self.assertIn("Owned paths, exclusively", json.loads(inbox.read_text())["prompt"])
+        self.theseus("tasks", "note", "first-task", "Use the v2 header.")
+        self.assertIn("Use the v2 header.", inbox.read_text(), "a change rewrites the copy")
+        self.write(f"{record['worktree']}/.theseus/handoff.md", "Task: first-task\nResult: partial\n", root=self.tmp)
+        worker = {**self.env, **taskservice.grant(taskservice.QUEUE, record["ownerId"], record["ownerId"],
+                                                  self.tmp / "credentials")}
+        run = lambda *args: self.theseus(*args, cwd=record["worktree"], env=worker)
+        host = self.tmp / "host"
+        self.addCleanup(os.chmod, host, 0o755)
+        os.chmod(host, 0o555)
+        shown = json.loads(run("task", "show", "first-task", "--json").stdout)
+        self.assertEqual((True, str(inbox)), (shown["ok"], shown["data"]["source"]))
+        self.assertIn("for the queue's next tick", run("task", "note", "first-task", "Halfway there.").stdout)
+        self.assertIn("for the queue's next tick", run("task", "done", "first-task").stdout)
+        os.chmod(host, 0o755)
+        self.theseus("queue", "tick")
+        record = json.loads(self.theseus("tasks", "show", "first-task").stdout)
+        self.assertEqual("verification", record["status"])
+        self.assertEqual(2, len(list((inbox.parent / "outbox/applied").iterdir())))
+        self.assertIn("Halfway there.", self.theseus("tasks", "show", "first-task", "--history").stdout)
+
     def test_a_running_task_s_patches_hold_a_task_that_owns_their_target(self):
         self.add("first-task")
         self.theseus("queue", "tick")

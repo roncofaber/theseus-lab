@@ -412,6 +412,7 @@ def assign(conf, task_id, name, provider, model, owner=None, commit=True, instan
             remove_worktree(conf, worktree, name)
         abandon_quietly(queue, principal, claim["attempt"], f"assignment failed: {error}")
         raise
+    t.write_inbox(queue, task_id)
     message = f"{task_id} -> in_progress ({owner})"
     if aside:
         message += f"; the previous attempt's worktree moved to {aside}"

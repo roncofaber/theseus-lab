@@ -83,7 +83,7 @@ class Repo(Protocol):
                  agent_id: str | None, source: str) -> None: ...
     def add_credential(self, agent_id: str, run_id: str, secret_hash: str) -> None: ...
     def credential_hashes(self, agent_id: str) -> list[str]: ...
-    def hand_made_agent(self, pane: str) -> str | None: ...
+    def hand_made_agent(self, pane: str) -> dict | None: ...
     def revoke_credential(self, agent_id: str, run_id: str) -> bool: ...
 
 
@@ -325,9 +325,10 @@ class SqliteRepo:
                                                          AND a.phase IN ('claimed', 'active'))))""", (agent_id,))]
 
     def hand_made_agent(self, pane):
-        """The name of a registered agent the user launched by hand (not supervised) in pane, or None."""
+        """The registered agent the user launched by hand (not supervised) in pane, as {project, name, pane_pid}, or
+        None."""
         found = [a for a in store.list_agents(self.conn) if a["pane"] == pane and not a["managed"]]
-        return f"{found[0]['project']}/{found[0]['name']}" if found else None
+        return {key: found[0].get(key) for key in ("project", "name", "pane_pid")} if found else None
 
     def revoke_credential(self, agent_id, run_id):
         return self.conn.execute("""UPDATE agent_credentials SET revoked = ? WHERE agent_id = ? AND run_id = ?

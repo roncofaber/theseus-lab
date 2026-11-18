@@ -907,7 +907,9 @@ class TaskService:
         allow(p, "coordinator", "worker", "queue")
         if result not in (None, "delivered", "partial", "blocked"):
             raise TaskError("invalid", f"unknown result {result}")
-        source = "command" if p.role == "worker" else (source or "detected")
+        if p.role == "worker":
+            source = "outbox" if p.via == "outbox" else "command"
+        source = source or "detected"
         with self.unit() as (repo, project):
             task, attempts = self.load(repo, project, task_id)
             current = rec.current_attempt(attempts)
@@ -1258,16 +1260,30 @@ def identify(env, cwd, via, opener, readonly):
     if env.get("TMUX_PANE"):
         with facts(opener, readonly) as repo:
             agent = repo.hand_made_agent(env["TMUX_PANE"]) if repo else None
-        if agent:
-            raise TaskError("unauthenticated", f"this pane ({env['TMUX_PANE']}) is the registered agent {agent}; an agent "
-                                               f"is never the coordinator (if that registration is stale, after a tmux "
-                                               f"restart reused the pane id, remove it with `theseus agents remove "
-                                               f"{agent.split('/', 1)[1]}`)")
+        if agent and (not agent["pane_pid"] or agent["pane_pid"] in ancestors()):
+            raise TaskError("unauthenticated", f"this pane ({env['TMUX_PANE']}) is the registered agent "
+                                               f"{agent['project']}/{agent['name']}; an agent is never the coordinator "
+                                               f"(if that registration is stale, remove it with `theseus agents remove "
+                                               f"{agent['name']}`)")
     worktree = task_worktree(cwd, opener, readonly)
     if worktree:
         raise TaskError("unauthenticated", f"{cwd} is inside the task worktree {worktree}; the coordinator works from "
                                            f"the main checkout")
     return Principal("coordinator", via=via)
+
+
+def ancestors(pid=None):
+    """This process and its ancestors' pids (from /proc): a registered pane's process is among them only while the
+    caller really runs in that pane, not in a later one that tmux gave the same id."""
+    pid, found = pid or os.getpid(), set()
+    while pid and pid not in found:
+        found.add(pid)
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+        except OSError:
+            break
+        pid = int(stat[stat.rfind(")") + 2:].split()[1])
+    return found
 
 
 def task_worktree(cwd, opener=taskrepo.opened, readonly=False):

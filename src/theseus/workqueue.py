@@ -306,6 +306,54 @@ def release_for_fallback(conf, agent, task_id, profile, fallback):
     return events(conf, after_id=start)
 
 
+def ingest_outboxes(conf):
+    """Take in the reports workers left in their outbox (`theseus task note|done|blocked` from a sandbox that cannot
+    write the store), in order, as the worker of each in-progress task; each file moves to outbox/applied or, when
+    refused, outbox/rejected. Returns the events recorded."""
+    from . import taskservice
+    queue = t.Queue(conf)
+    start = last_event_id(conf)
+    for task in queue.load()["tasks"]:
+        log_dir = (task.get("execution") or {}).get("logDir")
+        outbox = Path(log_dir) / t.OUTBOX if log_dir else None
+        if task["status"] != "in_progress" or outbox is None or not outbox.is_dir():
+            continue
+        worker = taskservice.Principal("worker", task.get("ownerId"), via="outbox")
+        for entry_path in sorted(outbox.glob("*.json")):
+            try:
+                entry = json.loads(entry_path.read_text())
+                if entry.get("task") != task["id"] or entry.get("agent_id") not in (None, task.get("ownerId")):
+                    raise t.TaskError(f"the entry names {entry.get('task')} / agent {entry.get('agent_id')}, not this "
+                                      f"attempt")
+                apply_outbox_entry(queue, worker, task, entry)
+                verdict = "applied"
+            except (ValueError, OSError, t.TaskError) as error:
+                verdict = "rejected"
+                event(conf, "error", t.agent_of(task), task["id"], f"outbox {entry_path.name} rejected: {error}")
+            (outbox / verdict).mkdir(exist_ok=True)
+            os.replace(entry_path, outbox / verdict / entry_path.name)
+    return events(conf, after_id=start)
+
+
+def apply_outbox_entry(queue, worker, task, entry):
+    svc = queue.service
+    if entry["kind"] == "note":
+        svc.note(worker, task["id"], entry["text"], question=bool(entry.get("question")))
+        return
+    handoff = Path(entry["handoff"]) if entry.get("handoff") else None
+    text = handoff.read_text(errors="replace") if handoff and handoff.is_file() else None
+    if entry["kind"] == "blocked":
+        svc.blocked(worker, task["id"], entry.get("reason") or "blocked", handoff_path=entry.get("handoff"),
+                    handoff_text=text)
+    elif entry["kind"] == "done":
+        if text is None:
+            raise t.TaskError(f"no handoff at {handoff}")
+        svc.deliver(worker, task["id"], handoff_path=str(handoff), result=t.handoff_result(handoff), handoff_text=text,
+                    observed_touches=t.patch_targets(task["worktree"]) if task.get("worktree") else ())
+    else:
+        raise t.TaskError(f"unknown outbox entry kind {entry['kind']}")
+
+
 def scan_touches(conf):
     """Read each in-progress task's .theseus/patches/ (read-only) and record the files they touch, so a conflicting
     task waits before the delivery rather than after."""
@@ -407,6 +455,7 @@ def tick(conf, assign=True):
             active = health.fallbacks()
             recorded.extend(supervise(conf))
             t.Queue(conf).service.abandon_orphans(queue_principal())
+            recorded.extend(ingest_outboxes(conf))
             scan_touches(conf)
             registered = ag.agents(conf)
             recorded.extend(resume_sends(conf, registered, sends))

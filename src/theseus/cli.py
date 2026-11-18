@@ -287,17 +287,54 @@ def cmd_tasks(args):
 
 
 def cmd_task(args):
-    """A worker's own task, named by the worker (the stale-context check): the coordinator may act for a subagent of
-    its own session."""
+    """A worker's own task, named by the worker (the stale-context check); the coordinator may act for a subagent of
+    its own session. When the host store cannot be read (show) or written (note, done, blocked), the worker uses its
+    task copy and outbox in its log directory instead."""
     from . import tasks as t, taskservice
     action = args.task_command
     conf = load(record=action != "show")
+    try:
+        task_command(conf, args)
+    except Exception as error:
+        if not store_out_of_reach(error):
+            raise
+        inbox = t.find_inbox(Path.cwd(), args.id)
+        if inbox is None:
+            raise taskservice.TaskError("unreadable", f"{error}; and no copy of {args.id} (.theseus/task.json) is in "
+                                                      f"this worktree") from error
+        if action == "show":
+            copy = json.loads(inbox.read_text())
+            data = copy["task"].get(args.field) if args.field else {**copy, "source": str(inbox)}
+            print(json.dumps(data, indent=2, ensure_ascii=False))
+            return
+        entry = {"kind": action, "task": args.id, "agent_id": os.environ.get("THESEUS_AGENT_ID")}
+        if action == "note":
+            entry.update(text=args.text, question=args.question)
+        else:
+            handoff = Path(args.handoff).resolve() if args.handoff else None
+            entry.update(handoff=str(handoff) if handoff else None, reason=getattr(args, "reason", None))
+        print(f"the host store is out of reach; left {action} in {t.write_outbox(inbox, entry)} for the queue's next tick")
+
+
+def store_out_of_reach(error):
+    import sqlite3
+    from . import store, taskservice
+    if isinstance(error, taskservice.TaskError):
+        return error.code == "unreadable"
+    return isinstance(error, (sqlite3.OperationalError, store.StoreError)) and not isinstance(error, store.SchemaTooNew)
+
+
+def task_command(conf, args):
+    from . import tasks as t, taskservice
+    action = args.task_command
     principal = taskservice.principal(via="cli", readonly=action == "show")
-    svc = taskservice.open(conf)
+    queue = t.Queue(conf)
+    svc = queue.service
     if action == "show":
         shown = svc.show(principal, args.id)
         data = shown["task"].get(args.field) if args.field else {
-            "task": shown["task"], "notes": shown["notes"], "attempt": shown["attempt"]}
+            "task": shown["task"], "notes": shown["notes"], "attempt": shown["attempt"],
+            "prompt": t.task_prompt(queue, shown["task"])}
         print(json.dumps(data, indent=2, ensure_ascii=False))
     elif action == "note":
         noted = svc.note(principal, args.id, args.text, question=args.question,
@@ -750,9 +787,12 @@ def cmd_agents(args):
             for name, mark, text in profiles.describe(conf):
                 print(f"{name:<16} {mark:<8} {text}")
         else:
+            stale = {a["name"] for a in agents.agents(conf) if agents.stale_pane(a)}
             for info in agents.states(conf):
+                marks = ["tainted:" + info["tainted"]] if info.get("tainted") else []
+                marks += ["stale pane (re-add the agent)"] if info["name"] in stale else []
                 print(f"{info['name']:<20} {info['pane']:<6} {info['state']:<10} {info.get('task') or '-':<36} "
-                      f"{'tainted:' + info['tainted'] if info.get('tainted') else ''}")
+                      f"{' '.join(marks)}".rstrip())
     except agents.AgentError as error:
         sys.exit(f"theseus: {error}")
 

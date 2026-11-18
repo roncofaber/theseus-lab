@@ -5,6 +5,7 @@ import multiprocessing
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -287,7 +288,8 @@ class MigrationTests(TaskStoreCase):
             self.assertEqual(2, len({p["id"] for p in projects.values()} - {None}))
             after = self.dump(conn)
             self.assertNotIn("task_index", after)
-            new_columns = {"projects": {name for name, _ in store.PROJECT_TASK_COLUMNS}, "deliveries": {"source"}}
+            new_columns = {"projects": {name for name, _ in store.PROJECT_TASK_COLUMNS}, "deliveries": {"source"},
+                           "agents": {"pane_pid"}}
             for table, rows in before.items():
                 if table == "task_index":
                     continue
@@ -387,6 +389,13 @@ class AuthorizationTests(TaskStoreCase):
             store.upsert_agent(conn, "demo", "by-hand", pane="%7")
         self.assertEqual("unauthenticated", self.code(ts.principal, {"TMUX_PANE": "%7"}, self.tmp))
         self.assertEqual("coordinator", ts.principal({"TMUX_PANE": "%8"}, self.tmp).role)
+        with store.opened() as conn:
+            store.update_agent(conn, "demo", "by-hand", pane_pid=999999999)
+        self.assertEqual("coordinator", ts.principal({"TMUX_PANE": "%7"}, self.tmp).role,
+                         "a pane id tmux reused for another process is a stale registration")
+        with store.opened() as conn:
+            store.update_agent(conn, "demo", "by-hand", pane_pid=os.getpid())
+        self.assertEqual("unauthenticated", self.code(ts.principal, {"TMUX_PANE": "%7"}, self.tmp))
         ts.revoke_credentials(COORDINATOR, "agent-a", "agent-a")
         self.assertEqual("unauthenticated", self.code(ts.principal, {"THESEUS_CREDENTIALS": str(path)}, self.tmp))
         forged = self.tmp / "forged.json"
@@ -400,8 +409,10 @@ class AuthorizationTests(TaskStoreCase):
         path = self.credentials(agent_id, str(run["id"]))
         self.assertEqual(agent_id, ts.principal({"THESEUS_CREDENTIALS": str(path)}, self.tmp).agent_id)
         with store.opened() as conn:
-            store.close_run(conn, run["id"], "exited")
+            store.close_run(conn, run["id"], "exited", at=time.time() - 31 * 86400)
         self.assertEqual("unauthenticated", self.code(ts.principal, {"THESEUS_CREDENTIALS": str(path)}, self.tmp))
+        with store.opened() as conn:
+            self.assertEqual(1, store.trim(conn)["agent_credentials"], "credentials of a run ended 31 days ago go")
 
     def test_a_worker_acts_only_on_its_own_active_task(self):
         worker = ts.principal({"THESEUS_CREDENTIALS": str(self.credentials("agent-a", "agent-a"))}, self.tmp)

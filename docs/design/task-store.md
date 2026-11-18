@@ -298,6 +298,19 @@ Decisions on the phase 2 notes (coordinator review, 2026-11-18):
 - The listing order of `tasks list --all` and the `edit --force` aliases are fine; the CHANGELOG notes them.
 - Read commands open the store read-only (`mode=ro`) and never create files in the data directory. A worker that can read but not write that directory either reads its task or gets a clear message.
 
+Decisions on the phase 3 and 4 notes (coordinator review, 2026-11-18):
+
+- Sandboxed workers get a worktree inbox and outbox, so no worker ever needs store access, and the same files are a natural phase 2 transport:
+  - At activation and on every change, theseus writes a read copy of the task (the record and the rendered prompt) to the attempt's log directory, `.theseus/task.json`, which git ignores.
+  - `task show` falls back to that copy when the store cannot be opened.
+  - `task done` and `task note` fall back to writing `.theseus/outbox/*.json` when the store is not writable, and each tick takes in the outbox, level-triggered like the handoff fallback.
+- Ownership overlap is a real pattern intersection: two patterns conflict only when some path matches both. The comparison goes segment by segment, with `*` inside a segment and `**` across segments, so `scripts/**/Tests/**` does not conflict with `scripts/Loot/Pickup/X.cs`.
+- Holds stay in force while the other task is in verification.
+- Subagent workers: dispatch writes credentials for `claude-subagent` workers too, and their prompt tells them to run `THESEUS_CREDENTIALS=<path> theseus task ...`. The worktree rule accepts valid credentials.
+- Stale panes: registration records the pane's `pane_pid`. The pane rule applies only while that process is still the live pane (the caller descends from it). Otherwise the registration is stale, denies nothing, and `agents ls` marks it.
+- `task show` includes the rendered prompt (the brief and the record): since the pointer line no longer types it, this is where the worker gets it.
+- `agent_credentials` rows of runs that ended more than 30 days ago are trimmed with the rest of the store.
+
 ## 17. Phase 0 findings (2026-11-18)
 
 ### MCP Python SDK
@@ -441,3 +454,20 @@ Phase 4 adds soft ownership. A task's conflict set is its owned patterns plus it
 - Holds are computed (`taskservice.conflict`, `holds`), never stored. They appear in `ready()`, in `claim()` (a forced claim records them as bypassed), in `blocking()` through its new `holds` argument, and so in `tasks list`, `queue status` and `dispatch`'s refusal. The console's WAITING column shows `touches FILE (TASK)` or `owns PATTERN (TASK)`.
 - Observed touches come from three places: `task done`, a detected delivery (the patch targets under the worktree's `.theseus/patches/`), and every tick's read-only scan of each in-progress worktree (`set_observed`; Q6). They are dropped when the task is merged, released, reopened or completed.
 - `add` and `edit` warn about each conflict with a running task, and accept the task anyway: a follow-up for the same files is legitimate, and the hold keeps it from running alongside.
+
+## 22. Phase 4 review implementation notes
+
+- Task copy and outbox:
+  - `task.json` sits in the attempt's log directory (`<worktree>/.theseus/`, or `.theseus/TASK/` for in-place work). It holds the record, the notes, the rendered prompt and when it was written.
+  - It is written at activation (instance assign, the queue, dispatch, `tasks assign`) and after every change to an in-progress task: edit, note, the priority, profile and capability aliases, rebase, reopen and unmerge.
+  - `task show` falls back to it when the store cannot be read. `task note`, `done` and `blocked` fall back to `outbox/<time>-<kind>.json` when the store cannot be written; a refusal such as `not-your-task` is never turned into an outbox entry.
+  - Each tick takes in every in-progress task's outbox, in order, as that attempt's worker (`via=outbox`, delivery source `outbox`). An entry naming another task or agent is refused. Entries move to `outbox/applied/` or `outbox/rejected/`.
+  - Like the handoff fallback, the outbox trusts its location: an entry counts because it sits in the attempt's own log directory. The secret never leaves the credentials file.
+- Ownership overlap is now `patterns_intersect`: segment by segment, `**` for any number of segments and `*` within a segment. A trailing slash, or a last segment without wildcards and without a dot, owns everything below; a last segment with a dot and no wildcards is taken for a file.
+  - On opendS2's 3396 owned paths (918 with wildcards), `holds()` on the live queue takes 2 ms, and checking every open task against all 1111 records about 0.5 s. That check finds 781 overlapping pairs, against 949 for the old stem comparison.
+  - The live queue has one hold, a real overlap: `split-interpreted-component-executor` owns `scripts/Campaign/Components`, which holds files of the running `wire-act3-valdis-final-encounter`. It also waits on that task as a dependency.
+  - `add` and `edit` refuse an owned pattern that starts with a wildcard.
+- Subagent dispatch writes `<data>/workers/NAME/credentials` too, and appends to its prompt how to run `THESEUS_CREDENTIALS=<path> theseus task ...`.
+- Stale panes: `agents add` records the pane's process id (`agents.pane_pid`, added by v7). The pane rule denies only while that process is an ancestor of the caller (read from `/proc`), or when no pid was recorded. `theseus agents` marks a registration whose pane now runs another process.
+- `task show` includes `prompt`: the brief to follow and the worker prompt template rendered for the task.
+- Retention: `[store.retention] credentials_days` (30) trims credentials of runs that ended before the cutoff, revoked ones, and dispatch credentials with no active attempt.

@@ -106,6 +106,7 @@ def add(conf, name, pane, provider=None, rooms=None):
             store.upsert_agent(conn, conf.name, name, pane=pane,
                                profile=provider or conf.section("workers").get("default", "claude-code"),
                                rooms=list(rooms) if rooms else None, registered=now())
+            store.update_agent(conn, conf.name, name, pane_pid=pane_pid(pane))
             store.set_meta(conn, marker(conf), now())
     return f"registered {name} on pane {pane}"
 
@@ -204,6 +205,20 @@ def context_use(conf, profile, transcript, hint):
     if hint:
         return {"tokens": hint, "limit": limit, "model": None, "source": "pane hint"}
     return None
+
+
+def pane_pid(pane, server=None):
+    """The pid of the process a pane runs (its shell or agent), or None when the pane does not exist."""
+    server, pane = where(pane, server)
+    value = (server.display(pane, "#{pane_pid}") if not server.is_legacy else
+             tmux("display", "-p", "-t", pane, "#{pane_pid}").stdout).strip()
+    return int(value) if value.isdigit() else None
+
+
+def stale_pane(agent):
+    """True when a hand-made agent's pane id now names another process than the one registered (tmux reuses ids)."""
+    recorded = agent.get("pane_pid")
+    return bool(recorded) and not agent.get("managed") and pane_pid(agent["pane"]) != recorded
 
 
 def pane_alive(pane, server=None):

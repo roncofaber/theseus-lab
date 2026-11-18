@@ -25,7 +25,7 @@ CLAIM_TTL = 15 * 60
 LEASE_TTL = 30 * 60
 DAY = 24 * 3600
 DEFAULTS = {"retention": {"samples_days": 14, "events_days": 365, "deliveries_days": 365, "runs_days": 90,
-                          "gateway_days": 7},
+                          "gateway_days": 7, "credentials_days": 30},
             "backups": {"directory": "", "daily": 7, "weekly": 4}}
 
 
@@ -365,6 +365,7 @@ def add_task_tables(conn):
     # A foreign key's parent needs a full (not partial) unique index; NULL ids stay distinct under it.
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS projects_id ON projects(id)")
     add_columns(conn, "deliveries", [("source", "TEXT")])
+    add_columns(conn, "agents", [("pane_pid", "INTEGER")])
     conn.execute("DROP TABLE IF EXISTS task_index")
     for statement in TASK_TABLES:
         conn.execute(statement)
@@ -704,7 +705,7 @@ def set_enabled(conn, project, name, enabled):
 
 
 AGENT_FIELDS = ("pane", "profile", "rooms", "enabled", "managed", "server", "target", "session_id", "slot", "desired",
-                "phase", "phase_epoch")
+                "phase", "phase_epoch", "pane_pid")
 
 
 def update_agent(conn, project, name, **fields):
@@ -1431,6 +1432,16 @@ def trim(conn, now=None):
         for table, key, statement in statements:
             limit = cutoff(key)
             removed[table] = conn.execute(statement, (limit,)).rowcount if limit is not None else 0
+        limit = cutoff("credentials_days")
+        # Credentials of runs that ended (or dispatch workers whose attempt did) before the cutoff, or revoked then.
+        removed["agent_credentials"] = conn.execute("""DELETE FROM agent_credentials WHERE
+            EXISTS (SELECT 1 FROM agent_runs r WHERE CAST(r.id AS TEXT) = agent_credentials.run_id AND r.ended_epoch < ?)
+            OR (revoked IS NOT NULL AND revoked < ?)
+            OR (issued < ? AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE CAST(r.id AS TEXT) = agent_credentials.run_id
+                                                                            AND r.ended IS NULL)
+                AND NOT EXISTS (SELECT 1 FROM task_attempts a WHERE a.agent_id = agent_credentials.agent_id
+                                AND a.phase IN ('claimed', 'active')))""",
+            (limit, iso(limit), iso(limit))).rowcount if limit is not None else 0
     return removed
 
 
