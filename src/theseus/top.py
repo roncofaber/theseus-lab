@@ -29,7 +29,7 @@ STATE_COLOR = {"working": GREEN, "quiet": YELLOW, "busy": CYAN, "free": YELLOW, 
                "waiting": RED}
 KIND_COLOR = {"relaunched": YELLOW, "delivered": MAGENTA, "partial": YELLOW, "blocked": BLUE, "stalled": RED, "error": RED, "assigned": GREEN,
               "nudged": YELLOW, "compacted": BLUE, "cleared": CYAN, "merged": CYAN, "completed": GREEN,
-              "reopened": YELLOW, "released": YELLOW, "gateway_error": RED, "resent": YELLOW, "send_failed": RED,
+              "reopened": YELLOW, "unmerged": YELLOW, "released": YELLOW, "gateway_error": RED, "resent": YELLOW, "send_failed": RED,
               "gateway_paused": RED}
 QUEUE_COLOR = {"review": MAGENTA, "merged": CYAN, "working": GREEN, "ready": YELLOW, "blocked": DIM, "held": DIM}
 ROWS = {"actions": 2, "waiting": 5, "events": 10}

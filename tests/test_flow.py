@@ -206,6 +206,68 @@ class TaskFlowTests(Sandbox):
         self.assertIn("README.md", self.git("show", "--name-only", "--format=", commit).stdout.split())
         self.assertEqual("", self.git("status", "--porcelain").stdout)
 
+    def test_unmerge_reverts_the_merge_and_a_redelivery_merges_again(self):
+        self.add_task()
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        worktree = self.tmp / "worktrees/worker-1-a"
+        self.deliver(worktree)
+        self.theseus("merge", TASK)
+        first = self.record()["merge"]["commit"]
+        self.theseus("tasks", "observe", TASK, "--how", "smoke run before the failure")
+        self.write("docs/investigations/later-report.md",
+                   "# Later\n\nTask `later-report` on base x. Topic: `new`.\n\n## Result\n\n- **Recovered**: magic at 0x00402b30.\n")
+        self.theseus("docs", "index")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "a later report moves the generated indexes")
+        refused = self.theseus("tasks", "reopen", TASK, "--reason", "smoke failed", check=False)
+        self.assertIn("tasks unmerge", refused.stderr)
+        refused = self.theseus("tasks", "unmerge", TASK, "--no-revert", check=False)
+        self.assertEqual(3, refused.returncode, refused.stdout + refused.stderr)
+        self.assertIn("src/capture/header.py", refused.stderr)
+        self.write("src/capture/header.py", "def parse(data):\n    return data[:8]\n")
+        self.git("commit", "-q", "-am", "main edits the delivered file")
+        head = self.git("rev-parse", "HEAD").stdout
+        refused = self.theseus("tasks", "unmerge", TASK, check=False)
+        self.assertEqual(3, refused.returncode, refused.stdout + refused.stderr)
+        self.assertIn("src/capture/header.py", refused.stderr)
+        self.assertEqual((head, ""), (self.git("rev-parse", "HEAD").stdout, self.git("status", "--porcelain").stdout))
+        self.assertEqual("merged", self.record()["status"])
+        self.git("revert", "--no-edit", "HEAD")
+
+        out = self.theseus("tasks", "unmerge", TASK, "--reason", "verify HEAD failed the smoke").stdout
+        self.assertEqual("", self.git("status", "--porcelain").stdout)
+        self.assertFalse((self.project / "src/capture/header.py").exists())
+        self.assertFalse((self.project / "README.md").exists())
+        index = (self.project / "docs/re/citation-index.md").read_text()
+        self.assertIn("0x00402b30", index)
+        self.assertNotIn("0x00401a20", index)
+        self.theseus("docs", "check")
+        self.theseus("check")
+        record = self.record()
+        self.assertEqual(("in_progress", str(worktree)), (record["status"], record["worktree"]))
+        self.assertNotIn("merge", record)
+        self.assertNotIn("evidence", record)
+        attempt = record["previousAttempts"][-1]
+        self.assertEqual(first, attempt["merge"]["commit"])
+        self.assertIn(attempt["revertCommit"], out)
+        self.assertIn(f"Revert the {TASK} merge {first}", self.git("log", "-1", "--format=%B", attempt["revertCommit"]).stdout)
+        from theseus import config as cfg, workqueue
+        self.assertEqual(1, len(workqueue.events(cfg.load(root=self.project), task=TASK, kinds=["unmerged"])))
+
+        self.write("src/capture/header.py", "def parse(data):\n    return bytes(data[:4])\n", root=worktree)
+        self.theseus("merge", TASK)
+        second = self.record()["merge"]["commit"]
+        self.assertNotEqual(first, second)
+        self.assertIn("bytes(data[:4])", (self.project / "src/capture/header.py").read_text())
+
+        self.git("revert", "--no-edit", second)
+        refused = self.theseus("tasks", "unmerge", TASK, check=False)
+        self.assertIn("--no-revert", refused.stderr)
+        self.assertEqual("", self.git("status", "--porcelain").stdout)
+        self.theseus("tasks", "unmerge", TASK, "--no-revert", "--reason", "reverted by hand")
+        self.assertEqual("in_progress", self.record()["status"])
+        self.assertEqual("", self.git("status", "--porcelain").stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -251,6 +251,9 @@ def cmd_tasks(args):
     elif action == "rebase":
         from . import integrate
         emit(integrate.rebase(conf, args.id))
+    elif action == "unmerge":
+        from . import integrate
+        emit(integrate.unmerge(conf, args.id, args.reason, revert=not args.no_revert))
     elif action == "observe":
         emit(t.observe(queue, args.id, args.how, "userTested" if args.user else "observed"))
     elif action == "complete":
@@ -1024,6 +1027,11 @@ def build_parser():
     p = ts.add_parser("reopen", help="undo a premature delivery (verification back to in_progress)")
     p.add_argument("id")
     p.add_argument("--reason", required=True)
+    p = ts.add_parser("unmerge", help="take a merged task back to in_progress: revert its merge commit (or check it is "
+                                      "already reverted with --no-revert), keeping the worktree for a redelivery")
+    p.add_argument("id")
+    p.add_argument("--reason", default="merge reverted")
+    p.add_argument("--no-revert", action="store_true", help="the merge is already reverted; only update the record")
     p = ts.add_parser("rebase", help="record the worktree HEAD as the task base after the worker rebased onto the base "
                                      "branch; refuses when the worker committed")
     p.add_argument("id")

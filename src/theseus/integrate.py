@@ -413,3 +413,84 @@ def merge(conf, task_id, subject=None, accept=(), skip_patches=(), commit=True, 
         shutil.copytree(worktree / cfg.WORKER_LOG, archive / cfg.WORKER_LOG, dirs_exist_ok=True)
     report.append(f"committed {sha}")
     return sha, report
+
+
+def still_present(conf, commit):
+    """Paths whose change in commit (generated indexes aside) still reverse-applies on HEAD. Checked per file, since a
+    whole-patch check fails as soon as any one file is reverted."""
+    root, skip = conf.root, set(docs.generated_paths(conf))
+    names = g.out(root, "diff-tree", "--root", "--no-commit-id", "-r", "--name-only", "--no-renames", commit).splitlines()
+    present = []
+    with tempfile.TemporaryDirectory() as scratch:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "index")}
+        g.git(root, "read-tree", "HEAD", env=env)
+        for name in names:
+            if name in skip:
+                continue
+            diff = g.git(root, "diff-tree", "--root", "--no-commit-id", "-p", "--binary", "--no-renames", commit, "--",
+                         name).stdout
+            if g.git(root, "apply", "--cached", "--reverse", "--check", "-", env=env, input=diff, check=False).returncode == 0:
+                present.append(name)
+    return present
+
+
+def unmerge(conf, task_id, reason, revert=True):
+    """Take a merged task back to in_progress: revert its merge commit on main (or, with revert=False, check that it is
+    already reverted) and keep the worktree, so the worker can redeliver and `theseus merge` runs as usual."""
+    queue = t.Queue(conf)
+    task = queue.get(task_id)
+    if task["status"] != "merged":
+        raise IntegrationError(f"{task_id} is {task['status']}; only a merged task can be unmerged")
+    recorded = (task.get("merge") or {}).get("commit")
+    if not recorded:
+        raise IntegrationError(f"{task_id} records no merge commit")
+    root = conf.root
+    commit = g.git(root, "rev-parse", "--verify", "-q", f"{recorded}^{{commit}}", check=False).stdout.strip()
+    if not commit or g.git(root, "merge-base", "--is-ancestor", commit, "HEAD", check=False).returncode != 0:
+        raise IntegrationError(f"the {task_id} merge commit {recorded} is not on HEAD")
+    if not revert:
+        present = still_present(conf, commit)
+        if present:
+            raise IntegrationError(f"HEAD still holds the {task_id} merge {recorded} in: {', '.join(present)}; revert it "
+                                   "first or drop --no-revert", EXIT_CONFLICT)
+        message = t.unmerge(queue, task_id, reason)
+        commit_record(conf, f"chore: {task_id} unmerged")
+        return [message]
+    dirty = [line[3:] for line in g.dirty_tracked(root).splitlines() if line[3:] not in (cfg.TASKS, cfg.ARCHIVE)]
+    if dirty:
+        raise IntegrationError("the main checkout has uncommitted changes to tracked files (" + ", ".join(dirty)
+                               + "); commit or set them aside first", 2)
+    g.git(root, "reset", "-q", "--", cfg.TASKS, cfg.ARCHIVE, check=False)
+    generated = docs.generated_paths(conf)
+    names = g.out(root, "diff-tree", "--root", "--no-commit-id", "-r", "--name-only", "--no-renames", commit).splitlines()
+    touched = sorted(set(names) | set(generated))
+    existed = {p for p in touched if (root / p).exists() or (root / p).is_symlink()}
+
+    def refuse(text):
+        g.git(root, "revert", "--quit", check=False)
+        restore(root, touched, existed)
+        raise IntegrationError(f"{text}; main restored, nothing committed", EXIT_CONFLICT)
+
+    result = g.git(root, "revert", "--no-commit", commit, check=False)
+    unmerged = g.out(root, "diff", "--name-only", "--diff-filter=U").splitlines()
+    other = [p for p in unmerged if p not in generated]
+    if other or (result.returncode != 0 and not unmerged):
+        refuse(f"reverting {recorded} conflicts in {', '.join(other)}" if other
+               else f"git revert {recorded} failed: {(result.stderr or result.stdout).strip()}")
+    try:
+        written = docs.regenerate(conf)
+    except RuntimeError as error:
+        refuse(str(error))
+    paths = [p for p in sorted(set(written) | set(unmerged)) if (root / p).exists() or g.tracked(root, p)]
+    if paths:
+        g.git(root, "add", "-A", "--", *paths)
+    if g.out(root, "diff", "--name-only", "--diff-filter=U"):
+        refuse("unresolved paths remain after regenerating the indexes")
+    if g.git(root, "diff", "--cached", "--quiet", check=False).returncode == 0:
+        refuse(f"HEAD no longer holds {recorded}; if it was reverted by hand, pass --no-revert")
+    g.git(root, "commit", "-q", "-m", f"Revert the {task_id} merge {recorded}\n\n{reason}")
+    g.git(root, "revert", "--quit", check=False)
+    sha = g.out(root, "rev-parse", "--short=12", "HEAD")
+    message = t.unmerge(queue, task_id, reason, sha)
+    commit_record(conf, f"chore: {task_id} unmerged in {sha}")
+    return [f"reverted {recorded} in {sha}", message]

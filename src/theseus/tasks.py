@@ -386,6 +386,8 @@ def reopen(queue, task_id, reason):
     """Undo a premature delivery: verification back to in_progress, keeping the note in previousAttempts."""
     document = queue.load()
     task = queue.open_task(document, task_id)
+    if task["status"] == "merged":
+        raise TaskError(f"{task_id} is merged; take it back with `theseus tasks unmerge {task_id}`")
     if task["status"] != "verification":
         raise TaskError(f"{task_id} is {task['status']}, not verification")
     task["status"] = "in_progress"
@@ -394,6 +396,25 @@ def reopen(queue, task_id, reason):
     queue.save(document)
     record(queue, "reopened", task, reason)
     return f"{task_id} -> in_progress again ({reason})"
+
+
+def unmerge(queue, task_id, reason, revert_commit=None):
+    """Merged back to in_progress after the merge was reverted; owner and worktree stay for a redelivery."""
+    document = queue.load()
+    task = queue.open_task(document, task_id)
+    if task["status"] != "merged":
+        raise TaskError(f"{task_id} is {task['status']}, not merged")
+    attempt = {"merge": task.pop("merge", None), "unmergedAt": now(), "reason": reason,
+               "handoff": (task.get("execution") or {}).pop("handoff", None)}
+    if revert_commit:
+        attempt["revertCommit"] = revert_commit
+    if task.get("evidence"):
+        attempt["evidence"] = task.pop("evidence")
+    task.setdefault("previousAttempts", []).append(attempt)
+    task["status"] = "in_progress"
+    queue.save(document)
+    record(queue, "unmerged", task, f"{reason} (revert {revert_commit or 'by hand'})")
+    return f"{task_id} -> in_progress again; redeliver in {task.get('worktree')} and merge as usual"
 
 
 def rebase(queue, task_id, base):
