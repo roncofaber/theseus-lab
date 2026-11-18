@@ -1,6 +1,16 @@
 # Events and failure paths
 
-`theseus queue wait --no-drive` exits on `delivered`, `partial`, `blocked`, `stalled` or `error` and prints every event since it started, one per line: `TIME KIND AGENT TASK DETAIL`. The persistent `theseus queue run` driver keeps assigning meanwhile. Gateway retries, resends, `send_failed` and pauses do not wake you until the retries run out or the error is fatal. `theseus queue log` shows the recent events again. Restart `queue wait --no-drive` after handling each event.
+## Attention
+
+`theseus attention` (`--json` for scripts) lists what needs you now, each item with a kind, a since time and a suggested command: deliveries waiting to merge, merges not yet verified, open worker questions, agents stalled, at a prompt, at a startup dialog or failed, gateway pauses and cap cuts, assignments that keep failing, a stopped queue driver, a task export to fix (edited by hand, or missing a completed task) and verification debt past the pre-push guard's limits. It is computed from the store and live state on every call, so an item disappears only when you resolve its cause, never because you saw it. Run it at the start of every turn and after every action.
+
+How you hear about new items without asking:
+
+- Push (tmux): `theseus coordinator register` inside your pane (`[PANE]` names another; it records the pane's pid, so a reused pane id counts as gone), and `[attention] notify = "pane"` in `theseus.local.toml`. After each tick the queue driver types one line into it when items were added, such as `theseus: 3 items need you (2 deliveries, 1 stalled agent); run theseus attention`, and one reminder after `remind_minutes` (30) if they are still open. Nothing is typed while your pane shows a prompt or holds typed text; it waits for the next tick. A line typed while you are busy queues as your next input.
+- Stream: `theseus attention --follow` never exits and prints one line per change, for a harness that monitors a command's output.
+- Escalation: an item open past `escalate_minutes` (60), or your pane gone or stuck (a line owed that long), shows a red ESCALATED line in the console and runs the host's `[attention] escalate_command` once with the summary on stdin.
+
+`theseus queue wait --no-drive` still works: it exits on `delivered`, `partial`, `blocked`, `stalled`, `error` or `question` and prints every event since it started (`TIME KIND AGENT TASK DETAIL`), but it must be re-armed after each event and a missed re-arm delays integration silently, so do not rely on it. `theseus queue log` shows the recent events. Gateway retries, resends, `send_failed` and pauses do not wake it until the retries run out or the error is fatal.
 
 Two kinds of agent need different commands:
 

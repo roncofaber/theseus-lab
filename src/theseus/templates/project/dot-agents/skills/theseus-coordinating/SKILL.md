@@ -1,6 +1,6 @@
 ---
 name: theseus-coordinating
-description: Use when acting as the coordinator of a theseus port - starting or resuming a session with no memory, reacting to a queue event (delivered, partial, blocked, stalled, error), reviewing and merging a delivery, a failed verification, planning or writing task records, or deciding whether something is verified.
+description: Use when acting as the coordinator of a theseus port - starting or resuming a session with no memory, reacting to an attention item or queue event (delivered, partial, blocked, stalled, error), reviewing and merging a delivery, a failed verification, planning or writing task records, or deciding whether something is verified.
 ---
 
 # Coordinating a theseus port
@@ -11,9 +11,9 @@ You own the task records, the queue, integration (`theseus merge`), verification
 
 1. Read `AGENTS.md` and `docs/project/STATE.md`; `MANIFEST.md` and `ROADMAP.md` once per session. A user instruction recorded in STATE.md (such as "workers paused") overrides the MANIFEST: while paused, no dispatch and no new tasks, only review, planning and verification.
 2. `git status`, `git log -5 --oneline`, `git worktree list`.
-3. `theseus console --once` (attention items, agents, waiting tasks, recent events). Then as needed: `theseus tasks list --evidence`, `theseus agents ls`, `theseus queue status`, `theseus queue log`, `theseus status` (headless workers and other worktrees), `theseus verify --debt`.
+3. `theseus attention` (what needs you, each with a command), `theseus console --once`. As needed: `theseus tasks list --evidence`, `theseus agents ls`, `theseus queue status`, `theseus queue log`, `theseus status` (headless workers and other worktrees), `theseus verify --debt`.
 4. Finish what is waiting before starting anything new: tasks in `verification` are unreviewed deliveries (section 3); `merged` tasks owe verification and completion.
-5. With agents registered, run the queue as two roles. The driver (assigns, nudges, retries) is one persistent `theseus queue run` in a hidden tmux session; if `theseus console --json` shows no `watcher` that is `alive` with command `run`, start it as `references/workers.md` (The queue) shows. You block in the background on `theseus queue wait --no-drive`, which only watches and exits on the first event that needs you; restart it after each event. A missed restart then delays only integration, never assignment. Never run a driving `queue wait` (without `--no-drive`) next to `queue run`.
+5. With agents registered, `theseus agents up` runs the supervised queue driver (assigns, nudges, retries); `attention` lists it when down. Register your tmux pane once, `theseus coordinator register`: with `[attention] notify = "pane"` the driver types a line into it when something new needs you. No pane: stream `theseus attention --follow`. Rely on these, not on re-arming `queue wait` (`references/events.md`).
 6. Tell the user in a few lines what you found and what you will do next.
 
 Never read `tasks-archive.jsonl` or `docs/project/archive/` whole; use `theseus tasks show ID`.
@@ -22,7 +22,7 @@ Never read `tasks-archive.jsonl` or `docs/project/archive/` whole; use `theseus 
 
 Take the first action whose trigger holds, then loop. Busy agents are never a reason to stop.
 
-1. An event from `queue wait`: handle it (table below); answer a `question` with `theseus tasks note ID`.
+1. `theseus attention` at the start of every turn and after every action: handle its items (table below); answer a question with `theseus tasks note ID`.
 2. A task in `verification`: integrate it (section 3).
 3. Fewer ready tasks than free agents: write records (`references/task-records.md`), following the phase gates of the `theseus-recipe` skill. Unknown original behavior is a bounded research task, not a blocker.
 4. `theseus verify --debt` near its limit: `theseus verify` before more merges.
@@ -30,13 +30,14 @@ Take the first action whose trigger holds, then loop. Busy agents are never a re
 
 No agents registered: dispatch by hand (`references/workers.md`).
 
-## Events
+## Items and events
 
-`queue wait` prints `TIME KIND AGENT TASK DETAIL`. Details for every row: `references/events.md`.
+An item stays listed until its cause is resolved. `theseus queue log` shows the events behind it; details: `references/events.md`.
 
 | Event | Do |
 | --- | --- |
-| `delivered` | Integrate (section 3). |
+| `delivered`, item `delivery` | Integrate (section 3). |
+| item `merged`, `debt`, `export` | Section 3, steps 5-8. |
 | `partial` | Read Limits. If what works passes its checks, integrate it, complete it with one `--limit` per unmet item, and add a follow-up record for the rest. To send it back instead, see events.md (move the handoff aside first). |
 | `blocked` | Read what blocks it. Supply it (spec, decision, patch) and send it back, or release and rewrite the record; inputs only the human has: escalate. |
 | `stalled` idle / after a nudge | `theseus agents logs NAME`, then one `theseus instance send NAME "..."` naming the missing step. Second stall: release and split. |

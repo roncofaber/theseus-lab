@@ -15,18 +15,20 @@ import tomllib
 from pathlib import Path
 
 NAME = "config.toml"
-SECTIONS = ("workers", "pools", "store", "tools", "defaults", "gateway", "supervisor", "models")
+SECTIONS = ("workers", "pools", "store", "tools", "defaults", "gateway", "supervisor", "models", "attention")
 DEFAULT_KEYS = ("workers.default", "workers.retries", "limits.heavy_runs", "paths.data", "paths.scratch", "paths.worktrees",
                 "instances.idle_minutes", "instances.handoff_settle_seconds", "instances.send_verify_seconds", "queue.interval", "queue.send_budget_seconds",
                 "re.clients", "gateway.attempts", "gateway.backoff", "gateway.slow_codes", "gateway.slow_factor",
                 "gateway.resend", "gateway.clear_tokens", "gateway.fresh_after_errors", "gateway.screen_lines",
-                "gateway.stagger_seconds", "gateway.recovery_seconds", "agents.counts", "agents.resume", "agents.cwd")
+                "gateway.stagger_seconds", "gateway.recovery_seconds", "agents.counts", "agents.resume", "agents.cwd",
+                "attention.notify", "attention.remind_minutes", "attention.escalate_minutes")
 TABLE_KEYS = ("agents.counts",)
 SUPERVISOR_DEFAULTS = {"socket": "theseus", "size": "220x50", "history_limit": 50000, "detach_key": "C-q", "max_agents": 12,
                        "env_passthrough": [], "launch_shell": "exec", "ready_seconds": 90,
                        "restart": {"backoff_seconds": [5, 30, 120, 600], "max_crashes": 5, "window_minutes": 30}}
 GATEWAY_DEFAULTS = {"breaker_errors": 3, "breaker_window_minutes": 10, "strong_codes": [530], "parallel_cap_step": 1,
                     "parallel_cap_minutes": 10, "cap_step_up_minutes": 10}
+ATTENTION_KEYS = ("escalate_command",)
 POOL_KEYS = ("max", "priority", "tokens_per_minute", "turns_per_minute")
 STORE_KEYS = {"retention": ("samples_days", "events_days", "deliveries_days", "runs_days", "gateway_days"), "backups": ("directory", "daily", "weekly")}
 
@@ -147,6 +149,12 @@ def supervisor():
     return merged
 
 
+def attention():
+    """The host's [attention] table: escalate_command, the command run with the summary on stdin when an attention item
+    stays open past escalate_minutes or the coordinator pane is gone or stuck (empty: none)."""
+    return {"escalate_command": "", **(read().get("attention") or {})}
+
+
 def flatten(table, prefix=""):
     """Dotted keys of a nested table; a table named in TABLE_KEYS stays one value."""
     items = {}
@@ -226,6 +234,12 @@ def validate(data, file, profile_problems, tool_names=None):
                        for name in (value if isinstance(value, dict) else {}) if name not in SUPERVISOR_DEFAULTS["restart"]]
         elif key == "launch_shell" and value not in ("exec", "login"):
             errors.append(f"{file}: [supervisor] launch_shell must be \"exec\" or \"login\"")
+    for key, value in (data.get("attention") or {}).items():
+        if key not in ATTENTION_KEYS:
+            errors.append(f"{file}: [attention] unknown key {key}; known: {', '.join(ATTENTION_KEYS)} (notify, remind_minutes and "
+                          f"escalate_minutes go in a project's [attention] or under [defaults] attention.<key>)")
+        elif not isinstance(value, (str, list)) or (isinstance(value, list) and not all(isinstance(x, str) for x in value)):
+            errors.append(f"{file}: [attention] escalate_command must be a command line or a list of arguments")
     for key in flatten(data.get("defaults") or {}):
         if key not in DEFAULT_KEYS:
             warnings.append(f"{file}: [defaults] {key} is not a host default and is ignored; known: {', '.join(DEFAULT_KEYS)}")

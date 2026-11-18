@@ -799,7 +799,11 @@ def died(socket, session, pid, status=None, signal=None):
     signal = (signal or "")[1:] if (signal or "").startswith("g") else signal
     with store.for_host() as conn:
         row = conn.execute("SELECT project, name FROM agents WHERE target = ? AND managed", (session,)).fetchone()
-    if row is None or not str(pid).isdigit():
+    if row is None:
+        project = driver_project(session)
+        conf = project_conf(project) if project else None
+        return driver_died(conf, srv, status) if conf is not None else 0
+    if not str(pid).isdigit():
         return 0
     conf = project_conf(row["project"])
     if conf is None:
@@ -827,6 +831,134 @@ def died(socket, session, pid, status=None, signal=None):
     with workqueue.locked(conf):
         reconcile(conf, [name])
     return 0
+
+
+# the queue driver: `theseus queue run` in a session of the private server, started by `theseus agents up`
+
+DRIVER = "queue"
+DRIVER_LABEL = "queue-driver"
+
+
+def driver_session(conf):
+    return tm.session_name(conf.name, DRIVER)
+
+
+def driver_command():
+    return [*theseus_argv(), "queue", "run"]
+
+
+def driver_wanted(conf):
+    with store.for_project(conf) as conn:
+        return store.get_meta(conn, f"queue.driver:{conf.name}") is not None
+
+
+def driver_enabled(conf):
+    return conf.section("queue").get("driver", True) not in (False, "false", "off", "manual", 0)
+
+
+def set_driver_wanted(conf, value):
+    with store.for_project(conf) as conn:
+        if value:
+            store.set_meta(conn, f"queue.driver:{conf.name}", store.iso())
+        else:
+            store.delete_meta(conn, f"queue.driver:{conf.name}")
+
+
+def driver_restarts_path(conf):
+    from . import workqueue
+    return workqueue.queue_dir(conf) / "driver-restarts.json"
+
+
+def driver_restarts(conf, now=None):
+    """Epochs of the driver's automatic restarts within [supervisor.restart] window_minutes."""
+    now = time.time() if now is None else now
+    window = float(settings()["restart"]["window_minutes"]) * 60
+    try:
+        found = json.loads(driver_restarts_path(conf).read_text())
+    except (OSError, ValueError):
+        return []
+    return [float(x) for x in found if now - float(x) < window]
+
+
+def start_driver(conf, dry_run=False):
+    """Start the project's queue driver in its session of the private server unless it already runs there or a live
+    `queue run` (or driving `queue wait`) runs elsewhere. Returns (name, action, detail)."""
+    from . import workqueue
+    if not driver_enabled(conf):
+        return DRIVER_LABEL, "manual", "[queue] driver = false: run `theseus queue run` yourself"
+    srv = server()
+    target = driver_session(conf)
+    info = pane_info(srv, target) if srv.alive() else None
+    if info and info.get("pane_dead") == "0":
+        if not dry_run:
+            set_driver_wanted(conf, True)
+        return DRIVER_LABEL, "kept", f"queue run in session {target}"
+    beat = workqueue.watcher(conf)
+    if beat and beat.get("alive"):
+        return DRIVER_LABEL, "skipped", (f"a queue {beat.get('command')} already drives this project (pid {beat.get('pid')}); "
+                                         f"stop it and run `theseus agents up` to let theseus supervise the driver")
+    if dry_run:
+        return DRIVER_LABEL, "would start", f"queue run in session {target}"
+    set_driver_wanted(conf, True)
+    driver_restarts_path(conf).unlink(missing_ok=True)
+    spawn_driver(conf, srv, target, info)
+    return DRIVER_LABEL, "started", f"queue run in session {target}"
+
+
+def spawn_driver(conf, srv, target, info):
+    width, height = size()
+    try:
+        if info is None:
+            srv.new_session(target, driver_command(), conf.root, width, height, env=session_env())
+        else:
+            srv.respawn(tm.address(target), driver_command(), cwd=conf.root, env=session_env())
+    except tm.TmuxError as error:
+        raise SupervisorError(f"queue driver: {error}") from error
+    srv.set_option(tm.address(target), "@theseus_project", conf.name)
+    srv.set_option(tm.address(target), "@theseus_driver", "1")
+
+
+def stop_driver(conf):
+    """Stop the supervised queue driver and keep it stopped until `theseus agents up`. Returns (name, action, detail)."""
+    set_driver_wanted(conf, False)
+    srv = server()
+    target = driver_session(conf)
+    if srv.alive() and srv.has_session(target):
+        srv.kill_session(target)
+        return DRIVER_LABEL, "stopped", f"session {target}"
+    return DRIVER_LABEL, "none", "no supervised queue driver ran"
+
+
+def driver_died(conf, srv, status=None, now=None):
+    """The pane-died hook for the queue driver: restart it after the [supervisor.restart] backoff, unless it was
+    stopped or keeps exiting (then an error event names it and `theseus agents up` starts it again). Returns 0."""
+    now = time.time() if now is None else now
+    if not driver_wanted(conf):
+        return 0
+    restarts = driver_restarts(conf, now)
+    policy = settings()["restart"]
+    if len(restarts) >= int(policy["max_crashes"]):
+        set_driver_wanted(conf, False)
+        event(conf, "error", None, None, f"queue driver exited {len(restarts) + 1} times within "
+                                         f"{policy['window_minutes']} min (last status {status or '?'}); not restarted: "
+                                         f"`theseus agents up` starts it again")
+        return 0
+    backoff = [float(x) for x in policy["backoff_seconds"]] or [5.0]
+    delay = backoff[min(len(restarts), len(backoff) - 1)] if restarts else 0.0
+    cfg.write_atomic(driver_restarts_path(conf), json.dumps(restarts + [now]) + "\n")
+    if delay:
+        time.sleep(min(delay, 15))
+    target = driver_session(conf)
+    spawn_driver(conf, srv, target, pane_info(srv, target))
+    event(conf, "restarted", None, None, f"queue driver after it exited (status {status or '?'})")
+    return 0
+
+
+def driver_project(session):
+    """The project whose queue driver runs in this session, or None."""
+    with store.for_host() as conn:
+        names = [row["name"] for row in store.list_projects(conn)]
+    return next((name for name in names if tm.session_name(name, DRIVER) == session), None)
 
 
 def project_conf(name):

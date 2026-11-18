@@ -824,6 +824,10 @@ def cmd_supervised(args):
             failed = False
             for conf in confs:
                 if not supervisor.managed(conf):
+                    from . import agents
+                    if not args.all_projects and not names and agents.agents(conf):
+                        print_actions([supervisor.start_driver(conf, dry_run=args.dry_run)])
+                        sys.exit(0)
                     sys.exit(f"theseus: {conf.name} does not supervise its agents; set [agents] managed = true and "
                              f"[agents.counts] in {cfg.LOCAL_NAME}")
                 errors, warnings = supervisor.problems(conf)
@@ -842,6 +846,8 @@ def cmd_supervised(args):
                             supervisor.update(conf, name, desired="up")
                     rows = supervisor.reconcile(conf, names or None, wait=not args.dry_run, dry_run=args.dry_run,
                                                 reset=args.reset)
+                if not names:
+                    rows = [*(rows or []), supervisor.start_driver(conf, dry_run=args.dry_run)]
                 if len(confs) > 1:
                     print(f"# {conf.name}")
                 print_actions(rows or [("-", "none", "no agents configured ([agents.counts])")])
@@ -864,6 +870,8 @@ def cmd_supervised(args):
             if bool(names) == bool(args.all):
                 sys.exit("usage: theseus agents down NAME... | --all [--force] [--now] [--replace]")
             print_actions(supervisor.down(conf, names or None, force=args.force, now=args.now))
+            if args.all:
+                print_actions([supervisor.stop_driver(conf)])
             if args.replace and supervisor.managed(conf):
                 from . import workqueue
                 with workqueue.locked(conf):
@@ -1080,6 +1088,45 @@ def cmd_queue(args):
         for question in t.Queue(conf).service.questions(t.acting_principal()):
             print(f"question {question['task']}: {question['text']} (answer with `theseus tasks note "
                   f"{question['task']} TEXT`)")
+
+
+def cmd_attention(args):
+    from . import attention
+    conf = load(record=False)
+    if args.follow:
+        attention.follow(conf, interval=args.interval)
+        return
+    found = attention.items(conf)
+    if args.json:
+        s = attention.settings(conf)
+        print(json.dumps({"project": conf.name, "summary": attention.summary(found), "items": found,
+                          "push": {"notify": s["notify"], "coordinator": attention.coordinator(conf)}}, indent=2))
+        return
+    print(attention.render(conf, found))
+
+
+def cmd_coordinator(args):
+    from . import attention
+    conf = load()
+    try:
+        if args.action == "register":
+            print(attention.register(conf, args.pane, args.profile))
+        elif args.action == "unregister":
+            print(attention.unregister(conf))
+        else:
+            record = attention.coordinator(conf)
+            if record is None:
+                print("no coordinator pane registered (theseus coordinator register [PANE])")
+                return
+            problem = attention.pane_problem(record)
+            s = attention.settings(conf)
+            print(f"pane {record['pane']} (pid {record.get('pane_pid')}, profile {record.get('profile')}), registered "
+                  f"{record.get('registered')}: {problem or 'live'}; push {'on' if s['notify'] == 'pane' else 'off'}")
+            book = attention.bookkeeping(conf)
+            if book.get("last"):
+                print(f"last push: {book['last']}")
+    except attention.AttentionError as error:
+        sys.exit(f"theseus: {error}")
 
 
 def cmd_top(args):
@@ -1606,6 +1653,27 @@ def build_parser():
     p.add_argument("--no-assign", action="store_true", help="tick: report deliveries and stalls but assign nothing")
     p.add_argument("--no-drive", action="store_true", help="wait: only watch events, do not run ticks")
     p.set_defaults(func=guarded(cmd_queue))
+    p = sub.add_parser("attention", help="what needs the coordinator now (deliveries, merges to verify, questions, stalled "
+                                         "agents, gateway pauses, assignment errors, a stopped driver, the export, "
+                                         "verification debt), each with a suggested command",
+                       description="The attention list is computed from the task store and live state on every call; an "
+                                   "item disappears only when its cause is resolved. Run it at the start of every turn and "
+                                   "after every action. --follow prints one line whenever the list changes and never exits, "
+                                   "for a harness that streams a command's output.")
+    p.add_argument("--json", action="store_true", help="one JSON object: summary, items (key, kind, project, since, "
+                                                       "summary, command) and the push settings")
+    p.add_argument("--follow", action="store_true", help="print one line per change; never exits")
+    p.add_argument("--interval", type=float, default=10.0, help="--follow: seconds between checks (default 10)")
+    p.set_defaults(func=guarded(cmd_attention))
+    p = sub.add_parser("coordinator", help="the coordinator's tmux pane, which the queue driver types attention lines into "
+                                           "([attention] notify = \"pane\"): register [PANE], unregister, status",
+                       description="register records the pane ($TMUX_PANE by default) and the pid it runs, like a hand-made "
+                                   "agent; a pane that later runs another process counts as gone.")
+    p.add_argument("action", nargs="?", default="status", choices=("status", "register", "unregister"))
+    p.add_argument("pane", nargs="?", help="register: the pane id (default $TMUX_PANE)")
+    p.add_argument("--profile", help="register: the agent profile the coordinator runs (its busy marker, input line and "
+                                     "prompt patterns; default [workers] default)")
+    p.set_defaults(func=guarded(cmd_coordinator))
     p = sub.add_parser("console", aliases=["top"], help="the control console of every project on this host (also `theseus` "
                                                         "alone on a terminal): agents, coordinator, queue, pools, events "
                                                         "and actions; --once and --json print one frame for scripts")

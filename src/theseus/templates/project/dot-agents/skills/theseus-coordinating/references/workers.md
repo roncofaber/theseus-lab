@@ -15,19 +15,9 @@ Before a by-hand dispatch: `theseus tasks ready`, rank, `theseus dispatch ID --d
 
 ## The queue
 
-Run exactly one driver per project: `theseus queue run` in a hidden tmux session, so it outlives coordinator sessions. With supervised agents, put it on theseus's private server after `theseus agents up` has started that server (a raw `new-session` that creates the server skips theseus's server configuration):
+Run exactly one driver per project, `theseus queue run`. `theseus agents up` starts it as a supervised session on theseus's private tmux server (`PROJECT--queue`), restarts it when it exits (with the `[supervisor.restart]` backoff) and keeps it out of your terminal; `theseus agents down --all` stops it. With only hand-made panes, `theseus agents up` starts just the driver. `[queue] driver = false` leaves it to you. `theseus attention` and the console report a project with agents and no live driver. Never start a second one by hand: `agents up` skips the start when a live `queue run` already drives the project.
 
-```sh
-theseus agents up
-tmux -L theseus new-session -d -s PROJECT--queue -c ROOT "$(command -v theseus) queue run"
-```
-
-- `-L theseus` is the default socket; use the host config's `[supervisor] socket` when it sets one. The session name takes letters, digits, `-` and `_`.
-- The session gets the server's environment, not yours; hence the absolute path to `theseus`.
-- With only hand-made panes, use your own tmux server instead: `tmux new-session -d -s PROJECT--queue -c ROOT "theseus queue run"`.
-- Is it running? `theseus console --json` has a `watcher` entry: `alive` true and `command` `run`. A tmux session alone is no proof, since a dead pane stays on the private server.
-
-The coordinator watches with `theseus queue wait --no-drive`. A plain `queue wait` also drives (ticks) while it waits: use it only when no `queue run` is running, never both. The driver ticks every `--interval` seconds and rereads the configuration when it changes. Each tick: records deliveries (an idle agent whose `handoff.md` states a Result and has not changed for `instances.handoff_settle_seconds`), nudges an idle agent once, then reports it stalled, retries gateway errors, resets a free agent's context (compact; a full clear when it moves from dirty to clean work) and assigns it the next ready task it may take (room, profile, capability, pools). `theseus queue tick --no-assign` runs one pass that only reports. `theseus queue status` counts tasks by state.
+The coordinator follows `theseus attention` (push into its pane, or `--follow`; `events.md`). A plain `queue wait` also drives (ticks) while it waits: use it only when no `queue run` is running, never both. The driver ticks every `--interval` seconds and rereads the configuration when it changes. Each tick: records deliveries (an idle agent whose `handoff.md` states a Result and has not changed for `instances.handoff_settle_seconds`), nudges an idle agent once, then reports it stalled, retries gateway errors, resets a free agent's context (compact; a full clear when it moves from dirty to clean work) and assigns it the next ready task it may take (room, profile, capability, pools). `theseus queue tick --no-assign` runs one pass that only reports. `theseus queue status` counts tasks by state.
 
 ## Supervised agents
 

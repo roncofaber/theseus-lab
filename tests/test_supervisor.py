@@ -126,6 +126,9 @@ managed = true
 
 [agents.counts]
 fake = 2
+
+[queue]
+driver = false
 """
 
 
@@ -291,6 +294,26 @@ class SupervisorTests(Sandbox):
         self.assertEqual(1234, agents.session_transcript(self.conf(), rec)["tokens"])
         self.assertEqual(str(path), self.theseus("agents", "logs", "demo-fake-1", "--transcript").stdout.strip())
         self.assertEqual(1234, agents.state(self.conf(), rec)["context"]["tokens"])
+
+
+    def test_up_supervises_the_queue_driver_which_restarts_when_its_pane_dies_until_down_all(self):
+        self.replace_config("fake = 2", "fake = 0")
+        self.replace_config("driver = false", "driver = true")
+        self.git("commit", "-q", "-am", "a supervised driver and no agents")
+        self.assertRegex(self.up().stdout, r"queue-driver\s+started\s+queue run in session demo--queue")
+        self.assertIn("queue run", self.tmux("display", "-p", "-t", "=demo--queue:", "#{pane_start_command}").stdout)
+        self.assertRegex(self.up().stdout, r"queue-driver\s+kept", "a running driver is never started twice")
+        pane_pid = lambda: self.tmux("display", "-p", "-t", "=demo--queue:", "#{pane_dead} #{pane_pid}").stdout.split()
+        first = pane_pid()
+        os.kill(int(first[1]), 9)
+        self.wait_for(lambda: (now := pane_pid()) and now[0] == "0" and now[1] != first[1],
+                      message="the pane-died hook to restart the driver")
+        self.wait_for(lambda: any("queue driver" in e["detail"] for e in self.events("restarted")), message="its event")
+        beat = self.tmp / "data/queue/watcher.json"
+        self.wait_for(lambda: beat.exists() and str(json.loads(beat.read_text())["pid"]) == pane_pid()[1],
+                      message="the restarted driver's first tick")
+        self.assertRegex(self.theseus("agents", "down", "--all").stdout, r"queue-driver\s+stopped")
+        self.assertFalse(self.tmux("has-session", "-t", "=demo--queue").returncode == 0)
 
 
 @unittest.skipUnless(REAL_TMUX, "tmux is not installed")

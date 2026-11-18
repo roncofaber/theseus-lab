@@ -981,8 +981,9 @@ class TaskService:
         if digests(files) == digests(fresh):
             return {"state": "current", "detail": "the committed export matches the store"}
         if digests(files) in seen:
-            return {"state": "stale", "detail": f"{changed} task(s) changed since {recorded.get('time')}; `theseus "
-                                                f"tasks export` (and commit docs/project/) records them"}
+            return {"state": "stale", "since": recorded.get("time"),
+                    "detail": f"{changed} task(s) changed since {recorded.get('time')}; `theseus tasks export` (and "
+                              f"commit docs/project/) records them"}
         if not seen:
             return {"state": "unexported", "detail": "no export written yet: `theseus tasks export`, then commit "
                                                      "docs/project/"}

@@ -1010,6 +1010,14 @@ def reloaded(conf, seen):
         return conf, current
 
 
+def notify(conf):
+    """The attention push of a driving loop after its tick (theseus.attention)."""
+    from . import attention
+    for line in attention.drive(conf):
+        print(f"{ag.now()} pushed     coordinator        - {line}")
+        sys.stdout.flush()
+
+
 def run(conf, interval=30, once=False):
     started = time.time()
     seen = None
@@ -1020,6 +1028,7 @@ def run(conf, interval=30, once=False):
         for record in tick(conf):
             print(f"{record['time']} {record['kind']:<10} {record['agent'] or '-':<18} {record['task'] or '-'} {record['detail']}")
             sys.stdout.flush()
+        notify(conf)
         if once:
             return
         pause = next_sleep(conf, interval, time.time())
@@ -1051,6 +1060,23 @@ def heartbeat(conf, command, started, sleep_seconds, now=None):
         pass
 
 
+def watcher(conf, now=None):
+    """The heartbeat of the project's driving queue loop (`queue run`, or a `queue wait` that drives) with "alive", or
+    None when none ever ran."""
+    now = time.time() if now is None else now
+    try:
+        beat = json.loads((queue_dir(conf) / "watcher.json").read_text())
+    except (OSError, ValueError):
+        return None
+    try:
+        os.kill(int(beat.get("pid")), 0)
+        # A pid reused after the loop died would pass the check, so a wake time long past counts as dead too.
+        beat["alive"] = now - float(beat.get("next") or 0) < 300
+    except (OSError, TypeError, ValueError):
+        beat["alive"] = False
+    return beat
+
+
 def next_sleep(conf, interval, now):
     """Seconds until the next tick: the interval, or less when a gateway resend or an agent restart falls due
     sooner (plus a little slack so the tick finds it due)."""
@@ -1075,6 +1101,7 @@ def wait(conf, timeout=10800, interval=30, drive=True, clock=time.time, sleep=ti
         conf, seen = reloaded(conf, seen)
         if drive:
             tick(conf)
+            notify(conf)
         new = events(conf, after_id=start)
         hits = [e for e in new if e["kind"] in ATTENTION and still_open(conf, e)]
         if hits:

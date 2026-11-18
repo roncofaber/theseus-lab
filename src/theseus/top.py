@@ -493,18 +493,7 @@ def coordinator_state(conf):
 
 def watcher_state(conf):
     """The `theseus queue wait|run` loop of the project, from the heartbeat it writes each tick."""
-    try:
-        beat = json.loads((conf.data / "queue" / "watcher.json").read_text())
-    except (OSError, ValueError):
-        return None
-    pid = beat.get("pid")
-    try:
-        os.kill(int(pid), 0)
-        # A pid reused after the loop died would pass the check, so a wake time long past counts as dead too.
-        beat["alive"] = time.time() - float(beat.get("next") or 0) < 300
-    except (OSError, TypeError, ValueError):
-        beat["alive"] = False
-    return beat
+    return wq.watcher(conf)
 
 
 def snapshot(conf, sample=False, host=None):
@@ -535,8 +524,17 @@ def snapshot(conf, sample=False, host=None):
         "paused": wq.paused(conf), "git": git_state(conf), "verification": verification_state(conf),
         "events": merge_resets(wq.events(conf, 200)),
         "today": today_stats(wq.events(conf)), "progress": milestone_progress(conf), "export": export_state(conf),
-        "coordinator": coordinator_state(conf), "watcher": watcher_state(conf), **supervision(conf),
+        "coordinator": coordinator_state(conf), "watcher": watcher_state(conf), "attention": attention_state(conf, states),
+        **supervision(conf),
     }
+
+
+def attention_state(conf, states):
+    from . import attention
+    try:
+        return attention.console(conf, states)
+    except Exception as error:
+        return {"items": [], "escalated": [], "coordinator": None, "error": str(error)}
 
 
 def supervision(conf):
@@ -635,6 +633,15 @@ class Frame:
 
 def issues(state):
     found = []
+    attention = state.get("attention") or {}
+    for item in attention.get("escalated") or []:
+        found.append(f"{B}{RED}● ESCALATED{R} {RED}{item['summary']}, open since {local_clock(item['since'])}: "
+                     f"{item['command']}{R}")
+    if attention.get("coordinator"):
+        found.append(f"{B}{RED}● ESCALATED{R} {RED}the coordinator pane is {attention['coordinator']}: attention lines do not "
+                     f"reach it (theseus coordinator){R}")
+    if any(item["kind"] == "driver" for item in attention.get("items") or []):
+        found.append(f"{RED}●{R} no queue driver runs: nothing is assigned or recorded; `theseus agents up` starts it")
     for agent in state["agents"]:
         if agent["state"] in ("stalled", "offline", "blocked", "failed", "waiting"):
             found.append(f"{RED}●{R} {agent['name']} is {agent['state']}")
