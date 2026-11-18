@@ -275,6 +275,7 @@ class McpTests(TaskStoreCase):
         self.svc.add(COORDINATOR, spec("mine"))
         self.svc.assign(QUEUE, "mine", "agent-a", lambda c: (self.tmp / "wt", "b", self.tmp / "wt/.theseus"),
                         owner="p:a:a-mine", provider="p")
+        self.conf.section = lambda name: {}
         secret = ts.issue_credentials(COORDINATOR, "agent-a", "agent-a")
         self.credentials = self.tmp / "credentials"
         self.credentials.write_text(json.dumps({"agent_id": "agent-a", "run_secret": secret}))
@@ -300,6 +301,9 @@ class McpTests(TaskStoreCase):
         import asyncio
         from mcp import Client
         from theseus import mcp_server
+        self.svc.add(COORDINATOR, spec("theirs"))
+        self.svc.assign(QUEUE, "theirs", "agent-b", lambda c: (self.tmp / "wt2", "b", self.tmp / "wt2/.theseus"),
+                        owner="p:b:b-theirs", provider="p")
         worker_env = {"THESEUS_CREDENTIALS": str(self.credentials)}
         server = mcp_server.build(self.conf, mcp_server.resolve(None, worker_env, self.tmp), worker_env)
 
@@ -307,13 +311,31 @@ class McpTests(TaskStoreCase):
             async with Client(server) as client:
                 listed = await client.list_tools()
                 shown = await client.call_tool("task_show", {"task": "mine"})
-                stale = await client.call_tool("task_show", {"task": "other"})
+                stale = await client.call_tool("task_show", {"task": "theirs"})
                 return listed, shown, stale
 
         listed, shown, stale = asyncio.run(session())
         self.assertEqual(sorted(mcp_server.WORKER_TOOLS), sorted(t.name for t in getattr(listed, "tools", listed)))
         self.assertEqual("mine", json.loads(shown.content[0].text)["task"]["id"])
+        self.assertEqual("mine", shown.structured_content["task"]["id"])
+        self.assertIn("Build mine.", shown.structured_content["prompt"])
         self.assertTrue(stale.is_error)
+        self.assertIn("not-your-task", stale.content[0].text)
+
+        coordinator = mcp_server.build(self.conf, mcp_server.resolve("coordinator", {}, self.tmp), {})
+
+        async def coordinate():
+            async with Client(coordinator) as client:
+                listed = await client.list_tools()
+                calls = [await client.call_tool(name, arguments) for name, arguments in (
+                    ("tasks_list", {}), ("tasks_show", {"task": "mine", "history": True}), ("tasks_questions", {}),
+                    ("tasks_hold", {"task": "theirs", "on": True}))]
+                return listed, calls
+
+        listed, calls = asyncio.run(coordinate())
+        self.assertEqual(sorted(mcp_server.COORDINATOR_TOOLS), sorted(t.name for t in getattr(listed, "tools", listed)))
+        self.assertEqual([False] * 4, [call.is_error for call in calls], [call.content[0].text for call in calls])
+        self.assertEqual(["mine", "theirs"], [task["id"] for task in calls[0].structured_content["items"]])
 
 
 class MaintenanceTests(TaskStoreCase):

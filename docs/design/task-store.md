@@ -486,7 +486,8 @@ Phase 4 adds soft ownership. A task's conflict set is its owned patterns plus it
   - `THESEUS_MCP` lost its `--role worker`.
   - Only the claude-code preset has `mcp_flags`. A Codex profile needs its own `mcp_flags`, written for Codex's TOML overrides, before it can list servers.
 - The coordinator adds its server by hand: `claude mcp add theseus -- theseus mcp --role coordinator`.
-- Test 7 of section 13 (an in-process `mcp.Client` lists the worker tools and calls `task_show`) skips without the extra. The SDK cannot be installed on this host without network access, so it has not run here. Role resolution and the per-agent config are tested without the SDK.
+- Every tool returns one JSON object, the same as JSON text content and as structured content: a command's message is `{"message"}`, a list is `{"items"}`. A refusal is a tool error whose text starts with the code (`not-your-task: ...`).
+- Test 7 of section 13 runs whenever the extra is installed (it skips otherwise): in-process clients list each role's tools and call worker and coordinator tools. With `mcp` 2.3.0 the server also ran for real as `theseus mcp` over stdio under the SDK's stdio client. The worker passed only `THESEUS_CREDENTIALS` in `env`, and show, the `not-your-task` refusal, a question and `task done` worked. With `--role coordinator`: questions, note (which answered the question), list, add, ready and hold. Both startup refusals held: a worker server without credentials, and `--role coordinator` given credentials.
 
 ## 24. Phase 6 implementation notes
 

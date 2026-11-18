@@ -47,6 +47,7 @@ def build(conf, principal, env=None):
     """An MCPServer with the tools of principal's role."""
     from mcp.server.mcpserver import MCPServer
     from mcp.server.mcpserver.exceptions import ToolError
+    from mcp.types import CallToolResult, TextContent
 
     env = dict(os.environ if env is None else env)
     queue = t.Queue(conf)
@@ -63,7 +64,10 @@ def build(conf, principal, env=None):
                     result = function(*args, **kwargs)
             except t.TaskError as error:
                 raise ToolError(f"{getattr(error, 'code', 'refused')}: {error}") from error
-            return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+            data = structured(result)
+            return CallToolResult(content=[TextContent(type="text", text=json.dumps(data, ensure_ascii=False,
+                                                                                    default=str))],
+                                  structured_content=data)
         server.add_tool(call, name=function.__name__, description=(function.__doc__ or "").strip(),
                         structured_output=False)
 
@@ -76,20 +80,30 @@ def build(conf, principal, env=None):
     return server
 
 
+def structured(result):
+    """A tool result as one JSON object, the same in the text content and the structured content: a command's
+    message as {"message"}, a list as {"items"}."""
+    if isinstance(result, dict):
+        return json.loads(json.dumps(result, ensure_ascii=False, default=str))
+    if isinstance(result, str):
+        return {"message": result}
+    return {"items": json.loads(json.dumps(list(result), ensure_ascii=False, default=str))}
+
+
 def worker_tools(queue):
-    def task_show(task: str) -> str:
+    def task_show(task: str) -> dict:
         """Your task (name it from your assignment): record, notes, worktree and the rendered prompt."""
         return t.show_own(queue, t.acting_principal(), task)
 
-    def task_note(task: str, text: str, question: bool = False) -> str:
+    def task_note(task: str, text: str, question: bool = False) -> dict:
         """Record a progress note on your task; question=true also wakes the coordinator until it answers."""
         return t.report(queue, t.acting_principal(), task, "note", text=text, question=question)
 
-    def task_done(task: str, handoff: str | None = None) -> str:
+    def task_done(task: str, handoff: str | None = None) -> dict:
         """Report your delivery once the handoff is written (default: handoff.md in your task's log directory)."""
         return t.report(queue, t.acting_principal(), task, "done", handoff=handoff or default_handoff(queue, task))
 
-    def task_blocked(task: str, reason: str, handoff: str | None = None) -> str:
+    def task_blocked(task: str, reason: str, handoff: str | None = None) -> dict:
         """Report that your task cannot go on, and why."""
         return t.report(queue, t.acting_principal(), task, "blocked", reason=reason, handoff=handoff)
 
@@ -104,47 +118,47 @@ def default_handoff(queue, task):
 def coordinator_tools(queue):
     svc = queue.service
 
-    def tasks_list(status: str | None = None, include_completed: bool = False) -> str:
+    def tasks_list(status: str | None = None, include_completed: bool = False) -> dict:
         """Task records, open ones unless include_completed; optionally only one status."""
-        return svc.list(status=status, include_completed=include_completed)
+        return svc.list(t.acting_principal(), status=status, include_completed=include_completed)
 
-    def tasks_show(task: str, history: bool = False) -> str:
+    def tasks_show(task: str, history: bool = False) -> dict:
         """One task record with its notes (and its event history with history=true)."""
-        return svc.get(task, history=history)
+        return svc.get(t.acting_principal(), task, history=history)
 
-    def tasks_ready() -> str:
+    def tasks_ready() -> dict:
         """Pending tasks the queue may assign now."""
         return t.ready(queue)
 
-    def tasks_questions() -> str:
+    def tasks_questions() -> dict:
         """Open worker questions."""
-        return svc.questions()
+        return svc.questions(t.acting_principal())
 
     def tasks_add(task: str, role: str, owned: list[str], objective: str, contract: str, accept: list[str],
                   depends: list[str] | None = None, milestone: str | None = None, room: str | None = None,
-                  priority: int = 0, touches: list[str] | None = None) -> str:
+                  priority: int = 0, touches: list[str] | None = None) -> dict:
         """Add a pending task (owned must include docs/investigations/TASK.md; at most six acceptance items)."""
         return t.add(queue, task, role, owned, objective, contract, accept, depends or (), milestone, room, priority,
                      touches=touches or ())
 
-    def tasks_edit(task: str, changes: dict, force: bool = False) -> str:
+    def tasks_edit(task: str, changes: dict, force: bool = False) -> dict:
         """Change a pending task (an in-progress one with force): keys role, objective, contract, accept, owned,
         add_owned, touches, depends, milestone, room, profile, priority, min_capability, note."""
         return t.edit(queue, task, changes, force)
 
-    def tasks_hold(task: str, on: bool = True) -> str:
+    def tasks_hold(task: str, on: bool = True) -> dict:
         """Keep the queue from assigning a task (on=false lets it go again)."""
         return t.hold(queue, task, on)
 
-    def tasks_release(task: str, reason: str) -> str:
+    def tasks_release(task: str, reason: str) -> dict:
         """Return an assigned task to pending, keeping the attempt."""
         return t.release(queue, task, reason)
 
-    def tasks_reopen(task: str, reason: str) -> str:
+    def tasks_reopen(task: str, reason: str) -> dict:
         """Undo a premature delivery: verification back to in progress."""
         return t.reopen(queue, task, reason)
 
-    def tasks_note(task: str, text: str) -> str:
+    def tasks_note(task: str, text: str) -> dict:
         """Set the coordinator note the worker reads; it answers the task's open questions."""
         return t.note(queue, task, text)
 
