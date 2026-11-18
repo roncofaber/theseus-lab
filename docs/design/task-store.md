@@ -265,3 +265,17 @@ Questions for the coordinator:
 - Q8. Worker questions: add `task note --question`, which also wakes `queue wait`, or keep the four approved worker commands and let questions go through a `partial` or `blocked` delivery as today?
 - Q9. Coordinator MCP: expose merge, unmerge, verify and complete as tools that start the work and report through a queue event (as designed), or keep them CLI-only?
 - Q10. Hand-made panes: allow the worktree-scoped fallback principal (identity by local path, local only), or require `agents migrate` to supervised agents before a project's cutover?
+
+## 16. Decisions (coordinator review, 2026-11-18)
+
+- Q1: the project id lives in the store and the export header only; `tasks_root` guards the live rows.
+- Q2: no per-assignment token. A worker is authenticated by its run secret, and every worker call names the task it believes it owns (the pointer line gives it: `theseus task show X`, `theseus task done X --handoff ...`); the service refuses with `not-your-task` unless that task is the agent's active attempt. This catches a stale context after a release or reassignment without a file write at assignment. The attempt id stays in the schema, so a token can be added in phase 2 if the transport needs one.
+- Q3: the export keeps today's three-file shape.
+- Q4: the handoff-file delivery fallback stays permanently, level-triggered robustness over edge-triggered reports. Deliveries record `source` (`command` or `detected`), and the console shows detected ones so a skill that is not followed stays visible.
+- Q5: deny by default. A caller is the coordinator only when no `THESEUS_AGENT_ID` or `THESEUS_CREDENTIALS` is set and the working directory is not a task worktree; anything else without valid credentials is refused, never promoted. The MCP server takes its role only from credentials or an explicit `--role coordinator` in the coordinator's own config, worker profiles that list `theseus` always use strict MCP config, and a worker server without credentials refuses to start.
+- Q6: observed touches come from delivery and also from a read-only scan of each running worktree's `.theseus/patches/` every tick, since it is cheap and catches overlap before delivery. Holds stay computed.
+- Q7: `offsite` is optional and empty by default; the path on this host is the user's decision. When set, daily and weekly copies go off-site (not hourly).
+- Q8: add `task note --question`; an open question is an attention item that wakes `queue wait` and stays listed until the coordinator answers with `tasks note ID` or edits the task.
+- Q9: coordinator MCP tools in this round are reads plus add, edit, hold, release, reopen and note. Merge, unmerge, verify and complete stay CLI-only until there is a clear need.
+- Q10: no path-based identity. Hand-made panes read their task through the read-only `theseus tasks show ID` (reads need no credentials) and deliver through the permanent handoff fallback; `agents migrate` is recommended before cutover but not required.
+- The dependency rule landing on main now (a dependency is satisfied only when its merge is an ancestor of the assignment base) moves into `ready()` and `claim()` in phase 2.
