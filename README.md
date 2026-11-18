@@ -71,7 +71,9 @@ theseus check           # checks the project rules
 
 Then open your coding agent in the project folder and tell it:
 
-> Read AGENTS.md and act as the coordinator. Plan the first exploration tasks and show them to me before starting.
+> Read AGENTS.md and follow the theseus-coordinating skill. Plan the first exploration tasks and show them to me before starting.
+
+The coordinator and every worker learn the workflow from the skills in `.agents/skills/` (see [Agent skills](docs/workflow.md#agent-skills)); `theseus upgrade` refreshes them after you upgrade theseus.
 
 ### Let an agent set it up
 

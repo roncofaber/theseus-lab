@@ -8,6 +8,21 @@ This page explains how a theseus project runs: who does what, how a task moves f
 - **Workers:** agent sessions that each take one task at a time. A worker edits only the files its task owns, in its own Git worktree, and ends by writing a handoff report.
 - **You:** approve plans and decisions, provide hardware or files, and test results.
 
+## Agent skills
+
+Agents learn the workflow from skills that `theseus scaffold` installs in `.agents/skills/` (linked as `.claude/skills/`); `AGENTS.md` tells each role which one to load.
+
+| Skill | Loaded by | Covers |
+| --- | --- | --- |
+| `theseus-coordinating` | the coordinator | orienting with no memory, the loop, every queue event, integration, safety rules, when to ask you; details in its `references/` (events, workers, task records, maintenance) |
+| `theseus-worker` | every worker | where it works, what it must never do, patches for outside paths, checks, the handoff and the manifest, what to do when blocked or denied |
+| `theseus-worker/instance-brief.md` | persistent workers, on every task message | how tasks arrive, the done line, waiting between tasks |
+| `theseus-worker/prompt-template.md` | headless and subagent workers | the rendered task prompt (`theseus dispatch ID --dry-run` shows it) |
+| `theseus-recipe` | the coordinator, when planning | the phases of a port and their gates |
+| `theseus-native-re`, `theseus-reference-runs` | workers, by task | the original's binaries, and running the original in isolation |
+
+These files belong to theseus: `theseus upgrade` refreshes them from the installed version (commit the result, then restart running agents so they reload them). Project skills go next to them as `<prefix>-<topic>/SKILL.md`. The separate `theseus-setup` skill (`theseus setup skill`) is for installing theseus, not for running a project.
+
 ## Project layout
 
 `theseus scaffold` creates:
@@ -51,7 +66,7 @@ theseus agents add worker-1 %3 --profile claude-code
 
 Pane ids belong to one machine and one tmux server, so a `[[instances.panes]]` list that seeds the registry goes in the Git-ignored `theseus.local.toml`, never in the tracked `theseus.toml` (`theseus config check` warns when it finds one there).
 
-`theseus queue run` (or `theseus queue wait` from the coordinator) then repeats this cycle:
+Run one driver per project, `theseus queue run`, in a hidden session of the private tmux server so it outlives coordinator sessions (after `theseus agents up` has started that server, `tmux -L theseus new-session -d -s PROJECT--queue -c ROOT "$(command -v theseus) queue run"`; with only hand-made panes, a session on your own tmux), and let the coordinator block on `theseus queue wait --no-drive`, which only watches and returns on the next event that needs it; a coordinator that misses a restart then delays only integration, never assignment. A plain `theseus queue wait` drives the queue itself while it waits; use it only when no `queue run` is running, never both. The driver repeats this cycle:
 
 - When an agent's task is done, the task moves to review. A task counts as done when the agent is idle, its handoff states a result, and the handoff has stopped changing.
 - Before an agent takes its next task, its context is reset. Normally the queue compacts it; when it moves from reading original code to clean-room work, the queue clears it completely.

@@ -100,6 +100,10 @@ def scaffold(target, name=None, force=False, init_git=True, hooks=True, adopt=Fa
 
 OWNED = {
     ".agents/skills/theseus-coordinating/SKILL.md",
+    ".agents/skills/theseus-coordinating/references/events.md",
+    ".agents/skills/theseus-coordinating/references/workers.md",
+    ".agents/skills/theseus-coordinating/references/task-records.md",
+    ".agents/skills/theseus-coordinating/references/maintenance.md",
     ".agents/skills/theseus-worker/SKILL.md",
     ".agents/skills/theseus-worker/prompt-template.md",
     ".agents/skills/theseus-worker/instance-brief.md",

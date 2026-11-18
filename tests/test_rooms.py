@@ -70,6 +70,10 @@ class UpgradeTests(Sandbox):
         self.assertIn("add   tools/lib/xvfb.sh", out)
         self.assertIn("theseus.toml lacks verification.max_unverified_hours", out)
         self.assertEqual(original, skill.read_text())
+        reference = self.project / ".agents/skills/theseus-coordinating/references/events.md"
+        reference.write_text("stale\n")
+        self.assertIn("update   .agents/skills/theseus-coordinating/references/events.md", self.theseus("upgrade").stdout)
+        self.assertNotEqual("stale\n", reference.read_text())
         self.assertEqual("# mine\n", (self.project / "AGENTS.md").read_text())
         self.assertIn("theseus.toml lacks verification.max_unverified_hours", self.theseus("upgrade").stdout)
 

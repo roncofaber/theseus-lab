@@ -18,4 +18,4 @@ Acceptance criteria:
 
 Coordinator notes: {{NOTES}}
 
-Do the work yourself; do not delegate to subagents, commit, push, stash, or edit files outside your owned paths (outside changes go as patches in `{{LOG_DIR}}/patches/`). Finish the implementation and its checks before replying. Your final message is the handoff defined in the `theseus-worker` skill; write the same text to `{{LOG_DIR}}/handoff.md` yourself.
+Do the work yourself; do not delegate to subagents, commit, push, stash, or edit files outside your owned paths (outside changes go as patches in `{{LOG_DIR}}/patches/`). Never move HEAD, touch other worktrees or hardware your task does not name, or `rm` variable or glob paths. Finish the implementation and its checks before replying; if you cannot, say `partial` or `blocked` and why. Your final message is the handoff defined in the `theseus-worker` skill; write the same text to `{{LOG_DIR}}/handoff.md` yourself.

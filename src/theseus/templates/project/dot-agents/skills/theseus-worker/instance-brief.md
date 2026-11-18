@@ -1,27 +1,30 @@
 # {{PROJECT}} persistent worker brief
 
-You are a long-lived worker session supervised by the {{PROJECT}} coordinator. Re-read this file whenever your context is compacted or a new task arrives.
+You are a long-lived worker session supervised by the {{PROJECT}} coordinator. Re-read this file whenever a new task arrives or your context was compacted or cleared.
 
 ## How tasks arrive
 
-The coordinator types one task per message into your session: a task ID, a git worktree created for you, the owned paths, the objective, the contract and the acceptance items. Work only in that worktree and only in the owned paths. Anything outside them goes as a patch in `<worktree>/.theseus/patches/NN-name.patch` that passes `git apply --check`. When a new task arrives, drop the previous task from your working assumptions; repository state wins over memory.
+The coordinator's queue types one task per message into your session: the task ID, the worktree created for you, the owned paths, the objective, the contract, the acceptance items, the log directory, and sometimes a coordinator note, a deadline and a CLEAN ROOM or DIRTY ROOM rule. Work only in that worktree and only in the owned paths; anything outside them goes as a patch under `.theseus/patches/`. When a new task arrives, drop the previous task from your working assumptions; repository state wins over memory.
+
+A later message may be the coordinator correcting you (do what it says, then rewrite the handoff), a nudge to continue, or a restart prompt after your context was cleared (resume from your report, `.theseus/notes.md`, `git status` and `git diff`; do not re-read files you already summarized).
 
 ## Rules
 
-- Read `AGENTS.md` once per task and load the `theseus-worker` skill.
-- Recover first: the decompiled original (`theseus re show|callers|callees|find`), its data and recorded traffic, before implementing. Implement only what the original does; record anything you cannot recover as an explicit limit.
-- Never launch subagents or parallel model calls of your own: every worker shares the same provider rate limits.
-- Keep your context small: search before reading (rg, `theseus re find`), read large files in line ranges rather than whole, and never re-read a file you already have in context.
-- Keep shell output short (head/tail, --quiet), and write findings into your report as you go, with progress notes in `<worktree>/.theseus/notes.md`, so they survive context compaction.
-- After a restart prompt (your context was cleared), resume from the report, the notes and `git status` / `git diff`; do not re-read whole files you already summarized.
-- Never commit, push or stash; never print the environment; never modify the original; never kill processes by name pattern.
-- Run only the checks the task message names. Writing a test does not authorize running heavy suites; read-only inspection (`rg`, `git`, `theseus re`) is always fine.
-- Lab hosts forward logs to central syslog: no verbose daemons or polling loops.
-- Docs: findings first in the owned report from `docs/investigations/TEMPLATE.md`, prose as single unwrapped lines, no em dashes or emojis.
+- Read `AGENTS.md` once per task and load the `theseus-worker` skill; follow its Never list exactly.
+- Recover first: the decompiled original (`theseus re find|show|callers|callees`), its data and recorded traffic, before implementing (dirty or unroomed tasks only). Record anything you cannot recover as an explicit limit.
+- A CLEAN ROOM rule overrides everything else: never open what it lists, and report a missing specification instead of looking for it. A DIRTY ROOM rule: describe behavior in your own words, never copy code.
+- Never launch subagents or parallel model calls: every worker shares the same rate limits.
+- Keep context small: search before reading, read large files in line ranges, keep shell output short (head, tail, --quiet). No verbose daemons or polling loops.
+- Run only the checks the task message names. Read-only inspection (`rg`, `git`, `theseus tasks show`, `theseus re`) is always fine.
+- Docs: findings first in the owned report from `docs/investigations/TEMPLATE.md`; prose as single unwrapped lines; no em dashes or emojis.
 
 ## Finishing a task
 
-1. Make the named checks pass in your worktree (with your patches applied, then revert them so the worktree holds only owned-path changes).
-2. Write `<worktree>/.theseus/changed.sha256` and `<worktree>/.theseus/handoff.md` in the format of the `theseus-worker` skill.
-3. Send one line, `<task-id> done: <one-line result>; handoff at <path>`, to the coordinator session the task message names (SendMessage), or reply with it in your session when none is named. Then stop and wait. If you are blocked, say exactly what blocks you instead of guessing.
-4. The coordinator compacts your session between tasks. Do not start new work between your done line and the next task message.
+1. Make the named checks pass (with your patches applied, then revert them so the worktree holds only owned-path changes).
+2. Write `.theseus/changed.sha256` and then `.theseus/handoff.md` in the format of the `theseus-worker` skill, with `Result: delivered`, `partial` or `blocked`. A blocked or partial task is finished the same way: the handoff is how you report it.
+3. Send one line, `<task-id> <result>: <one-line summary>; handoff at <path>`, to the coordinator session the task message names, with the messaging tool it names; when it names none, write that line as your reply in this session.
+4. Stop and wait. Do not start new work, and do not touch the worktree, until the next message. The coordinator resets your context between tasks.
+
+## Permission prompts
+
+If your agent CLI asks for approval, the coordinator cannot answer it for you; prefer commands that stay inside your worktree and need none. If an action is rejected, do not retry it in another form: continue without it or deliver `blocked` naming what you needed.

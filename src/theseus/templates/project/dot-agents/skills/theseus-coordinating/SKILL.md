@@ -1,97 +1,78 @@
 ---
 name: theseus-coordinating
-description: Use when acting as the coordinator of a theseus port - starting or resuming a session, a worker finishing or stalling, integrating a slice, planning or writing task records, choosing the next round, or deciding whether something is verified.
+description: Use when acting as the coordinator of a theseus port - starting or resuming a session with no memory, reacting to a queue event (delivered, partial, blocked, stalled, error), reviewing and merging a delivery, a failed verification, planning or writing task records, or deciding whether something is verified.
 ---
 
 # Coordinating a theseus port
 
-The coordinator owns the queue, dispatch, integration, verification, commits, pushes and the governance files. Workers own only their task paths and never commit.
+You own the task records, the queue, integration (`theseus merge`), verification, commits and the governance files (`AGENTS.md`, `theseus.toml`, `docs/project/**`, `.agents/skills/**`). Workers own only their task's paths in their own worktrees and never commit. Repository state wins over memory: after any restart or compaction, orient again.
 
-## Session start
+## 1. Orient
 
-1. `AGENTS.md`, `docs/project/STATE.md`, and once per session `docs/project/MANIFEST.md` and `docs/project/ROADMAP.md`.
-2. `theseus tasks list --evidence`, `theseus status` (dispatched workers and every other worktree) and `theseus verify --debt`. Never read `tasks-archive.jsonl` or `docs/project/archive/` whole; use `theseus tasks show ID`.
-3. Reality check: `git status`, `git log -5 --oneline`, `git worktree list`. Repository state wins over memory.
+1. Read `AGENTS.md` and `docs/project/STATE.md`; `MANIFEST.md` and `ROADMAP.md` once per session. A user instruction recorded in STATE.md (such as "workers paused") overrides the MANIFEST: while paused, no dispatch and no new tasks, only review, planning and verification.
+2. `git status`, `git log -5 --oneline`, `git worktree list`.
+3. `theseus console --once` (attention items, agents, waiting tasks, recent events). Then as needed: `theseus tasks list --evidence`, `theseus agents ls`, `theseus queue status`, `theseus queue log`, `theseus status` (headless workers and other worktrees), `theseus verify --debt`.
+4. Finish what is waiting before starting anything new: tasks in `verification` are unreviewed deliveries (section 3); `merged` tasks owe verification and completion.
+5. With agents registered, run the queue as two roles. The driver (assigns, nudges, retries) is one persistent `theseus queue run` in a hidden tmux session; if `theseus console --json` shows no `watcher` that is `alive` with command `run`, start it as `references/workers.md` (The queue) shows. You block in the background on `theseus queue wait --no-drive`, which only watches and exits on the first event that needs you; restart it after each event. A missed restart then delays only integration, never assignment. Never run a driving `queue wait` (without `--no-drive`) next to `queue run`.
+6. Tell the user in a few lines what you found and what you will do next.
 
-**Precedence:** a later user instruction recorded in STATE.md (for example "workers paused") overrides the MANIFEST's keep-going loop. While paused: no dispatch, no follow-ups; review, planning and verification only.
+Never read `tasks-archive.jsonl` or `docs/project/archive/` whole; use `theseus tasks show ID`.
 
-## Worker providers
+## 2. Loop
 
-Workers run under an agent profile (`theseus agents profiles`; `workers.default` and `[workers.<profile>]` in `theseus.toml`).
+Take the first action whose trigger holds, then loop. Busy agents are never a reason to stop.
 
-| Mode | Launch | Follow up / stop |
-| --- | --- | --- |
-| Headless (profiles with a headless command) | `theseus dispatch ID [--provider PROFILE]`; keep `theseus wait` running | `theseus followup NAME MSG` (profiles with resume) / `theseus stop NAME` |
-| Subagent (`claude-subagent`, opt in with a capacity) | `theseus dispatch ID --provider claude-subagent`, then launch a subagent whose prompt says to read and follow the printed `prompt.md` | your agent's own messaging and stop tools |
-| Persistent instances in tmux | supervised: `[agents]` in `theseus.local.toml`, `theseus agents up`, `scale PROFILE N`; hand-made: `theseus agents add NAME PANE --profile PROFILE` (`agents migrate NAME` moves it under supervision); then the queue | `theseus instance send|compact|restart`, `theseus agents ls|restart|attach|logs|down` |
+1. An event from `queue wait`: handle it (table below).
+2. A task in `verification`: integrate it (section 3).
+3. Fewer ready tasks than free agents: write records (`references/task-records.md`), following the phase gates of the `theseus-recipe` skill. Unknown original behavior is a bounded research task, not a blocker.
+4. `theseus verify --debt` near its limit: `theseus verify` before more merges.
+5. Otherwise: review the riskiest recent merge with a read-only reviewer given only the diff and its invariants; confirmed findings become fix records.
 
-`theseus tasks stats` compares profiles. Size capacity to your plan's rate limits.
+No agents registered: dispatch by hand (`references/workers.md`).
 
-## Queue
+## Events
 
-With agents registered (`theseus agents`), the queue does dispatch for you: write ready task records, keep `theseus queue wait` running in the background, and act on what it reports (`delivered`: review and `theseus merge`; `stalled` or `error`: follow up). Gateway errors are retried by the queue; they wake you only once resends run out or one is fatal. `theseus console --once` shows it all at a glance. The manual commands below remain for one-off control.
+`queue wait` prints `TIME KIND AGENT TASK DETAIL`. Details for every row: `references/events.md`.
 
-## Persistent instance rounds
-
-Instances are long-lived worker sessions in tmux panes: supervised on theseus's private tmux server (`[agents] managed = true`; crashes restart on their own, `blocked` or `failed` agents raise an `error` event), or hand-made panes in `[[instances.panes]]`. PANE below also accepts an agent name. They follow `.agents/skills/theseus-worker/instance-brief.md`.
-
-1. `theseus instance compact PANE` between tasks (a session cannot compact itself); `theseus instance restart PANE` resumes the session in a fresh process to pick up a new MCP server, skill or setting.
-2. `theseus instance assign TASK INSTANCE SUFFIX` creates the worktree and branch and commits the assignment.
-3. `theseus instance send PANE TASK WORKTREE [DEADLINE]` types the task message once the pane is idle; anything else goes through `theseus instance send AGENT TEXT` (or `--file PATH`), never raw `tmux send-keys`: it confirms submission and records `send_failed` otherwise.
-4. `theseus instance watch` under a monitor prints `HANDOFF name` and `IDLE-NO-HANDOFF name`.
-5. `theseus merge TASK` (exit 3: conflict, nothing committed), then `theseus build`, `theseus smoke`.
-
-## Round loop
-
-Take the first action whose trigger holds, then loop. Occupied slots are never a reason to stop.
-
-1. **Integrate** a delivered slice (handoff present): the checklist below.
-2. **Unstick** a worker idle past its budget, `FAILED` in `theseus status`, or finished without a handoff: one follow-up naming the missing step, file or failing check. Spent context: `theseus agents restart NAME --fresh --with-task` (one restart prompt for its task). Second stall: stop it, keep the worktree, `theseus tasks release ID --reason "..."` and redispatch smaller.
-3. **Dispatch** while slots are free: `theseus tasks ready`, rank, `theseus dispatch ID --dry-run`, read the prompt, dispatch.
-4. **Plan** when fewer tasks are ready than free slots: write records (rules below), following the phase and gate in the `theseus-recipe` skill. Unknown original behavior is a bounded research task, not a blocker.
-5. **Verify** when `theseus verify --debt` approaches its limit: run `theseus verify` before more code-only merges.
-6. **Review** with slots full: audit the riskiest recent integration with a read-only reviewer given only the diff and the invariants it must keep; verify findings yourself; confirmed ones become fix records.
-
-**Ranking:** (1) inside the current milestone, (2) unblocks the most dependents, (3) general contract over fixture, (4) ownership disjoint from running work, (5) smaller first.
-
-## Integration checklist
-
-1. On a subagent handback, stop the agent. Read the handoff and `theseus tasks check-delivery ID`. Anything OUTSIDE is rejected or moved to a patch, never merged silently.
-2. Check claims against code and evidence: cited lines, evidence IDs in the bundles, tests that assert independently derived values.
-3. `theseus merge ID` applies the delivery three-way with the worker's patches, regenerates the indexes and commits exactly the touched paths; any conflict restores main (then `theseus tasks rebase ID`). It refuses worker commits.
-4. `theseus build` and `theseus smoke`; record the outcome.
-5. Runtime evidence is separate: `theseus tasks observe ID --how "..."` after you saw it work in the running application; `--user` after the user tested it.
-6. `theseus tasks complete ID --log PATH --check "cmd -> outcome" --summary "..."` (or `--from-log` with a passing `theseus verify` log), then `theseus tasks archive` and `theseus tasks retire ID`.
-7. Rewrite the affected `STATE.md` rows (replace, never append), commit, push.
-
-## Writing task records
-
-`theseus tasks add ID --role R --owned PATHS... --objective "..." --contract "..." --accept ITEMS... [--depends IDS] [--milestone M] [--priority N] [--profile P] [--min-capability N]`.
-
-- Size for one worker session: one subsystem boundary, one report under `docs/investigations/`.
-- `--profile P` only when the task needs what that profile adds (an MCP server's session state); the queue relaunches a compatible agent onto it and back afterwards.
-- `--min-capability N` (`theseus tasks capability ID N`) only when the task needs a profile `capability` of at least N.
-- Acceptance items are observable: a focused command that passes, a named variation covered, an explicit unsupported result. At most six per record, 6 KB per record.
-- Never scope a task as a scenario slice; the scenario is one acceptance fixture of a general contract.
-- A change to an interface owns its consumers: `theseus tasks consumers ID` lists files outside `ownedPaths` that use names declared inside.
-- `researchRequired` and `externalBlocker` each need `evidence` and `unblockCondition`; `externalBlocker` is only for inputs the team cannot obtain.
-- With `[rooms]` enabled, give every record `--room dirty` (reads the original's code, writes the specification) or `--room clean` (implements from the specification and captures only). A dirty instance takes clean work only after `theseus instance compact PANE --clear` (a summarizing compact is not enough); assignment refuses it until then. The specification is the only channel between rooms: review it for copied code before clean workers read it.
-
-## Hygiene
-
-- Fold sweep: reports name a `Topic:`; periodically fold them into `docs/topics/` with a documentation worker, then `theseus docs fold-apply --topic NAME` and `theseus docs index`.
-- Evidence, logs and handoffs go under the data root (durable); scratch under `paths.scratch`.
-- `theseus cleanup` (dry run) after a batch of integrations; `--apply` keeps anything an open task references and saves evidence-like files first.
-- Never kill processes by name pattern; `theseus stop NAME` ends a worker's slice.
-
-## Red flags
-
-| Thought | Reality |
+| Event | Do |
 | --- | --- |
-| "All slots are busy, I'll wait" | Review, plan or verify; the loop has work |
-| "The worker says it passed" | Run it yourself before accepting |
-| "It is merged, so it works" | Merged is not observed; observed is not user-tested |
-| "One more code-only merge is fine" | Check `theseus verify --debt`; the full pass is owed |
-| "This needs original behavior we don't have, blocked" | Dispatch a research task with `theseus-native-re` or `theseus-reference-runs` |
-| "I'll keep this helper in scratch" | Reusable scripts live in the repository |
-| "I'll append a paragraph to STATE.md" | Replace the stale section; detail goes in the task result |
+| `delivered` | Integrate (section 3). |
+| `partial` | Read Limits. If what works passes its checks, integrate it, complete it with one `--limit` per unmet item, and add a follow-up record for the rest. To send it back instead, see events.md (move the handoff aside first). |
+| `blocked` | Read what blocks it. Supply it (spec, decision, patch) and send it back, or release and rewrite the record; inputs only the human has: escalate. |
+| `stalled` idle / after a nudge | `theseus agents logs NAME`, then one `theseus instance send NAME "..."` naming the missing step. Second stall: release and split. |
+| `stalled` thrashing or context spent | `theseus agents restart NAME --fresh --with-task`. |
+| `stalled` waiting for ... | A permission prompt: never `instance send` to it (its Enter can approve). See events.md. |
+| `stalled` gateway CODE xN | The queue already retried with backoff; see events.md. |
+| `error` | Read the detail: failed agent, startup dialog, fatal gateway error, failed assignment. See events.md. |
+
+## 3. Integrate a delivery
+
+1. Read the handoff (`theseus tasks show ID` gives `execution.logDir`), then `theseus tasks check-delivery ID`. Every `OUTSIDE` path must be in a worker patch (a file under the worktree's `.theseus/patches/`; a mention under Coordinator actions is not one), or reviewed and passed with `--accept PATH`, or reverted. Never merge it silently. A shared or governance file: revert it and make the change yourself on main, or ask for a patch; `--accept` only small changes you read.
+2. Check the claims: run the named checks yourself, read the cited lines, prefer tests that assert independently derived values.
+3. `theseus merge ID` applies the worktree three-way with its patches, regenerates the indexes and commits only the touched paths. Exit 3: refused or conflicting, main restored, nothing committed (events.md).
+4. `theseus build` and `theseus smoke`.
+5. `theseus verify`. FAIL: `theseus tasks unmerge ID --reason "..."` (events.md, failed verification); never complete it.
+6. `theseus tasks observe ID --how "..."` only after you saw it work in the running application; `--user` only after the user tested it.
+7. `theseus tasks complete ID --from-log VERIFY_LOG --summary "..."` (or `--check "cmd -> outcome" --log PATH`), `theseus tasks archive`, `theseus tasks retire ID`.
+8. Rewrite the affected STATE.md rows (replace, never append), then commit `docs/project/` (complete, archive and retire leave it modified).
+
+## Safety rules
+
+- Commit locally as the loop requires. Push only when the user asked (a standing instruction in MANIFEST.md or STATE.md counts); the pre-push guard refuses unverified code. Never force-push, rewrite history or change remotes without asking.
+- Workers never commit, stash, push or move HEAD. In a worker's worktree you only move a stale handoff aside, revert a rejected outside path, resolve a merge conflict or undo a worker commit (events.md).
+- Clean and dirty rooms (`[rooms]`): every record gets `--room`; clean workers never see the original's code or dirty paths; the specification is the only channel and you review it for copied code before clean work starts. An agent moves from dirty to clean work only after a clear (the queue does it; `taint = "permanent"` forbids it).
+- Secrets: never print the environment; never put credentials, tokens or local configuration in records, messages, reports or commits.
+- Type into agents only with `theseus instance send`, never raw `tmux send-keys`. Never kill processes by name pattern; use `theseus stop NAME` or `theseus agents down NAME`.
+- The original is read-only. Real hardware is touched only by a task whose record says so, and never with commands not first seen in recorded original traffic.
+- Merged, observed and user-tested are three claims; never report one as another.
+
+## Escalate to the human
+
+Stop and ask when: a plan or milestone gate needs approval; a permission prompt or startup dialog needs an answer; credentials, budget or a fatal gateway error stop agents; hardware must be connected, powered or operated; a push, history rewrite, remote change or deletion of work is needed; a task needs an input the team cannot obtain; a task failed twice after splitting; main fails verification and no single recent merge explains it.
+
+## References
+
+- `references/events.md`: every event and failure path step by step: partial and blocked send-backs, stalls, permission prompts, gateway errors, merge refusals and conflicts, failed verification.
+- `references/workers.md`: headless, subagent and persistent workers; supervised agent commands; manual instance rounds.
+- `references/task-records.md`: writing and changing records, rooms, profiles, capability.
+- `references/maintenance.md`: docs folding, cleanup, the host store and backups, upgrades.

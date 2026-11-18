@@ -27,7 +27,7 @@ Project skills (data formats, the device protocol, the build of the new applicat
 
 ## Team
 
-The coordinator owns integration, task assignment, verification, commits, pushes and worker replenishment. Workers are coding agents described by an agent profile (`theseus agents profiles`: Claude Code, Codex, OpenCode, Gemini CLI and others): one-shot headless runs (`theseus dispatch ID`), persistent sessions in tmux panes registered with `theseus agents add` and fed by `theseus queue`, or subagents of the coordinator. Capacity per profile is `workers.<profile>.capacity` in `theseus.toml`. Workers stay inside their owned paths, report exact evidence and limits, and never commit or push.
+The coordinator owns integration, task assignment, verification, commits, pushes (when the user asks) and worker replenishment. Workers are coding agents described by an agent profile (`theseus agents profiles`: Claude Code, Codex, OpenCode, Gemini CLI and others): one-shot headless runs (`theseus dispatch ID`), persistent sessions in tmux panes registered with `theseus agents add` and fed by `theseus queue`, or subagents of the coordinator. Capacity per profile is `workers.<profile>.capacity` in `theseus.toml`. Workers stay inside their owned paths, report exact evidence and limits, and never commit or push.
 
 A worker task has a task ID in `docs/project/tasks.json`, owned paths, a general contract, at most six acceptance items and a milestone. Inspect current state at task start; another slice may have changed assumptions. Only the coordinator edits shared integration files and governance files (`AGENTS.md`, `README.md`, `theseus.toml`, `docs/project/**`, `.agents/skills/**`).
 
