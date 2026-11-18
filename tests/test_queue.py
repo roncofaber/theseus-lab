@@ -32,7 +32,6 @@ class QueueTests(Sandbox):
                          "FAKE_PANES": "%1 %2", "THESEUS_COMPACT_POLL": "0.01", "THESEUS_TYPE_POLL": "0.01",
                          "THESEUS_SEND_POLL": "0.01"})
         self.theseus("tasks", "milestone", "M1")
-        self.git("commit", "-q", "-am", "milestone")
         self.theseus("agents", "add", "worker-a", "%1")
 
     def add(self, task_id, room=None, **extra):
@@ -42,11 +41,7 @@ class QueueTests(Sandbox):
             args += ["--room", room]
         self.theseus(*args)
         if extra:
-            path = self.project / "docs/project/tasks.json"
-            document = json.loads(path.read_text())
-            document["tasks"][-1].update(extra)
-            path.write_text(json.dumps(document, indent=2) + "\n")
-        self.git("commit", "-q", "-am", f"queue {task_id}")
+            self.edit_record(task_id, **extra)
 
     def typed(self):
         path = self.state / "typed"
@@ -129,7 +124,6 @@ class QueueTests(Sandbox):
                                               '[workers.with-mcp]\npreset = "claude-code"\nmcp_servers = ["theseus"]\n')
         self.theseus("tasks", "add", "hard-task", "--role", "research", "--owned", "docs/investigations/hard-task.md",
                      "--objective", "Do it.", "--contract", "All variants.", "--accept", "Done.", "--min-capability", "2")
-        self.git("commit", "-q", "-am", "queue hard-task")
         self.assertEqual(2, json.loads(self.theseus("tasks", "show", "hard-task").stdout)["minCapability"])
         self.assertNotIn("assigned", self.theseus("queue", "tick").stdout, "capability 1 is below the minimum")
         self.theseus("agents", "add", "worker-b", "%2", "--profile", "strong")
@@ -164,11 +158,7 @@ class QueueTests(Sandbox):
         self.git("add", "src/first.py")
         self.git("commit", "-q", "-m", "merge first-task")
         merge = self.git("rev-parse", "HEAD").stdout.strip()
-        path = self.project / "docs/project/tasks.json"
-        document = json.loads(path.read_text())
-        document["tasks"][0].update({"status": "merged", "merge": {"commit": merge, "mergedAt": "2026-11-18T00:00:00Z"}})
-        path.write_text(json.dumps(document, indent=2) + "\n")
-        self.git("commit", "-q", "-am", "first-task merged")
+        self.edit_record("first-task", status="merged", merge={"commit": merge, "mergedAt": "2026-11-18T00:00:00Z"})
 
         out = self.theseus("queue", "tick").stdout
         self.assertRegex(out, rf"held\s+-\s+second-task waiting for first-task's merge {merge[:7]} to reach origin/main")

@@ -42,7 +42,6 @@ class WorkerSandbox(Sandbox):
         self.theseus("tasks", "add", TASK, "--role", "implementation", "--owned", "src/status.py",
                      f"docs/investigations/{TASK}.md", "--objective", "Decode the device status frame.",
                      "--contract", "Every status frame layout the original decodes.", "--accept", "Recorded frames decode.")
-        self.git("commit", "-q", "-am", "queue")
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
         self.env.update({"PATH": f"{self.bin}{os.pathsep}{self.env['PATH']}", "THESEUS_NO_SLICE": "1",

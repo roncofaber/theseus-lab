@@ -81,11 +81,9 @@ class GatewayCase(Sandbox):
         self.env.update(extra)
         os.environ.update(extra)
         self.theseus("tasks", "milestone", "M1")
-        self.git("commit", "-q", "-am", "milestone")
         self.theseus("agents", "add", "worker-a", "%1")
         self.theseus("tasks", "add", "slow-task", "--role", "research", "--owned", "docs/investigations/slow-task.md",
                      "--objective", "Do it.", "--contract", "All variants.", "--accept", "Done.")
-        self.git("commit", "-q", "-am", "queue slow-task")
         self.theseus("queue", "tick")
         from theseus import agents as ag
         from theseus import config as cfg

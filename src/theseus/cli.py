@@ -56,7 +56,10 @@ def guarded(function):
         except integrate.IntegrationError as error:
             print(f"theseus: {error}", file=sys.stderr)
             sys.exit(error.code)
-        except (tasks.TaskError, gitutil.GitError, cfg.ConfigError, profiles.ProfileError) as error:
+        except tasks.TaskError as error:
+            print(f"theseus: {error}", file=sys.stderr)
+            sys.exit(3 if getattr(error, "code", None) == "conflict" else 1)
+        except (gitutil.GitError, cfg.ConfigError, profiles.ProfileError) as error:
             sys.exit(f"theseus: {error}")
     return wrapper
 
@@ -203,7 +206,7 @@ def cmd_check(args):
 
 # tasks
 
-TASK_READS = ("list", "ready", "show", "prompt", "check-delivery", "consumers", "stats")
+TASK_READS = ("list", "ls", "ready", "show", "prompt", "check-delivery", "consumers", "stats", "export")
 
 
 def queue_locked(conf):
@@ -225,14 +228,35 @@ def tasks_action(conf, queue, args):
     if action == "add":
         emit(t.add(queue, args.id, args.role, args.owned, args.objective, args.contract, args.accept, args.depends, args.milestone,
                    args.room, args.priority, args.profile, args.min_capability))
-    elif action == "list":
+    elif action in ("list", "ls"):
         emit(t.list_tasks(queue, args.status, args.all, args.evidence))
+    elif action == "edit":
+        changes = {key: value for key, value in (
+            ("role", args.role), ("objective", args.objective), ("contract", args.contract), ("accept", args.accept),
+            ("owned", args.owned), ("add_owned", args.add_owned), ("touches", args.touches), ("depends", args.depends),
+            ("milestone", args.milestone), ("room", args.room), ("profile", args.profile), ("priority", args.priority),
+            ("min_capability", args.min_capability), ("note", args.note)) if value is not None}
+        if not changes:
+            sys.exit("theseus: nothing to change; see theseus tasks edit --help")
+        emit(t.edit(queue, args.id, changes, args.force))
+    elif action == "import":
+        emit(t.import_(queue, replace=args.replace, new_id=args.new_id))
+    elif action in ("export", "archive"):
+        emit(t.export(queue))
+    elif action == "adopt":
+        adopted = queue.service.adopt(t.as_coordinator(None))
+        emit(f"{adopted['project']}'s tasks now belong to {adopted['root']} (was {adopted['previous'] or 'unset'})")
     elif action == "ready":
         ids = t.ready(queue, args.include_paused, args.any_milestone)
         emit(ids)
         if not ids:
             sys.exit(1)
     elif action == "show":
+        if args.history:
+            found = queue.service.get(t.as_coordinator(None), args.id, history=True)
+            print(json.dumps({"task": found["task"], "notes": found["notes"], "history": found["history"]}, indent=2,
+                             ensure_ascii=False))
+            return
         task = queue.get(args.id)
         print(json.dumps(task.get(args.field) if args.field else task, indent=2, ensure_ascii=False))
     elif action == "prompt":
@@ -286,13 +310,6 @@ def tasks_action(conf, queue, args):
         emit(t.retire(queue, args.id, args.force))
     elif action == "stats":
         emit(t.stats(conf, args.since))
-    elif action == "archive":
-        message = t.archive(queue)
-        emit(message)
-        if message.startswith("archived"):
-            from . import gitutil
-            gitutil.commit_paths(conf.root, f"chore: {message}", [cfg.TASKS, cfg.ARCHIVE])
-            print(f"committed {cfg.TASKS} and {cfg.ARCHIVE}")
     elif action == "milestone":
         if args.value is None:
             print(queue.milestone() or "none")
@@ -971,7 +988,12 @@ def cmd_db(args):
                   f"{size_text(result['before'])} -> {size_text(result['after'])}")
         elif action == "prune":
             older = args.older_than_days * 86400 if args.older_than_days else None
-            names = store.prune_projects(conn, older_than=older, dry_run=not args.yes)
+            if args.with_tasks and args.yes:
+                for row in store.prune_projects(conn, older_than=older, dry_run=True, with_tasks=True, rows=True):
+                    saved = drop_project_tasks(row)
+                    if saved:
+                        print(f"exported {row['name']}'s tasks to {saved} and deleted them from the store")
+            names = store.prune_projects(conn, older_than=older, dry_run=not args.yes, with_tasks=args.with_tasks)
             verb = "removed" if args.yes else "would remove"
             print(f"{verb} {', '.join(names)} and all their rows (events, agents, runs, deliveries, samples, gateway "
                   f"errors and retries, pool slots)" if names
@@ -994,6 +1016,15 @@ def cmd_db(args):
                 print(f"last {job} error: {error}")
             if not ok:
                 sys.exit(1)
+
+
+def drop_project_tasks(row):
+    """Export a pruned project's tasks to its data directory's exports/ and delete them from the store."""
+    from types import SimpleNamespace
+    from . import store, taskservice
+    data = row["data"] or str(store.path().parent / "projects" / row["name"])
+    conf = SimpleNamespace(name=row["name"], root=Path(row["root"] or data), data=Path(data))
+    return taskservice.open(conf).drop_tasks(taskservice.COORDINATOR)
 
 
 def cmd_cleanup(args):
@@ -1052,16 +1083,44 @@ def build_parser():
     p.add_argument("--profile", help="agent profile the task needs (default: any); see theseus tasks profile")
     p.add_argument("--min-capability", type=int, default=0, metavar="N",
                    help="lowest profile capability that may take the task (default 0: any); see theseus tasks capability")
-    p = ts.add_parser("list", help="one line per task with readiness or blocking reasons")
-    p.add_argument("--status", choices=("pending", "in_progress", "verification", "merged", "completed"))
-    p.add_argument("--all", action="store_true", help="include archived tasks")
-    p.add_argument("--evidence", action="store_true", help="show merged / observed / user-tested")
+    for name in ("list", "ls"):
+        p = ts.add_parser(name, help="one line per task with readiness or blocking reasons")
+        p.add_argument("--status", choices=("pending", "in_progress", "verification", "merged", "completed"))
+        p.add_argument("--all", action="store_true", help="include archived tasks")
+        p.add_argument("--evidence", action="store_true", help="show merged / observed / user-tested")
+    p = ts.add_parser("edit", help="change a pending task (an in-progress one with --force, which leaves its worker a "
+                                   "note); verification and later: reopen first")
+    p.add_argument("id")
+    p.add_argument("--role")
+    p.add_argument("--objective")
+    p.add_argument("--contract")
+    p.add_argument("--accept", nargs="+", metavar="TEXT", help="replaces the acceptance items")
+    p.add_argument("--owned", nargs="+", metavar="PATH", help="replaces the owned paths")
+    p.add_argument("--add-owned", nargs="+", metavar="PATH", help="adds owned paths")
+    p.add_argument("--touches", nargs="+", metavar="PATH", help="replaces the shared files the task will patch")
+    p.add_argument("--depends", nargs="*", metavar="ID", help="replaces the dependencies (none: clear them)")
+    p.add_argument("--milestone")
+    p.add_argument("--room", choices=("clean", "dirty", ""))
+    p.add_argument("--profile")
+    p.add_argument("--priority", type=int)
+    p.add_argument("--min-capability", type=int, metavar="N")
+    p.add_argument("--note", help="the coordinator note carried in the task message")
+    p.add_argument("--force", action="store_true", help="edit an in-progress task")
+    p = ts.add_parser("import", help="load docs/project/tasks.json and tasks-archive.jsonl into the host store (once "
+                                     "per project; the store is backed up first and the import checked lossless)")
+    p.add_argument("--replace", action="store_true", help="load over tasks already in the store (they are exported "
+                                                          "to <data>/exports/ first)")
+    p.add_argument("--new-id", action="store_true", help="give the project a fresh id (another project reusing the name)")
+    ts.add_parser("export", help="write the store's tasks to docs/project/ (tasks.json, tasks-archive.jsonl, "
+                                 "tasks-history.jsonl); commit them with the next change")
+    ts.add_parser("adopt", help="record this checkout as the root of the project's tasks (a moved checkout)")
     p = ts.add_parser("ready", help="pending tasks of the current milestone whose dependencies are merged or completed")
     p.add_argument("--include-paused", action="store_true")
     p.add_argument("--any-milestone", action="store_true")
     p = ts.add_parser("show", help="print one task record, open or archived")
     p.add_argument("id")
     p.add_argument("--field")
+    p.add_argument("--history", action="store_true", help="with its notes and event history")
     p = ts.add_parser("prompt", help="render the worker prompt for a task")
     p.add_argument("id")
     p.add_argument("--base", required=True)
@@ -1072,8 +1131,7 @@ def build_parser():
     for flag in ("--owner", "--provider", "--model", "--worktree", "--base", "--log-dir"):
         p.add_argument(flag, required=True)
     p.add_argument("--force", action="store_true")
-    ts.add_parser("migrate-ids", help="record the owning agent's ID (ownerId, agentId on attempts) on task records "
-                                      "written before agents had IDs; safe to rerun")
+    ts.add_parser("migrate-ids", help="deprecated: agent ids live on the attempts in the host store")
     p = ts.add_parser("release", help="return an assigned task to pending, keeping the attempt")
     p.add_argument("id")
     p.add_argument("--reason", required=True)
@@ -1149,7 +1207,7 @@ def build_parser():
     p.add_argument("instance")
     p.add_argument("suffix")
     p.add_argument("--provider")
-    p.add_argument("--no-commit", action="store_true")
+    p.add_argument("--no-commit", action="store_true", help="no effect (kept for scripts): an assignment commits nothing")
     p.add_argument("--in-place", action="store_true",
                    help="no worktree and no commit: edit owned paths in the main checkout (docs-only rounds, or before a first commit)")
     p = ins.add_parser("send", help="type text into an agent's pane once idle and confirm it was submitted (send_failed "
@@ -1177,7 +1235,7 @@ def build_parser():
     p.add_argument("--model")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--resume-paused", action="store_true")
-    p.add_argument("--no-commit", action="store_true", help="refuse instead of committing an uncommitted task record")
+    p.add_argument("--no-commit", action="store_true", help="no effect (kept for scripts): an assignment commits nothing")
     p.set_defaults(func=guarded(cmd_dispatch))
 
     p = sub.add_parser("merge", help="integrate a delivered task: ownership check, three-way apply, patches, indexes, commit")
@@ -1333,6 +1391,8 @@ def build_parser():
     p.add_argument("file", nargs="?", help="restore: the backup file to load")
     p.add_argument("--yes", action="store_true", help="restore, prune: really do it")
     p.add_argument("--older-than-days", type=float, help="prune: also projects nobody used for this many days")
+    p.add_argument("--with-tasks", action="store_true", help="prune: also projects with tasks in the store, after "
+                                                              "exporting them to the project's data directory")
     p.set_defaults(func=cmd_db)
 
     p = sub.add_parser("cleanup", help="reclaim disk from retired worktrees and old scratch (dry run by default)")

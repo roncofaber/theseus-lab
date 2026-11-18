@@ -17,6 +17,7 @@ from importlib import resources
 from . import config as cfg
 from . import integrate
 from . import rules
+from . import store
 from . import tasks as t
 
 WORKER_NOTES = (
@@ -50,17 +51,11 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
         index = queue.index()
         reasons = t.blocking(task, index, queue.milestone(), t.merge_reach(conf)) or [task["status"]]
         raise integrate.IntegrationError(f"{task_id} is not ready: {', '.join(reasons)}")
-    if not integrate.record_committed(conf, task_id, "HEAD"):
-        if not commit or dry_run:
-            raise integrate.IntegrationError(f"commit the {task_id} record first: the worker must see it at its base")
-        integrate.commit_record(conf, f"chore: queue {task_id}")
     problems = rules.task_record_problems(conf)
     if problems:
         raise integrate.IntegrationError("task records break the Supervisor rules; fix them before dispatching:\n" + "\n".join(problems))
     base = integrate.base_commit(conf)
     integrate.check_reached(conf, task, base)
-    if not integrate.record_committed(conf, task_id, base):
-        raise integrate.IntegrationError(integrate.base_mismatch(conf, task_id, base))
     name = name or task_id
     worktree = conf.worktrees / name
     record_dir = conf.workers_dir / name
@@ -92,15 +87,25 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
         return lines
     record_dir.mkdir(parents=True, exist_ok=True)
     (record_dir / "prompt.md").write_text(prompt + "\n")
-    aside = integrate.move_previous_attempt(conf, queue, task_id, worktree)
-    if aside:
-        lines.append(f"the previous attempt's worktree moved to {aside}")
-    integrate.create_worktree(conf, name, base)
+    principal = t.as_coordinator(None)
+    # A one-shot worker registers no agent, so its attempt carries an id minted for this dispatch.
+    claim = queue.service.claim(principal, task_id, store.new_id(), owner=f"{provider}:{model}:{name}",
+                                provider=provider, model=model, force=resume_paused,
+                                capacity=None if resume_paused else t.provider_capacity(conf, provider),
+                                reach=None if resume_paused else t.merge_reach(conf, base))
+    created = False
     try:
+        aside = integrate.move_previous_attempt(conf, queue, task_id, worktree)
+        if aside:
+            lines.append(f"the previous attempt's worktree moved to {aside}")
+        integrate.create_worktree(conf, name, base)
+        created = True
         rooms.exclude_dirty(conf, task, worktree)
-        t.assign(queue, task_id, f"{provider}:{model}:{name}", provider, model, worktree, base[:12], log_dir, force=resume_paused)
-    except Exception:
-        integrate.remove_worktree(conf, worktree, name)
+        queue.service.activate(principal, claim["attempt"], worktree=worktree, base=base[:12], log_dir=log_dir)
+    except Exception as error:
+        queue.service.abandon(principal, claim["attempt"], f"dispatch failed: {error}")
+        if created:
+            integrate.remove_worktree(conf, worktree, name)
         raise
     record = {"task": task_id, "name": name, "provider": provider, "profile": profile["preset"], "model": model, "base": base,
               "worktree": str(worktree), "session": session, "resume": resume, "env": extra_env,
@@ -109,7 +114,7 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
         (record_dir / "launch.json").write_text(json.dumps(record) + "\n")
         lines += [f"prepared {task_id} in {worktree}. Launch a subagent{f' (model {model})' if model else ''} whose prompt says: "
                   f"read and follow {record_dir / 'prompt.md'}",
-                  f"the handoff appears at {log_dir / 'handoff.md'}; the assignment rides with the next commit"]
+                  f"the handoff appears at {log_dir / 'handoff.md'}"]
         return lines
     (record_dir / "stderr.log").write_text("")
     env = integrate.worker_environment(conf, worktree)
@@ -124,5 +129,5 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
     (record_dir / "pid").write_text(f"{process.pid}\n")
     (record_dir / "launch.json").write_text(json.dumps(record) + "\n")
     lines += [f"launched {task_id} as pid {process.pid} in {worktree}; records in {record_dir}, worker logs in {log_dir}",
-              "keep `theseus wait` running in the background; `theseus status` shows progress; the assignment rides with the next commit"]
+              "keep `theseus wait` running in the background; `theseus status` shows progress"]
     return lines

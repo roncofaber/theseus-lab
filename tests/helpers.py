@@ -2,6 +2,7 @@
 backup directory and host configuration (THESEUS_CONFIG, XDG_CONFIG_HOME, XDG_DATA_HOME), a throwaway tmux socket
 for supervised agents (THESEUS_TMUX_PATH, with THESEUS_TMUX_GUARD refusing the default private socket) and a throwaway
 Git identity, so nothing touches the user's real projects, host store, tmux servers or model gateway."""
+import json
 import os
 import subprocess
 import sys
@@ -172,6 +173,18 @@ class Sandbox(unittest.TestCase):
         self.theseus("scaffold", self.project, "--name", name, cwd=self.tmp)
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "scaffold")
+
+    def edit_records(self, change):
+        """Change task records as a hand edit of the export would: export, change tasks.json, import over the store."""
+        self.theseus("tasks", "export")
+        path = self.project / "docs/project/tasks.json"
+        document = json.loads(path.read_text())
+        change(document)
+        path.write_text(json.dumps(document, indent=2) + "\n")
+        self.theseus("tasks", "import", "--replace")
+
+    def edit_record(self, task_id, **fields):
+        self.edit_records(lambda document: next(t for t in document["tasks"] if t["id"] == task_id).update(fields))
 
     def set_config(self, text):
         path = self.project / "theseus.toml"

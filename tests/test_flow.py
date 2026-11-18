@@ -85,6 +85,8 @@ class TaskFlowTests(Sandbox):
     def test_full_task_flow(self):
         self.write("theseus.local.toml", "[paths]\noriginal = []\n")
         self.add_task()
+        self.theseus("tasks", "edit", TASK, "--priority", "3", "--note", "Start with the v2 header.")
+        self.assertEqual((3, "Start with the v2 header."), (self.record()["priority"], self.record()["assignmentNote"]))
         self.assertEqual(TASK, self.theseus("tasks", "ready").stdout.strip())
         out = self.theseus("instance", "assign", TASK, "worker-1", "a").stdout
         worktree = self.tmp / "worktrees/worker-1-a"
@@ -92,6 +94,8 @@ class TaskFlowTests(Sandbox):
         self.assertEqual("in_progress", self.record()["status"])
         self.assertEqual("", self.git("status", "--porcelain", "--untracked-files=no").stdout)
         self.assertTrue((worktree / "theseus.local.toml").exists())
+        shown = json.loads(self.theseus("tasks", "show", TASK, cwd=worktree).stdout)
+        self.assertEqual(str(worktree), shown["worktree"], "a worker reads its record from the store in its worktree")
         self.deliver(worktree)
         check = self.theseus("tasks", "check-delivery", TASK).stdout
         self.assertIn("0 outside owned paths", check)
@@ -123,7 +127,9 @@ class TaskFlowTests(Sandbox):
         self.assertEqual("0 code commits", self.theseus("verify", "--debt").stdout.split(" since")[0])
         self.theseus("tasks", "complete", TASK, "--from-log", log, "--summary", "header reader merged and verified")
         self.assertEqual("completed", self.record()["status"])
-        self.assertIn("archived 1", self.theseus("tasks", "archive").stdout)
+        self.assertIn("0 open and 1 archived task(s)", self.theseus("tasks", "export").stdout)
+        self.git("add", "docs/project")
+        self.git("commit", "-q", "-m", "record the completed task")
         self.assertEqual("", self.git("status", "--porcelain", "--untracked-files=no").stdout)
         self.assertEqual([], json.loads((self.project / "docs/project/tasks.json").read_text())["tasks"])
         self.assertEqual("completed", self.record()["status"])
@@ -209,7 +215,6 @@ class TaskFlowTests(Sandbox):
         self.assertEqual(lines.replace("line 1\n", "line 1 from main\n").replace("line 10\n", "line 10 from the worker\n"),
                          (worktree / "src/capture/header.py").read_text())
 
-        self.git("commit", "-q", "-am", "record the rebase")
         self.write("src/capture/header.py", lines.replace("line 10\n", "line 10 from main\n"))
         self.git("commit", "-q", "-am", "main edits line 10")
         refused = self.theseus("tasks", "rebase", TASK, check=False)
@@ -232,7 +237,6 @@ class TaskFlowTests(Sandbox):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "old module")
         self.add_task(owned=("src/capture/", f"docs/investigations/{TASK}.md"))
-        self.git("commit", "-q", "-am", "queue")
         self.theseus("instance", "assign", TASK, "worker-1", "a")
         worktree = self.tmp / "worktrees/worker-1-a"
         (worktree / "src/capture/old.py").unlink()
@@ -254,7 +258,6 @@ class TaskFlowTests(Sandbox):
         later = "use-capture-header"
         self.add_task()
         self.add_task(later, owned=("src/capture/use.py", f"docs/investigations/{later}.md"), depends=[TASK])
-        self.git("commit", "-q", "-am", "queue both")
         self.git("init", "-q", "--bare", self.tmp / "origin.git", cwd=self.tmp)
         self.git("remote", "add", "origin", self.tmp / "origin.git")
         self.git("push", "-q", "--no-verify", "origin", "main")
@@ -283,6 +286,9 @@ class TaskFlowTests(Sandbox):
         self.add_task()
         self.theseus("instance", "assign", TASK, "worker-1", "a")
         worktree = self.tmp / "worktrees/worker-1-a"
+        self.write("src/other.py", "OTHER = 1\n")
+        self.git("add", "src/other.py")
+        self.git("commit", "-q", "-m", "main moves on")
         self.git("rebase", "-q", "main", cwd=worktree)
         head = self.git("rev-parse", "--short=12", "HEAD", cwd=worktree).stdout.strip()
         self.assertNotEqual(head, self.record()["baseCommit"])
@@ -299,7 +305,9 @@ class TaskFlowTests(Sandbox):
         from theseus import config as cfg, workqueue
         events = workqueue.events(cfg.load(root=self.project), task=TASK, kinds=["rebased"])
         self.assertEqual(1, len(events))
-        self.git("commit", "-q", "-am", "record the rebase")
+        self.write("src/later.py", "LATER = 1\n")
+        self.git("add", "src/later.py")
+        self.git("commit", "-q", "-m", "main moves on again")
         self.git("rebase", "-q", "main", cwd=worktree)
         self.deliver(worktree)
         merge = self.theseus("merge", TASK).stdout
@@ -324,21 +332,20 @@ class TaskFlowTests(Sandbox):
         self.assertIn("README.md", self.git("show", "--name-only", "--format=", commit).stdout.split())
         self.assertEqual("", self.git("status", "--porcelain").stdout)
 
-    def test_bookkeeping_commits_leave_the_coordinators_staged_changes_staged(self):
+    def test_task_commands_commit_no_records_and_leave_staged_changes_staged(self):
         self.add_task()
         self.write("docs/project/tasks-archive.jsonl", '{"id": "staged-by-hand"}\n')
         self.git("add", "docs/project/tasks-archive.jsonl")
         staged = lambda: self.git("diff", "--cached", "--name-only").stdout.split()
         changed = lambda: self.git("show", "--name-only", "--format=", "HEAD").stdout.split()
+        before = self.git("rev-parse", "HEAD").stdout
         self.theseus("instance", "assign", TASK, "worker-1", "a")
-        self.assertEqual(["docs/project/tasks.json"], changed())
+        self.assertEqual(before, self.git("rev-parse", "HEAD").stdout, "an assignment commits nothing")
         self.deliver(self.tmp / "worktrees/worker-1-a")
         self.theseus("merge", TASK)
-        self.assertEqual(["docs/project/tasks.json"], changed())
-        self.assertNotIn("docs/project/tasks-archive.jsonl", self.git("show", "--name-only", "--format=", "HEAD~1").stdout)
+        self.assertFalse([p for p in changed() if p.startswith("docs/project/")])
         self.theseus("tasks", "unmerge", TASK, "--reason", "smoke failed")
-        self.assertEqual(["docs/project/tasks.json"], changed())
-        self.assertNotIn("docs/project/tasks-archive.jsonl", self.git("show", "--name-only", "--format=", "HEAD~1").stdout)
+        self.assertFalse([p for p in changed() if p.startswith("docs/project/")])
         self.assertEqual(["docs/project/tasks-archive.jsonl"], staged())
 
     def test_a_delivered_file_whose_name_git_quotes_is_merged(self):
@@ -348,7 +355,7 @@ class TaskFlowTests(Sandbox):
         self.deliver(worktree)
         self.write("src/capture/caf\u00e9 notes b/x.txt", "notes\n", root=worktree)
         self.theseus("merge", TASK)
-        files = self.git("-c", "core.quotepath=false", "show", "--name-only", "--format=", "HEAD~1").stdout.splitlines()
+        files = self.git("-c", "core.quotepath=false", "show", "--name-only", "--format=", "HEAD").stdout.splitlines()
         self.assertIn("src/capture/caf\u00e9 notes b/x.txt", files)
         self.assertEqual("", self.git("status", "--porcelain").stdout)
 
@@ -419,7 +426,6 @@ class TaskFlowTests(Sandbox):
     def test_reopen_releases_the_task_when_its_agent_works_on_another(self):
         self.add_task()
         self.add_task("second-task", owned=("docs/investigations/second-task.md",))
-        self.git("commit", "-q", "-am", "queue two")
         self.theseus("instance", "assign", TASK, "worker-1", "a")
         self.deliver(self.tmp / "worktrees/worker-1-a")
         self.theseus("tasks", "deliver", TASK, "--handoff", self.tmp / "worktrees/worker-1-a/.theseus/handoff.md")

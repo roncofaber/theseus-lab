@@ -1,5 +1,5 @@
 """Agent IDs: every registration gets a ULID, records carry it, a reused name never inherits an earlier agent's history,
-the store migration backfills IDs, and task records gain ownerId and agentId lazily or through migrate-ids."""
+the store migration backfills IDs, and task records carry ownerId and agentId from their attempts."""
 import re
 
 from helpers import Sandbox
@@ -89,6 +89,7 @@ class TaskIdTests(Sandbox):
         task = self.queue.get("t1")
         self.assertNotIn("ownerId", task)
         self.assertEqual(self.agent_id(), task["previousAttempts"][-1]["agentId"])
+        self.t.export(self.queue)
         self.assertFalse([p for p in rules.task_record_problems(self.conf) if re.search("ownerId|agentId|t1", p)])
 
     def test_a_task_of_a_removed_agent_does_not_belong_to_its_successor(self):
@@ -96,16 +97,3 @@ class TaskIdTests(Sandbox):
         self.agents.remove(self.conf, "w-1")
         self.agents.add(self.conf, "w-1", "%1")
         self.assertIsNone(self.agents.current_task(self.conf, "w-1"))
-
-    def test_migrate_ids_fills_records_of_the_same_agent_once(self):
-        self.assign()
-        document = self.queue.load()
-        document["tasks"][-1].pop("ownerId")
-        stale = dict(document["tasks"][-1], execution={"model": "persistent-instance", "assignedAt": "2000-01-01T00:00:00Z"})
-        document["tasks"][-1]["previousAttempts"] = [stale]
-        self.queue.save(document)
-        self.assertIn("1 task(s), agentId on 0 attempt(s)", self.theseus("tasks", "migrate-ids").stdout)
-        self.assertIn("0 task(s), agentId on 0 attempt(s)", self.theseus("tasks", "migrate-ids").stdout)
-        task = self.queue.get("t1")
-        self.assertEqual(self.agent_id(), task["ownerId"])
-        self.assertNotIn("agentId", task["previousAttempts"][0])

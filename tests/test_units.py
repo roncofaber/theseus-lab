@@ -134,10 +134,14 @@ class TaskRuleTests(Sandbox):
         argv.update(overrides)
         return t.add(self.queue, task_id, **argv)
 
-    def mutate(self, function):
-        document = self.queue.load()
-        function(document)
-        self.queue.save(document)
+    def exported_problems(self, change=None):
+        """The rules' problems in a fresh export, after change(document) edits its tasks.json as a hand edit would."""
+        t.export(self.queue)
+        if change:
+            document = json.loads(self.conf.tasks_file.read_text())
+            change(document)
+            self.conf.tasks_file.write_text(json.dumps(document, indent=2) + "\n")
+        return rules.task_record_problems(self.conf)
 
     def test_add_refuses_bad_records_and_leaves_the_queue_unchanged(self):
         self.add("first-task")
@@ -161,7 +165,7 @@ class TaskRuleTests(Sandbox):
     def test_rules_flag_broken_records(self):
         self.add("a-task")
         self.add("b-task", depends=["a-task"])
-        self.assertEqual([], rules.task_record_problems(self.conf))
+        self.assertEqual([], self.exported_problems())
 
         def break_records(document):
             document["tasks"][0]["dependencies"] = ["b-task"]
@@ -170,20 +174,19 @@ class TaskRuleTests(Sandbox):
             document["tasks"].append({"id": "blocked", "status": "pending", "owner": None, "objective": "x",
                                       "ownedPaths": ["docs/investigations/blocked.md"], "acceptance": ["x"],
                                       "externalBlocker": {"evidence": "x"}, "result": None})
-        self.mutate(break_records)
-        problems = "\n".join(rules.task_record_problems(self.conf))
+        problems = "\n".join(self.exported_problems(break_records))
         self.assertIn("dependency cycle", problems)
         self.assertIn("merged without a merge commit", problems)
         self.assertIn("needs evidence and unblockCondition", problems)
 
     def test_milestone_and_capacity_rules(self):
         self.add("m1-task", milestone="M1")
-        self.mutate(lambda d: d.update(currentMilestone="M0"))
+        t.set_milestone(self.queue, "M0")
         self.assertEqual([], t.ready(self.queue))
         t.assign(self.queue, "m1-task", "w", "claude-code", "m", "/nowhere", "abc", "/nowhere/.theseus", force=True)
-        self.assertIn("outside the current milestone", "\n".join(rules.task_record_problems(self.conf)))
-        self.mutate(lambda d: d.update(currentMilestone="M1"))
-        self.assertEqual([], rules.task_record_problems(self.conf))
+        self.assertIn("outside the current milestone", "\n".join(self.exported_problems()))
+        t.set_milestone(self.queue, "M1")
+        self.assertEqual([], self.exported_problems())
         self.set_config("[workers.claude-code]\ncapacity = 0\n")
         self.assertIn("exceed workers.claude-code.capacity", "\n".join(rules.task_record_problems(cfg.load(root=self.project))))
 
@@ -231,10 +234,7 @@ class CleanupTests(Sandbox):
         for path in (old, referenced):
             for item in (path, path / "log.txt"):
                 os.utime(item, (stamp, stamp))
-        document = json.loads(conf.tasks_file.read_text())
-        document["tasks"].append({"id": "x", "status": "pending", "owner": None, "objective": f"see {referenced}",
-                                  "ownedPaths": ["docs/investigations/x.md"], "acceptance": ["x"], "result": None})
-        conf.tasks_file.write_text(json.dumps(document))
+        t.add(t.Queue(conf), "x", "research", ["docs/investigations/x.md"], f"see {referenced}", "All.", ["x"])
         dry = "\n".join(cleanup.run(conf))
         self.assertIn("would rm old-run", dry)
         self.assertTrue(old.exists())
@@ -298,17 +298,6 @@ class LongRunningQueueTests(Sandbox):
         self.assertEqual({}, supervisor.counts(old))
         self.assertEqual({"demo-port-claude-code-1"}, supervisor.configured_now(old),
                          "reconcile asks the current files before retiring")
-
-    def test_an_unpushed_record_says_to_push_it(self):
-        from theseus import integrate
-        base = self.git("rev-parse", "HEAD").stdout.strip()
-        self.theseus("tasks", "add", "late-task", "--role", "research", "--owned", "docs/investigations/late-task.md",
-                     "--objective", "Do it.", "--contract", "All variants.", "--accept", "Done.")
-        self.git("commit", "-q", "-am", "queue late-task")
-        self.write("theseus.local.toml", '[git]\nbase = "origin/main"\n')
-        message = integrate.base_mismatch(cfg.load(root=self.project), "late-task", base)
-        self.assertIn("committed locally but not at the assignment base origin/main", message)
-        self.assertIn("`git push origin HEAD:main`", message)
 
     def test_down_all_pauses_supervision_until_agents_up(self):
         from unittest import mock

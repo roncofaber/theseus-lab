@@ -5,7 +5,6 @@ evidence JSON, prompts, reports) are copied to <data>/archive/; worktrees keep t
 dirty worktrees are saved as a status listing plus a tarball of changed files. Only entries inside the configured
 scratch root and worktrees of this repository are ever considered.
 """
-import json
 import os
 import re
 import shutil
@@ -22,7 +21,8 @@ SKIP_DIRS = {"bin", "obj", "node_modules", ".git", "__pycache__", ".venv"}
 
 
 def referenced_strings(conf):
-    document = json.loads(conf.tasks_file.read_text())
+    from . import tasks as t
+    document = t.Queue(conf).load()
     found = set()
 
     def walk(value):

@@ -16,6 +16,7 @@ from pathlib import Path
 from . import config as cfg
 from . import docs
 from . import gitutil as g
+from . import taskrecords
 from . import tasks as t
 
 EXIT_CONFLICT = 3
@@ -49,34 +50,8 @@ def base_commit(conf):
     return g.out(conf.root, "rev-parse", ref)
 
 
-def commit_record(conf, message):
-    """Commit tasks.json alone: the archive and anything else staged are the coordinator's to commit."""
-    return g.commit_paths(conf.root, message, [cfg.TASKS])
-
-
-def record_committed(conf, task_id, base):
-    """True when the task record in the working tree equals the one at base, so the worker sees it."""
-    shown = g.git(conf.root, "show", f"{base}:{cfg.TASKS}", check=False)
-    if shown.returncode != 0:
-        return False
-    pick = lambda document: next((x for x in document["tasks"] if x["id"] == task_id), None)
-    return pick(json.loads(shown.stdout)) == pick(json.loads(conf.tasks_file.read_text()))
-
-
-def base_mismatch(conf, task_id, base):
-    """What to do when the task record at the assignment base is not the one in the working tree."""
-    git = conf.section("git")
-    ref, remote, branch = git.get("base") or "HEAD", git.get("remote") or "origin", git.get("branch") or "main"
-    where = f"the assignment base {ref} ({base[:12]})"
-    if record_committed(conf, task_id, "HEAD"):
-        if ref.startswith(remote + "/"):
-            return (f"the {task_id} record is committed locally but not at {where}: push it (`git push {remote} "
-                    f"HEAD:{branch}`), or set [git] base = \"HEAD\" to assign from local commits")
-        return f"the {task_id} record is committed but not at {where}; move {ref} to a commit that has it"
-    return f"the {task_id} record is not committed at {where}: commit {cfg.TASKS} and make {ref} include it"
-
-
 REBASE_PENDING = "rebase-pending"
+EXPORT_FILES = (cfg.TASKS, cfg.ARCHIVE, taskrecords.HISTORY)
 
 
 def read_bytes(path):
@@ -353,17 +328,15 @@ def check_previous_attempt(conf, task, worktree):
                                "the old task or pick another name)")
 
 
-def move_previous_attempt(conf, queue, task_id, worktree):
+def move_previous_attempt(conf, queue, task_id, worktree, principal=None):
     """Move the worktree a previous attempt of task_id left at worktree, and its work/<name> branch, aside to
     <worktree>-attemptN and work/<name>-attemptN and record both on that attempt. Returns the new path, or None when
     worktree is free."""
     worktree = Path(worktree)
     if not worktree.exists():
         return None
-    document = queue.load()
-    task = queue.open_task(document, task_id)
+    task = queue.get(task_id)
     check_previous_attempt(conf, task, worktree)
-    records = attempts_at(task, worktree)
     branch = worktree_branches(conf)[worktree.resolve()]
     own = f"refs/heads/work/{worktree.name}"
     n = 1
@@ -374,16 +347,8 @@ def move_previous_attempt(conf, queue, task_id, worktree):
     g.git(conf.root, "worktree", "move", str(worktree), str(aside))
     if branch == own:
         g.git(conf.root, "branch", "-m", f"work/{worktree.name}", f"work/{worktree.name}-attempt{n}")
-    old = str(worktree)
-    for record in records:
-        record["worktree"] = str(aside)
-        if branch == own:
-            record["branch"] = f"work/{worktree.name}-attempt{n}"
-        execution = record.get("execution") or {}
-        for key in ("logDir", "handoff"):
-            if isinstance(execution.get(key), str) and execution[key].startswith(old + os.sep):
-                execution[key] = str(aside) + execution[key][len(old):]
-    queue.save(document)
+    queue.service.relocate(t.as_coordinator(principal), task_id, worktree, aside,
+                           f"work/{worktree.name}-attempt{n}" if branch == own else None)
     return aside
 
 
@@ -416,37 +381,42 @@ def worker_environment(conf, tree):
     return {**os.environ, **conf.environment(), "THESEUS_ROOT": str(tree)}
 
 
-def assign(conf, task_id, name, provider, model, owner=None, commit=True, instance=None, owner_id=None):
-    """Create the worktree, record the assignment and (by default) commit only the task file."""
+def assign(conf, task_id, name, provider, model, owner=None, commit=True, instance=None, owner_id=None, principal=None):
+    """Claim the task, create its worktree at the assignment base and activate the claim; a failure in between
+    abandons the claim. Nothing is committed (commit is kept for callers and ignored)."""
     from . import rooms
     queue = t.Queue(conf)
     task = queue.get(task_id)
+    principal = t.as_coordinator(principal)
     if instance:
         try:
             rooms.check_assignment(conf, task, instance)
         except rooms.RoomError as error:
             raise IntegrationError(str(error)) from error
-    if commit and not record_committed(conf, task_id, "HEAD"):
-        commit_record(conf, f"chore: queue {task_id}")
     base = base_commit(conf)
     check_reached(conf, task, base)
-    if not record_committed(conf, task_id, base):
-        raise IntegrationError(base_mismatch(conf, task_id, base))
-    aside = move_previous_attempt(conf, queue, task_id, conf.worktrees / name)
-    worktree = create_worktree(conf, name, base)
+    owner = owner or f"{provider}:{model}:{name}"
+    owner_id = owner_id or t.owner_id_of(conf, {"owner": owner, "execution": {"model": model}})
+    claim = queue.service.claim(principal, task_id, owner_id, owner=owner, provider=provider, model=model,
+                                capacity=t.provider_capacity(conf, provider),
+                                reach=t.merge_reach(conf, base, f"{t.queue_base_ref(conf)} ({base[:12]})"))
+    worktree = None
     try:
+        aside = move_previous_attempt(conf, queue, task_id, conf.worktrees / name, principal)
+        worktree = create_worktree(conf, name, base)
         rooms.exclude_dirty(conf, task, worktree)
-        message = t.assign(queue, task_id, owner or f"{provider}:{model}:{name}", provider, model, worktree, base[:12],
-                           worktree / cfg.WORKER_LOG, owner_id=owner_id)
-    except Exception:
-        remove_worktree(conf, worktree, name)
+        queue.service.activate(principal, claim["attempt"], worktree=worktree, base=base[:12],
+                               log_dir=worktree / cfg.WORKER_LOG)
+    except Exception as error:
+        queue.service.abandon(principal, claim["attempt"], f"assignment failed: {error}")
+        if worktree is not None:
+            remove_worktree(conf, worktree, name)
         raise
+    message = f"{task_id} -> in_progress ({owner})"
     if aside:
         message += f"; the previous attempt's worktree moved to {aside}"
     if instance:
         rooms.record_assignment(conf, task, instance)
-    if commit:
-        commit_record(conf, f"chore: assign {task_id} to {name}")
     return worktree, base, message
 
 
@@ -810,7 +780,6 @@ def merge(conf, task_id, subject=None, accept=(), skip_patches=(), commit=True, 
         raise IntegrationError("nothing to merge: main already holds this delivery")
     sha = g.out(root, "rev-parse", "--short=12", "HEAD")
     report.append(t.mark_merged(queue, task_id, sha))
-    commit_record(conf, f"chore: {task_id} merged in {sha}")
     archive = conf.workers_dir / worktree.name
     archive.mkdir(parents=True, exist_ok=True)
     if (worktree / cfg.WORKER_LOG).is_dir():
@@ -820,8 +789,8 @@ def merge(conf, task_id, subject=None, accept=(), skip_patches=(), commit=True, 
 
 
 def refuse_dirty(root):
-    """Refuse to touch a main checkout whose tracked files (the task records aside) have uncommitted changes."""
-    dirty = [line[3:] for line in g.dirty_tracked(root).splitlines() if line[3:] not in (cfg.TASKS, cfg.ARCHIVE)]
+    """Refuse to touch a main checkout whose tracked files (the task export aside) have uncommitted changes."""
+    dirty = [line[3:] for line in g.dirty_tracked(root).splitlines() if line[3:] not in EXPORT_FILES]
     if dirty:
         raise IntegrationError("the main checkout has uncommitted changes to tracked files (" + ", ".join(dirty)
                                + "); commit or set them aside first", 2)
@@ -865,9 +834,7 @@ def unmerge(conf, task_id, reason, revert=True):
         if present:
             raise IntegrationError(f"HEAD still holds the {task_id} merge {recorded} in: {', '.join(present)}; revert it "
                                    "first or drop --no-revert", EXIT_CONFLICT)
-        message = t.unmerge(queue, task_id, reason)
-        commit_record(conf, f"chore: {task_id} unmerged")
-        return [message]
+        return [t.unmerge(queue, task_id, reason)]
     refuse_dirty(root)
     generated = docs.generated_paths(conf)
     names = g.out(root, "diff-tree", "--root", "--no-commit-id", "-r", "--name-only", "--no-renames", commit).splitlines()
@@ -881,7 +848,7 @@ def unmerge(conf, task_id, reason, revert=True):
 
     result = g.git(root, "revert", "--no-commit", commit, check=False)
     unmerged = g.out(root, "diff", "--name-only", "--diff-filter=U").splitlines()
-    other = [p for p in unmerged if p not in generated]
+    other = [p for p in unmerged if p not in generated and p not in EXPORT_FILES]
     if other or (result.returncode != 0 and not unmerged):
         refuse(f"reverting {recorded} conflicts in {', '.join(other)}" if other
                else f"git revert {recorded} failed: {(result.stderr or result.stdout).strip()}")
@@ -889,6 +856,9 @@ def unmerge(conf, task_id, reason, revert=True):
         written = docs.regenerate(conf)
     except RuntimeError as error:
         refuse(str(error))
+    if any(p in EXPORT_FILES for p in unmerged):
+        t.export(queue)
+        written = [*written, *(p for p in EXPORT_FILES if (root / p).exists())]
     paths = [p for p in sorted(set(written) | set(unmerged)) if (root / p).exists() or g.tracked(root, p)]
     if paths:
         g.git(root, "add", "-A", "--", *paths)
@@ -898,6 +868,4 @@ def unmerge(conf, task_id, reason, revert=True):
     if not g.commit_paths(root, f"Revert the {task_id} merge {recorded}\n\n{reason}", sorted(set(names) | set(paths))):
         refuse(f"HEAD no longer holds {recorded}; if it was reverted by hand, pass --no-revert")
     sha = g.out(root, "rev-parse", "--short=12", "HEAD")
-    message = t.unmerge(queue, task_id, reason, sha)
-    commit_record(conf, f"chore: {task_id} unmerged in {sha}")
-    return [f"reverted {recorded} in {sha}", message]
+    return [f"reverted {recorded} in {sha}", t.unmerge(queue, task_id, reason, sha)]

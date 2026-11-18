@@ -295,8 +295,7 @@ def kept_work_note(task):
 
 def release_for_fallback(conf, agent, task_id, profile, fallback):
     """Release the task of an agent stuck on a gateway error while its profile is on fallback: the worktree stays
-    (the next attempt is pointed at it), the retry episode and any owed prompt are dropped and the record committed."""
-    from . import integrate
+    (the next attempt is pointed at it), and the retry episode and any owed prompt are dropped."""
     reason = f"{FALLBACK_RELEASE} profile {profile} is down; the task moves to an agent of {fallback}"
     start = last_event_id(conf)
     try:
@@ -306,18 +305,12 @@ def release_for_fallback(conf, agent, task_id, profile, fallback):
     with store.for_project(conf) as conn:
         store.drop_gateway_retry(conn, conf.name, agent["name"])
     drop_owed(conf, agent["name"])
-    try:
-        integrate.commit_record(conf, f"chore: release {task_id} (profile {profile} down)")
-    except Exception as error:
-        event(conf, "error", agent["name"], task_id, f"released after {profile} went down, but the record was not "
-                                                     f"committed: {error}")
     return events(conf, after_id=start)
 
 
 def roll_back(conf, task_id, name, worktree, base, reason):
     """Undo an assignment whose task message never reached the agent: release the task, remove its worktree and
-    work/<name> branch when they hold nothing beyond what assignment wrote, and commit the record. Returns the detail
-    for the error event."""
+    work/<name> branch when they hold nothing beyond what assignment wrote. Returns the detail for the error event."""
     from . import gitutil as g
     from . import integrate
     t.release(t.Queue(conf), task_id, reason)
@@ -330,7 +323,6 @@ def roll_back(conf, task_id, name, worktree, base, reason):
         what = "its worktree removed"
     else:
         what = f"its worktree kept at {worktree} (it holds changes)"
-    integrate.commit_record(conf, f"chore: release {task_id} ({reason[:60]})")
     return f"{reason}; {task_id} released, {what}"
 
 

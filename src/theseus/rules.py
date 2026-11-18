@@ -70,9 +70,11 @@ def _acyclic(by_id):
 
 
 def task_record_problems(conf):
-    queue = t.Queue(conf)
-    document = queue.load()
-    open_tasks, archived = document["tasks"], queue.archived()
+    """Problems in the committed task export under docs/project/: the reviewable record, which a snapshot of the
+    pushed commit can check without the host store (the service enforces the same rules when it writes)."""
+    from . import taskrecords
+    document, archived, _ = taskrecords.read(conf.root).documents()
+    open_tasks = document["tasks"]
     everything = open_tasks + archived
     by_id = {}
     problems = []
@@ -119,7 +121,7 @@ def task_record_problems(conf):
     problems += rooms.rule_problems(conf)
     for task in open_tasks:
         if task.get("status") not in t.OPEN:
-            problems.append(f"{task['id']}: {task.get('status')} task left in the queue; run `theseus tasks archive`")
+            problems.append(f"{task['id']}: {task.get('status')} task left in the queue; run `theseus tasks export`")
         if t.record_size(task) > t.TASK_RECORD_LIMIT:
             problems.append(f"{task['id']}: record is {t.record_size(task)} bytes, over {t.TASK_RECORD_LIMIT}")
         if task.get("status") in ("pending", "in_progress") and not any(
