@@ -195,7 +195,7 @@ class TaskRuleTests(Sandbox):
 
     def test_evidence_levels_are_separate(self):
         self.add("e-task")
-        t.assign(self.queue, "e-task", "w", "gw", "m", "/nowhere", "abc", "/nowhere/.theseus")
+        t.assign(self.queue, "e-task", "w", "cborg", "m", "/nowhere", "abc", "/nowhere/.theseus")
         with self.assertRaises(t.TaskError):
             t.observe(self.queue, "e-task", "too early")
         t.mark_merged(self.queue, "e-task", "abc123")
@@ -355,6 +355,8 @@ class CountPlanTests(unittest.TestCase):
         from theseus import supervisor
         kept, starts, victims = supervisor.plan(1, self.members(1, 2, 3), holds=lambda n: n == 3, started=lambda n: n)
         self.assertEqual(([3], [], [1, 2]), (kept, starts, victims))
+        self.assertEqual(([1, 3], [], [4]), supervisor.plan(2, self.members(1, 3, 4), started=lambda n: 9 if n == 1 else n,
+                                                           stopping=lambda n: n == 4), "a victim already stopping stays one")
 
     def test_scale_up_reuses_the_lowest_free_name_down_or_removed(self):
         from theseus import supervisor

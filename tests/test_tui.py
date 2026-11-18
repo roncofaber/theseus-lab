@@ -169,16 +169,16 @@ class DashboardTests(HostCase, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(["alpha", "beta"], self.app.active_view().project_names())
 
 GATEWAY_ERRORS = [
-    {"id": 7, "pool": "gw", "project": "alpha", "agent": "worker-a", "task": "t1", "code": 429, "retryable": 1,
+    {"id": 7, "pool": "cborg", "project": "alpha", "agent": "worker-a", "task": "t1", "code": 429, "retryable": 1,
      "time": "2026-11-17T17:57:43Z", "epoch": 1.0, "kind": "rate_limit", "subtype": "parallel cap",
      "label": "429 parallel cap", "excerpt": "API Error: Request rejected (429) · Rate limit exceeded for api_key: "
      "[redacted]. Limit type: max_parallel_requests.", "attempt": 1, "attempts": 3, "outcome": "retry",
      "next": 4102444800.0, "pausedUntil": None, "capCut": 1, "capUntil": 4102444800.0},
-    {"id": 6, "pool": "gw", "project": "alpha", "agent": "worker-b", "task": "t2", "code": None, "retryable": 1,
+    {"id": 6, "pool": "cborg", "project": "alpha", "agent": "worker-b", "task": "t2", "code": None, "retryable": 1,
      "time": "2026-11-17T17:50:00Z", "epoch": 0.5, "kind": "connection_lost", "subtype": "connection lost",
      "label": "conn lost", "excerpt": "API Error: Connection lost mid-response.", "attempt": 2, "attempts": 3,
      "outcome": "recovered", "next": None, "pausedUntil": None, "capCut": 1, "capUntil": 4102444800.0}]
-GATEWAY_HEALTH = [{"pool": "gw", "codes": [429, None], "labels": ["429 parallel cap", "conn lost"], "errors": 2,
+GATEWAY_HEALTH = [{"pool": "cborg", "codes": [429, None], "labels": ["429 parallel cap", "conn lost"], "errors": 2,
                    "lastError": 1.0, "lastSuccess": None, "pausedUntil": None, "reason": None, "capCut": 1,
                    "capUntil": 4102444800.0}]
 
@@ -558,7 +558,7 @@ class TranscriptTests(Sandbox):
     def test_the_context_limit_follows_the_transcript_model(self):
         from theseus import agents, profiles
         from types import SimpleNamespace
-        table = {"context": {"claude-*": 1000000, "claude-haiku-4-5*": 200000, "lbl/gw-coder-ultra": 229376}}
+        table = {"context": {"claude-*": 1000000, "claude-haiku-4-5*": 200000, "lbl/cborg-coder-ultra": 229376}}
         conf = SimpleNamespace(section=lambda name: table if name == "models" else {}, root=self.tmp)
         original = profiles.resolve
         profiles.resolve = lambda conf, name: {"context_limit": 123}
@@ -566,7 +566,7 @@ class TranscriptTests(Sandbox):
         limit = lambda model: agents.context_use(conf, "p", {"tokens": 5, "model": model}, None)["limit"]
         self.assertEqual(1000000, limit("claude-opus-5-5"))
         self.assertEqual(200000, limit("claude-haiku-4-5"))
-        self.assertEqual(229376, limit("lbl/gw-coder-ultra"))
+        self.assertEqual(229376, limit("lbl/cborg-coder-ultra"))
         self.assertEqual(123, limit("some-other-model"))
         self.assertEqual(123, agents.context_use(conf, "p", None, 9)["limit"])
 

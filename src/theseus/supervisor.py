@@ -208,13 +208,14 @@ def name_free(rec, holds_task):
     return rec is None or (rec.get("desired") == "down" and not holds_task)
 
 
-def plan(count, members, holds=lambda n: False, started=lambda n: None, taken=lambda n: False, keep=()):
+def plan(count, members, holds=lambda n: False, started=lambda n: None, taken=lambda n: False, keep=(),
+         stopping=lambda n: False):
     """One profile's plan over members {n: record} of its counted names: (kept, starts, victims), lists of n. Live
-    members beyond count become victims, free ones before busy ones and the most recently started first (keep last);
-    below count, retiring members come back first, then the lowest free names."""
+    members beyond count become victims: those already stopping, then free ones before busy ones and the most recently
+    started first (keep last). Below count, retiring members come back first, then the lowest free names."""
     live = [n for n, rec in members.items() if counted_live(rec)]
     if len(live) > count:
-        order = sorted(live, key=lambda n: (n in keep, bool(holds(n)), -(started(n) or 0), -n))
+        order = sorted(live, key=lambda n: (n in keep, not stopping(n), bool(holds(n)), -(started(n) or 0), -n))
         victims = order[:len(live) - count]
         return sorted(set(live) - set(victims)), [], sorted(victims)
     need = count - len(live)
@@ -234,6 +235,8 @@ def standing(conf, regs, keep=()):
     within the count, the names to start or revive and the agents down or disabled (left as they are), then
     [[agents.extra]]. Live agents beyond the count are left out, so reconcile retires them."""
     pattern = template(conf)
+    if "{n}" not in pattern:
+        raise SupervisorError(f"[agents] name {pattern!r} must contain {{n}}")
     extras = [{"name": e["name"], "profile": e.get("profile") or profiles.default_name(conf), "slot": None,
                "rooms": e.get("rooms")} for e in section(conf).get("extra") or []]
     used = {e["name"] for e in extras}
@@ -254,7 +257,8 @@ def standing(conf, regs, keep=()):
                                holds=lambda n: bool(current_task(conf, name(n))),
                                started=lambda n: (last_run(conf, name(n)) or {}).get("started_epoch"),
                                taken=lambda n: name(n) in used or name(n) in regs,
-                               keep={n for n in members if name(n) in keep})
+                               keep={n for n in members if name(n) in keep},
+                               stopping=lambda n: (last_run(conf, name(n)) or {}).get("stop_reason") == "retire")
         parked = [n for n, rec in members.items() if not counted_live(rec) and rec.get("desired") != "retire"]
         for n in sorted({*kept, *starts, *parked}):
             used.add(name(n))
