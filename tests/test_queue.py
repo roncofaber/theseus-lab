@@ -140,6 +140,18 @@ class QueueTests(Sandbox):
         self.assertFalse(wq.fits(conf, strong, {"id": "x", "minCapability": 2, "profile": "with-mcp"}, {})[0],
                          "a relaunch onto a weaker compatible profile must still meet the minimum")
 
+    def test_a_running_task_s_patches_hold_a_task_that_owns_their_target(self):
+        self.add("first-task")
+        self.theseus("queue", "tick")
+        worktree = json.loads(self.theseus("tasks", "show", "first-task").stdout)["worktree"]
+        self.write(f"{worktree}/.theseus/patches/01-readme.patch", "diff --git a/README.md b/README.md\n"
+                   "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-# old\n+# new\n", root=self.tmp)
+        self.theseus("tasks", "add", "readme-task", "--role", "docs", "--owned", "README.md",
+                     "docs/investigations/readme-task.md", "--objective", "Do it.", "--contract", "All.", "--accept", "Done.")
+        self.theseus("agents", "add", "worker-b", "%2")
+        self.assertNotIn("readme-task", self.theseus("queue", "tick").stdout)
+        self.assertIn("touches:README.md@first-task", self.theseus("tasks", "list").stdout)
+
     def test_wait_returns_when_a_delivery_needs_the_coordinator(self):
         self.add("watched-task")
         self.theseus("queue", "tick")

@@ -243,13 +243,30 @@ class TaskService:
         with self.reading() as (repo, project):
             everything = self.records(repo, project)
             current = None if any_milestone else project["milestone"]
+            holds = self.conflicts(repo, project)
         index = {task["id"]: task for task in everything}
         found = []
         for task in everything:
             candidate = {**task, "pause": None} if include_paused else task
-            if task["status"] != "completed" and t.dependency_ready(candidate, index, current, reach):
+            if task["status"] != "completed" and t.dependency_ready(candidate, index, current, reach, holds):
                 found.append(task["id"])
         return found
+
+    def holds(self, p):
+        """Pending task id -> why it waits for a running task (soft ownership); computed, never stored."""
+        with self.reading() as (repo, project):
+            return self.conflicts(repo, project)
+
+    def conflicts(self, repo, project):
+        tasks = repo.tasks(project["id"], ("pending", "in_progress", "verification"))
+        running = [task for task in tasks if task["status"] != "pending"]
+        holds = {}
+        for task in tasks:
+            if task["status"] == "pending":
+                reasons = [reason for other in running for reason in conflict(task, other)]
+                if reasons:
+                    holds[task["id"]] = reasons
+        return holds
 
     def live(self, p):
         """(tasks.json document, archived records) from the store when it is readable and this checkout is the one
@@ -365,12 +382,26 @@ class TaskService:
                 "priority": int(values["priority"] or 0), "min_capability": int(values["min_capability"] or 0)}
 
     def overlaps(self, repo, project, task):
-        """Warnings for running tasks whose owned paths overlap this task's: queuing a follow-up is legitimate."""
-        warnings = []
-        for other in repo.tasks(project["id"], ("in_progress", "verification")):
-            if other["pk"] != task["pk"] and t.ownership_overlaps(task["owned"], other["owned"]):
-                warnings.append(f"owned paths overlap {other['id']} ({other['status']})")
-        return warnings
+        """Warnings for running tasks this task conflicts with: queuing a follow-up is legitimate, and the queue holds
+        it until they are merged."""
+        return [f"{reason} ({other['status']}); the queue holds it until then"
+                for other in repo.tasks(project["id"], ("in_progress", "verification"))
+                if other["pk"] != task["pk"] for reason in conflict(task, other)]
+
+    def set_observed(self, p, task_id, paths):
+        """The files an in-progress task's patches touch now (the tick's scan of its worktree); returns whether they
+        changed. Observed touches hold conflicting tasks and are dropped when the task leaves verification."""
+        allow(p, "coordinator", "queue")
+        paths = sorted(set(paths))
+        with self.unit() as (repo, project):
+            task, attempts = self.load(repo, project, task_id)
+            active = next((a for a in attempts if a["phase"] in taskrepo.ACTIVE), None)
+            if active is None or sorted(task["observed"]) == paths:
+                return False
+            repo.drop_observed(task["pk"])
+            repo.add_observed(task["pk"], active["id"], paths)
+            self.event(repo, p, task, "touches", {"observed": paths}, attempt=active)
+            return True
 
     def edit(self, p, task_id, changes, *, expected_rev=None, force=False):
         allow(p, "coordinator")
@@ -744,6 +775,8 @@ class TaskService:
         """Why task may not be claimed now: blockers, milestone, unmet dependencies, the hold, the profile's capacity."""
         index = {record["id"]: record for record in self.records(repo, project)}
         problems = t.blocking(index[task["id"]], index, project["milestone"])
+        problems += [reason for other in repo.tasks(project["id"], ("in_progress", "verification"))
+                     if other["pk"] != task["pk"] for reason in conflict(task, other)]
         if task["hold"]:
             problems.append("hold")
         if capacity is not None:
@@ -1062,6 +1095,20 @@ class TaskService:
                 repo.add_note(pk, line["author"], line["kind"], line["note"], line["time"], answered=line.get("answered"))
                 notes += 1
         return events, notes
+
+
+def conflict(task, other):
+    """Why task waits for the running task other: owned paths that overlap (owns:PATTERN@OTHER), or a file one of them
+    touches (declared, or observed in its patches) that the other owns or touches (touches:FILE@OTHER)."""
+    reasons = []
+    overlapping = [b for b in other["owned"] if t.ownership_overlaps(task["owned"], [b])]
+    if overlapping:
+        reasons.append(f"owns:{overlapping[0]}@{other['id']}")
+    mine, theirs = task["touches"] + task["observed"], other["touches"] + other["observed"]
+    files = [f for f in mine if t.is_owned(f, other["owned"]) or t.is_owned(f, theirs)]
+    files += [f for f in theirs if t.is_owned(f, task["owned"])]
+    reasons += [f"touches:{f}@{other['id']}" for f in dict.fromkeys(files)]
+    return reasons
 
 
 def parsed(snap):

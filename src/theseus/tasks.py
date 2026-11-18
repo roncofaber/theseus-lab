@@ -117,6 +117,10 @@ class Queue:
     def milestone(self):
         return self.load().get("currentMilestone")
 
+    def holds(self):
+        """Pending task id -> soft-ownership reasons it waits (theseus.taskservice.conflict)."""
+        return self.service.holds(acting_principal())
+
 
 def in_milestone(task, current):
     return not current or task.get("milestone") in (None, "", current)
@@ -164,7 +168,7 @@ def unreached(task, index, reach):
     return reasons
 
 
-def blocking(task, index, current=None, reach=None):
+def blocking(task, index, current=None, reach=None, holds=None):
     reasons = [key for key in ("externalBlocker", "researchRequired", "pause") if task.get(key)]
     if not in_milestone(task, current):
         reasons.append(f"milestone:{task.get('milestone')}")
@@ -176,11 +180,13 @@ def blocking(task, index, current=None, reach=None):
             reasons.append(f"waits:{dependency}")
     if reach and task["status"] == "pending":
         reasons += unreached(task, index, reach)
+    if holds and task["status"] == "pending":
+        reasons += holds.get(task["id"], [])
     return reasons
 
 
-def dependency_ready(task, index, current=None, reach=None):
-    return task["status"] == "pending" and not blocking(task, index, current, reach)
+def dependency_ready(task, index, current=None, reach=None, holds=None):
+    return task["status"] == "pending" and not blocking(task, index, current, reach, holds)
 
 
 def evidence_level(task):
@@ -198,12 +204,13 @@ def list_tasks(queue, status=None, include_archive=False, show_evidence=False):
     index = queue.index()
     current = queue.milestone()
     reach = merge_reach(queue.conf)
+    holds = queue.holds()
     tasks = queue.all() if include_archive else queue.load()["tasks"]
     lines = []
     for task in tasks:
         if status and task["status"] != status:
             continue
-        flags = blocking(task, index, current, reach)
+        flags = blocking(task, index, current, reach, holds)
         flags += ["ready"] if task["status"] == "pending" and not flags else []
         line = f"{task['status']:<12} {task['id']}  owner={task.get('owner') or '-'}  {','.join(flags)}"
         if show_evidence:
@@ -222,13 +229,13 @@ def record_size(record):
 
 
 def add(queue, task_id, role, owned, objective, contract, accept, depends=(), milestone=None, room=None, priority=0,
-        profile=None, min_capability=0):
+        profile=None, min_capability=0, touches=()):
     if int(min_capability or 0) < 0:
         raise TaskError("--min-capability must be 0 or more")
     added = queue.service.add(acting_principal(None), {
         "id": task_id, "role": role, "owned": list(owned), "objective": objective, "contract": contract,
         "accept": list(accept), "depends": list(depends), "milestone": milestone, "room": room, "priority": priority,
-        "profile": profile, "min_capability": min_capability})
+        "profile": profile, "min_capability": min_capability, "touches": list(touches)})
     lines = [f"{task_id} added as pending ({len(accept)} acceptance items, {added['size']} bytes)"]
     return "\n".join(lines + [f"warning: {warning}" for warning in added["warnings"]])
 
@@ -318,8 +325,10 @@ def deliver(queue, task_id, handoff, principal=None):
         text = Path(handoff).read_text(errors="replace")
     except OSError:
         text = None
+    worktree = Path(handoff).parent.parent if Path(handoff).parent.name == cfg.WORKER_LOG else None
     delivered = queue.service.deliver(acting_principal(principal), task_id, handoff_path=str(handoff),
-                                      result=handoff_result(handoff), handoff_text=text)
+                                      result=handoff_result(handoff), handoff_text=text,
+                                      observed_touches=patch_targets(worktree) if worktree else ())
     if delivered.get("already"):
         return f"{task_id} is already delivered"
     return f"{task_id} -> verification; the worker slot is free, dependents wait for the merge"
@@ -340,6 +349,15 @@ def busy_suffix(task, changed, message):
         return message
     return (f"{message}; {agent_of(task)} already works on {changed['busy_with']}, so {task['id']} went back to pending "
             f"for the next free agent (its worktree moves aside on assignment)")
+
+
+def patch_targets(worktree):
+    """The files a worker's patches under .theseus/patches/ change: shared files it touches outside its ownership."""
+    from . import integrate
+    found = set()
+    for patch in sorted((Path(worktree) / cfg.WORKER_LOG / "patches").glob("*.patch")):
+        found.update(integrate.patch_paths(patch.read_text(errors="replace")))
+    return sorted(found)
 
 
 def set_aside_handoff(task):

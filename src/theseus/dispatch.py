@@ -49,7 +49,7 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
     task = queue.get(task_id)
     if task_id not in t.ready(queue, include_paused=resume_paused):
         index = queue.index()
-        reasons = t.blocking(task, index, queue.milestone(), t.merge_reach(conf)) or [task["status"]]
+        reasons = t.blocking(task, index, queue.milestone(), t.merge_reach(conf), queue.holds()) or [task["status"]]
         raise integrate.IntegrationError(f"{task_id} is not ready: {', '.join(reasons)}")
     problems = rules.task_record_problems(conf)
     if problems:

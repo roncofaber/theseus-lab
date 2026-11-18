@@ -430,3 +430,14 @@ Output and assignment:
 - The task message is a pointer line. A supervised agent is told to run `theseus task show ID` and to report with `task done` or `task blocked`. A hand-made pane is told to use `theseus tasks show ID` and to write its handoff, which the permanent fallback picks up. No record text is typed.
 
 Tests strip `TMUX` and `TMUX_PANE` from their environment, since the developer's own pane could match a fake hand-made agent's pane id.
+
+## 21. Phase 4 implementation notes
+
+Phase 4 adds soft ownership. A task's conflict set is its owned patterns plus its touches: the shared files it declares with `tasks add --touches` or `tasks edit --touches`, and the files its patches change (observed).
+
+- A pending task is held while an `in_progress` or `verification` task conflicts with it. Two tasks conflict in either of two cases:
+  - their owned patterns overlap (`ownership_overlaps`), reason `owns:PATTERN@TASK`, which section 16 now makes a hold rather than only an add-time warning;
+  - a file one of them touches is owned or touched by the other, reason `touches:FILE@TASK`.
+- Holds are computed (`taskservice.conflict`, `holds`), never stored. They appear in `ready()`, in `claim()` (a forced claim records them as bypassed), in `blocking()` through its new `holds` argument, and so in `tasks list`, `queue status` and `dispatch`'s refusal. The console's WAITING column shows `touches FILE (TASK)` or `owns PATTERN (TASK)`.
+- Observed touches come from three places: `task done`, a detected delivery (the patch targets under the worktree's `.theseus/patches/`), and every tick's read-only scan of each in-progress worktree (`set_observed`; Q6). They are dropped when the task is merged, released, reopened or completed.
+- `add` and `edit` warn about each conflict with a running task, and accept the task anyway: a follow-up for the same files is legitimate, and the hold keeps it from running alongside.

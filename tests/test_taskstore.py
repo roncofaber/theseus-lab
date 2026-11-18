@@ -139,6 +139,36 @@ class RoundTripTests(TaskStoreCase):
         self.assertIn("unclaimed", [e["kind"] for e in svc.get(COORDINATOR, "gamma", history=True)["history"]])
 
 
+class SoftOwnershipTests(TaskStoreCase):
+    def test_touches_and_overlapping_ownership_hold_a_task_while_the_other_runs(self):
+        self.start()
+        svc = self.svc
+        svc.add(COORDINATOR, spec("first"))
+        run = lambda task_id, agent: svc.assign(QUEUE, task_id, agent, lambda c: (self.tmp / task_id, "b",
+                                                                                   self.tmp / task_id / ".theseus"),
+                                                owner=f"p:{agent}:{agent}-x", provider="p")
+        run("first", "agent-1")
+        added = svc.add(COORDINATOR, spec("patcher", owned=["docs/investigations/patcher.md"],
+                                          touches=["src/first/shared.py"]))
+        self.assertIn("touches:src/first/shared.py@first", added["warnings"][0])
+        svc.add(COORDINATOR, spec("inner", owned=["docs/investigations/inner.md", "src/first/inner.py"]))
+        svc.add(COORDINATOR, spec("third", owned=["docs/investigations/third.md", "src/third.py"]))
+        self.assertEqual({"patcher": ["touches:src/first/shared.py@first"], "inner": ["owns:src/first/@first"]},
+                         svc.holds(COORDINATOR))
+        self.assertEqual(["third"], svc.ready(COORDINATOR))
+        refused = self.code(svc.claim, QUEUE, "patcher", "agent-2", owner="o", provider="p")
+        self.assertEqual("refused", refused)
+
+        svc.set_observed(QUEUE, "first", ["src/third.py"])
+        self.assertEqual(["touches:src/third.py@first"], svc.holds(COORDINATOR)["third"],
+                         "the tick's patch scan holds a conflicting task before the delivery")
+        svc.deliver(QUEUE, "first", handoff_path="/h", observed_touches=["src/third.py"])
+        self.assertIn("third", svc.holds(COORDINATOR), "held while the first task is in verification")
+        svc.mark_merged(COORDINATOR, "first", "abc")
+        self.assertEqual({}, svc.holds(COORDINATOR))
+        self.assertEqual(["patcher", "inner", "third"], svc.ready(COORDINATOR))
+
+
 class ImportTests(TaskStoreCase):
     def test_task_files_wait_for_an_import_and_identity_survives_replace_and_prune(self):
         files = self.conf.root / "docs/project"

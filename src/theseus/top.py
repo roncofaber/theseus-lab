@@ -712,6 +712,10 @@ def waiting_reason(state, key, task_id):
         parts = []
         for item in state["blocked"].get(task_id, []):
             kind, _, value = item.partition(":")
+            if kind in ("touches", "owns"):
+                path, _, holder = value.rpartition("@")
+                parts.append(f"{kind} {path} ({holder})")
+                continue
             parts.append(f"{BLOCK_WORDS.get(kind, kind)} {value}".strip())
         return "blocked", "; ".join(parts) or "blocked"
     if state["paused"]:

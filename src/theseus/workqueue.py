@@ -48,6 +48,7 @@ import sys
 import time
 from contextlib import contextmanager
 from importlib import resources
+from pathlib import Path
 
 from . import agents as ag
 from . import config as cfg
@@ -305,6 +306,19 @@ def release_for_fallback(conf, agent, task_id, profile, fallback):
     return events(conf, after_id=start)
 
 
+def scan_touches(conf):
+    """Read each in-progress task's .theseus/patches/ (read-only) and record the files they touch, so a conflicting
+    task waits before the delivery rather than after."""
+    queue = t.Queue(conf)
+    for task in queue.load()["tasks"]:
+        worktree = task.get("worktree")
+        if task["status"] == "in_progress" and worktree and Path(worktree).is_dir():
+            try:
+                queue.service.set_observed(queue_principal(), task["id"], t.patch_targets(worktree))
+            except (OSError, t.TaskError):
+                continue
+
+
 def queue_principal():
     from . import taskservice
     return taskservice.QUEUE
@@ -393,6 +407,7 @@ def tick(conf, assign=True):
             active = health.fallbacks()
             recorded.extend(supervise(conf))
             t.Queue(conf).service.abandon_orphans(queue_principal())
+            scan_touches(conf)
             registered = ag.agents(conf)
             recorded.extend(resume_sends(conf, registered, sends))
             pool_names = {a["name"]: pools.pool_of(conf, a.get("provider")) for a in registered}
@@ -1018,6 +1033,7 @@ def summary(conf):
     index = queue.index()
     current = queue.milestone()
     reach = t.merge_reach(conf)
+    holds = queue.holds()
     for task in open_tasks:
         status = task["status"]
         if status == "pending":
@@ -1026,7 +1042,7 @@ def summary(conf):
             elif task["id"] in ready:
                 groups["ready"].append(task)
             else:
-                groups["blocked"].append({**task, "reasons": t.blocking(task, index, current, reach)})
+                groups["blocked"].append({**task, "reasons": t.blocking(task, index, current, reach, holds)})
         elif status == "in_progress":
             groups["in_progress"].append(task)
         elif status == "verification":

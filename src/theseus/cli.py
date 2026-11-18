@@ -306,7 +306,7 @@ def cmd_task(args):
         if action == "done" and text is None:
             sys.exit(f"theseus: no handoff at {handoff}; write it first (see the worker skill)")
         worktree = handoff.parent.parent if handoff and handoff.parent.name == cfg.WORKER_LOG else None
-        touches = observed_touches(worktree) if worktree else []
+        touches = t.patch_targets(worktree) if worktree else []
         if action == "done":
             done = svc.deliver(principal, args.id, handoff_path=str(handoff), result=t.handoff_result(handoff),
                                handoff_text=text, observed_touches=touches, source="command")
@@ -317,13 +317,7 @@ def cmd_task(args):
               f"{args.id} -> verification ({done['result']}); the coordinator reviews it next")
 
 
-def observed_touches(worktree):
-    """Paths the worker's patches under .theseus/patches/ change (shared files it touches outside its ownership)."""
-    from . import integrate
-    found = set()
-    for patch in sorted((Path(worktree) / cfg.WORKER_LOG / "patches").glob("*.patch")):
-        found.update(integrate.patch_paths(patch.read_text(errors="replace")))
-    return sorted(found)
+
 
 
 def tasks_action(conf, queue, args):
@@ -331,7 +325,7 @@ def tasks_action(conf, queue, args):
     action = args.task_action
     if action == "add":
         emit(t.add(queue, args.id, args.role, args.owned, args.objective, args.contract, args.accept, args.depends, args.milestone,
-                   args.room, args.priority, args.profile, args.min_capability))
+                   args.room, args.priority, args.profile, args.min_capability, args.touches))
     elif action in ("list", "ls"):
         emit(t.list_tasks(queue, args.status, args.all, args.evidence))
     elif action == "edit":
@@ -1200,6 +1194,9 @@ def build_parser():
     p.add_argument("--profile", help="agent profile the task needs (default: any); see theseus tasks profile")
     p.add_argument("--min-capability", type=int, default=0, metavar="N",
                    help="lowest profile capability that may take the task (default 0: any); see theseus tasks capability")
+    p.add_argument("--touches", nargs="+", default=[], metavar="PATH",
+                   help="shared files outside ownedPaths the task will patch; a running task that owns or touches them "
+                        "holds this one, and this one holds them while it runs")
     for name in ("list", "ls"):
         p = ts.add_parser(name, help="one line per task with readiness or blocking reasons")
         p.add_argument("--status", choices=("pending", "in_progress", "verification", "merged", "completed"))

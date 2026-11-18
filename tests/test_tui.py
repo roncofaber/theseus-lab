@@ -91,13 +91,20 @@ class ProjectSnapshotTests(HostCase):
         self.add_task("first-task")
         self.add_task("later-task", "--depends", "first-task")
         self.add_task("hard-task", "--min-capability", "2")
+        self.theseus("tasks", "add", "readme-task", "--role", "docs", "--owned", "README.md",
+                     "docs/investigations/readme-task.md", "--objective", "Do it.", "--contract", "All.", "--accept", "Done.")
+        self.theseus("tasks", "assign", "readme-task", "--owner", "p:w:w-readme", "--provider", "claude-code", "--model",
+                     "m", "--worktree", self.tmp / "wt", "--base", "uncommitted", "--log-dir", self.tmp / "wt/.theseus")
+        self.add_task("patcher-task", "--touches", "README.md")
         state = top.snapshot(config.load(root=self.project), host={})
         self.assertEqual(["worker-a", "worker-b"], sorted(a["name"] for a in state["agents"]))
         self.assertEqual({"hard-task": 2}, state["gated"])
         reasons = {e["task"]: (e["key"], e["reason"]) for e in top.waiting_entries(state)}
         self.assertEqual({"first-task": ("ready", "assigning on the next tick"),
                           "hard-task": ("ready", "needs capability >= 2"),
-                          "later-task": ("blocked", "waiting for first-task")}, reasons)
+                          "later-task": ("blocked", "waiting for first-task"),
+                          "patcher-task": ("blocked", "touches README.md (readme-task)"),
+                          "readme-task": ("started", "")}, reasons)
 
 
 class ConsoleTests(HostCase, unittest.IsolatedAsyncioTestCase):
