@@ -115,7 +115,7 @@ Any other CLI can be added as a custom profile; see [Agent profiles](docs/agent-
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup and guidelines. Tested agent profiles for new CLIs are especially useful.
 
-Run the tests with `python -m unittest discover -s tests` (about 30 s).
+Run the tests with `python -m unittest discover -s tests` (under 30 s); no single test may take more than 3 s (`tests/test_zbudget.py` fails otherwise), so tests use fakes and fake clocks (`helpers.fake_clock`) and short test-only settings, never real waits.
 
 ## License
 

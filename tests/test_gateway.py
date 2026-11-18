@@ -6,7 +6,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from helpers import Sandbox
+from helpers import Sandbox, fake_clock
 from test_queue import FAKE_TMUX
 
 PROMPT = "\u276f"
@@ -96,6 +96,7 @@ class GatewayCase(Sandbox):
         saved = ag.tmux
         ag.tmux = self.pane
         self.addCleanup(setattr, ag, "tmux", saved)
+        self.clock = fake_clock(self)
 
     def info(self, lines, tokens=None):
         from theseus import gateway
@@ -323,12 +324,12 @@ class BatchedSendTests(GatewayCase):
         agents = self.agents(8)
         panes = FakePanes(deaf={a["pane"] for a in agents[:6]})
         self.use(panes)
-        started = time.monotonic()
+        started = self.clock.monotonic()
         with self.ag.batched(30) as sends:
             for agent in agents:
                 self.assertEqual((True, "typed; verifying"), self.ag.send_verified(self.conf, agent, f"Hello {agent['name']}."))
             recorded = wq.verify_sends(self.conf, sends)
-        self.assertLess(time.monotonic() - started, 4, "six silent agents verified one after another take 6 s or more")
+        self.assertLess(self.clock.monotonic() - started, 4, "six silent agents verified one after another take 6 s or more")
         self.assertEqual(sorted(a["name"] for a in agents[:6]), sorted(e["agent"] for e in recorded))
         self.assertTrue(all(e["kind"] == "send_failed" and "not busy after Enter" in e["detail"] for e in recorded))
 
@@ -338,7 +339,7 @@ class BatchedSendTests(GatewayCase):
         self.use(FakePanes())
         with self.ag.batched(0.5) as sends:
             self.ag.send_verified(self.conf, agent, "Continue.", "slow-task", kind="nudge")
-            time.sleep(0.6)
+            self.clock.sleep(0.6)
             self.assertEqual([], wq.verify_sends(self.conf, sends))
         self.assertEqual(["ok"], [item["result"] for item in sends.items], "time spent before verifying is not budget")
         self.write("theseus.local.toml", '[workers.claude-code.interactive]\nbusy_pattern = ""\n')
@@ -355,12 +356,12 @@ class BatchedSendTests(GatewayCase):
         answered, stuck, quick = self.agents(3)
         panes = FakePanes(deaf={answered["pane"]}, sticky={stuck["pane"]})
         self.use(panes)
-        started = time.monotonic()
+        started = self.clock.monotonic()
         with self.ag.batched(0.2) as sends:
             for agent in (answered, stuck, quick):
                 self.ag.send_verified(self.conf, agent, "Continue the task.", "slow-task", kind="nudge")
             self.assertEqual([], wq.verify_sends(self.conf, sends))
-        self.assertLess(time.monotonic() - started, 3, "the budget bounds the tick")
+        self.assertLess(self.clock.monotonic() - started, 3, "the budget bounds the tick")
         carried = {name: entry["verify"] for name, entry in wq.runtime(self.conf).items() if entry.get("verify")}
         self.assertEqual({answered["name"], stuck["name"]}, set(carried), "the quick agent confirmed within the budget")
         self.assertTrue(all(entry["carried"] for entry in carried.values()))

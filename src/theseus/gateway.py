@@ -363,9 +363,9 @@ def recover(conf, agent, task, fresh, reason, text=None):
             return True, f"fresh context ({clear}, then the restart prompt once it is confirmed)"
         if clear:
             timeout, poll = ag.send_settings(conf)
-            deadline = time.monotonic() + timeout
-            while ag.pane_busy(conf, agent["pane"], profile, server=ag.where(agent)[0]) and time.monotonic() < deadline:
-                time.sleep(poll)
+            deadline = ag.clock.monotonic() + timeout
+            while ag.pane_busy(conf, agent["pane"], profile, server=ag.where(agent)[0]) and ag.clock.monotonic() < deadline:
+                ag.clock.sleep(poll)
         status, detail = workqueue.deliver_owed(conf, agent)
         return status in ("sent", "typed"), f"fresh context ({clear or 'no clear command'} and a restart prompt): {detail}"
     kind = "nudge" if text else "resend"

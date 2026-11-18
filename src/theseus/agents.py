@@ -308,6 +308,20 @@ ENTER_PAUSE = 0.3
 DEFERRED = "typed; verifying"
 
 
+class Clock:
+    """Wall time, monotonic time and sleep for verified sends; tests swap in a fake clock (agents.clock)."""
+    monotonic = staticmethod(time.monotonic)
+    sleep = staticmethod(time.sleep)
+    time = staticmethod(time.time)
+
+
+clock = Clock()
+
+
+def enter_pause():
+    return float(os.environ.get("THESEUS_ENTER_PAUSE") or ENTER_PAUSE)
+
+
 class Batch:
     """The verified sends of one queue tick: each is typed at once and recorded here, and the tick verifies them all
     together (workqueue.verify_sends) instead of waiting on each in turn."""
@@ -320,10 +334,10 @@ class Batch:
     def start(self):
         """Start the budget: when the tick turns to verifying, not while it still reconciles, resets or relaunches."""
         if self.deadline is None:
-            self.deadline = time.monotonic() + self.budget
+            self.deadline = clock.monotonic() + self.budget
 
     def remaining(self):
-        return self.budget if self.deadline is None else max(0.0, self.deadline - time.monotonic())
+        return self.budget if self.deadline is None else max(0.0, self.deadline - clock.monotonic())
 
     def agents(self):
         return {item["agent"] for item in self.items}
@@ -362,7 +376,7 @@ def send_context(conf, agent, profile=None):
             "clear": settings.get("clear_input")}
 
 
-def type_text(ctx, text, sleep=time.sleep, enter=True):
+def type_text(ctx, text, sleep=None, enter=True):
     """Empty the input line, type text and (enter) press Enter after a short pause. Returns '' or the tmux error."""
     server, pane = ctx["server"], ctx["pane"]
     if ctx["clear"]:
@@ -374,7 +388,7 @@ def type_text(ctx, text, sleep=time.sleep, enter=True):
     if typed.returncode != 0:
         return f"tmux send-keys failed: {(typed.stderr or '').strip()[:120]}"
     if enter:
-        sleep(ENTER_PAUSE)
+        (sleep or clock.sleep)(enter_pause())
         on(server, "send-keys", "-t", pane, "Enter")
     return ""
 
@@ -385,7 +399,7 @@ def advance(ctx, pending, now=None):
     the input line still holds the text; ("failed", detail) after that. A send carried over from an earlier tick
     (pending["carried"]) whose text has left the input line counts as submitted: the agent may have answered and gone
     idle between ticks, so a missed busy marker proves nothing."""
-    now = time.time() if now is None else now
+    now = clock.time() if now is None else now
     screen = pane_screen(ctx["pane"], ctx["server"])
     text, timeout = pending["text"], ctx["timeout"]
     holds = input_holds(screen, text, ctx["input"], placeholder=ctx["placeholder"])
@@ -413,7 +427,7 @@ def record_send_failed(conf, name, task, text, detail):
     return workqueue.event(conf, "send_failed", name, task, f"{detail}: {short[:60]!r}")
 
 
-def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, record=True, sleep=time.sleep,
+def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, record=True, sleep=None,
                   kind="plain", **extra):
     """Type text into an agent's pane and confirm it was submitted: within instances.send_verify_seconds the pane must
     show the profile's busy marker (expect_busy) or, for slash commands, no longer hold the text in its input line.
@@ -428,11 +442,12 @@ def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, 
     error = type_text(ctx, text, sleep, enter=current is None or not verified)
     if not error and not verified:
         return True, "sent (unverified: the profile has no busy marker)"
-    now = time.time()
+    sleep = sleep or clock.sleep
+    now = clock.time()
     pending = {"agent": agent["name"], "text": text, "task": task, "expect_busy": expect_busy, "profile": ctx["profile"],
                "kind": kind, "enters": 1, "typed": now, "deadline": now + ctx["timeout"], "record": record, **extra}
     if not error and current is not None:
-        current.items.append({**pending, "ctx": ctx, "entry": agent, "enter_at": time.monotonic() + ENTER_PAUSE})
+        current.items.append({**pending, "ctx": ctx, "entry": agent, "enter_at": clock.monotonic() + enter_pause()})
         return True, DEFERRED
     if error:
         result, detail = "failed", error

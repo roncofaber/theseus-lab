@@ -89,7 +89,7 @@ class QueueTests(Sandbox):
     def test_a_fresh_context_gets_one_restart_prompt_before_anything_else(self):
         self.replace_config("idle_minutes = 5", "idle_minutes = 0")
         self.git("commit", "-q", "-am", "instant stall")
-        self.env["THESEUS_SEND_VERIFY"] = "0.5"
+        self.env["THESEUS_SEND_VERIFY"] = "0.1"
         self.add("long-task")
         self.theseus("queue", "tick")
         from theseus import config as cfg, store

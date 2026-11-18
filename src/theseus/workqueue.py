@@ -593,23 +593,23 @@ def poll_send(item, sends):
         left = sends.remaining()
         if left <= 0:
             return "wait", None
-        time.sleep(min(ctx["poll"], left))
+        ag.clock.sleep(min(ctx["poll"], left))
 
 
 def press_enter(sends, items, wait=True):
     """Press Enter in every pane typed into, after one shared pause (wait) or only where the pause is over, and start
     their verification windows."""
-    due = [item for item in items if item.get("enter_at") and (wait or item["enter_at"] <= time.monotonic())]
+    due = [item for item in items if item.get("enter_at") and (wait or item["enter_at"] <= ag.clock.monotonic())]
     if not due:
         return
-    time.sleep(max(0.0, max(item["enter_at"] for item in due) - time.monotonic()))
+    ag.clock.sleep(max(0.0, max(item["enter_at"] for item in due) - ag.clock.monotonic()))
     for item in due:
         ctx = item.pop("enter_at") and item["ctx"]
         try:
             ag.on(ctx["server"], "send-keys", "-t", ctx["pane"], "Enter")
         except Exception:
             pass
-        item["deadline"] = time.time() + ctx["timeout"]
+        item["deadline"] = ag.clock.time() + ctx["timeout"]
 
 
 def verify_sends(conf, sends):

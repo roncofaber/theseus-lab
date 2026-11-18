@@ -98,8 +98,39 @@ def base_env(root):
         "PYTHONPATH": str(SRC) + os.pathsep + env.get("PYTHONPATH", ""),
         "PYTHONDONTWRITEBYTECODE": "1",
         "THESEUS_SAMPLE_SECONDS": "0.05",
+        "THESEUS_ENTER_PAUSE": "0.01",
     })
     return env
+
+
+class FakeClock:
+    """A clock for agents.clock whose sleep only moves time forward, so verification windows and send budgets pass
+    instantly. Threads share it, so parallel waits advance it faster than wall time would."""
+
+    def __init__(self):
+        import threading
+        import time
+        self.now = time.time()
+        self.lock = threading.Lock()
+
+    def time(self):
+        return self.now
+
+    monotonic = time
+
+    def sleep(self, seconds):
+        import time
+        with self.lock:
+            self.now += max(0.0, seconds)
+        time.sleep(0)
+
+
+def fake_clock(case):
+    """Install a FakeClock as agents.clock for the rest of the test case and return it."""
+    from theseus import agents
+    saved, agents.clock = agents.clock, FakeClock()
+    case.addCleanup(setattr, agents, "clock", saved)
+    return agents.clock
 
 
 class Sandbox(unittest.TestCase):
