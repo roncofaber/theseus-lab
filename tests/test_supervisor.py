@@ -107,8 +107,8 @@ window_minutes = 10
 """
 
 # Test-only poll intervals and settle times; the production defaults are unchanged.
-FAST = {"THESEUS_READY_SETTLE": "0.2", "THESEUS_READY_POLL": "0.05", "THESEUS_DEAD_POLL": "0.05",
-        "THESEUS_STOP_POLL": "0.1", "THESEUS_STOP_SECONDS": "5", "THESEUS_SEND_VERIFY": "5", "THESEUS_SEND_POLL": "0.05",
+FAST = {"THESEUS_READY_SETTLE": "0.1", "THESEUS_READY_POLL": "0.05", "THESEUS_DEAD_POLL": "0.05",
+        "THESEUS_STOP_POLL": "0.05", "THESEUS_STOP_SECONDS": "5", "THESEUS_SEND_VERIFY": "5", "THESEUS_SEND_POLL": "0.05",
         "THESEUS_COMPACT_POLL": "0.1", "FAKE_BUSY": "0.5"}
 
 PROFILE = """
