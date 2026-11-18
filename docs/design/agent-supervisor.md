@@ -217,7 +217,7 @@ The existing `theseus agents` positional actions (`list`, `add`, `remove`, `enab
 
 Reconcile (one pass, also run at the start of every queue tick for managed projects, under the existing queue lock):
 
-1. Desired set: per profile, `[agents.counts]` live agents (down or disabled ones do not count): the live ones within the count, surplus chosen free first then newest started, missing ones under the lowest free name (never used, removed, or down without a task); plus `[[agents.extra]]`.
+1. Desired set: per profile, `[agents.counts]` live agents (down or disabled ones do not count): the live ones within the count, surplus chosen free first then newest started, missing ones under the lowest name never used or removed (a downed name stays down); plus `[[agents.extra]]`. Nothing runs while `agents down --all` has paused the project.
 2. Observed set: `list-panes -a -F` on the private server filtered by `@theseus_project`, joined with store rows and the latest `agent_runs` row per agent.
 3. For each desired agent:
    - no session: spawn (4.5), subject to `max_agents`;

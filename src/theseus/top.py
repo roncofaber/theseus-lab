@@ -511,7 +511,7 @@ def supervision(conf):
     from . import supervisor
     if not supervisor.managed(conf):
         return {"managed": False, "agentCounts": {}}
-    return {"managed": True, "agentCounts": supervisor.counts(conf)}
+    return {"managed": True, "agentCounts": supervisor.counts(conf), "supervisionPaused": supervisor.paused(conf)}
 
 
 # presentation

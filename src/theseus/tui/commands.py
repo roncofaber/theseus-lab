@@ -17,6 +17,9 @@ def project_commands(item):
             commands.append((f"Remove a {profile} agent ({count} to {count - 1})",
                              "theseus agents scale; a busy agent stops once free", ["agents", "scale", profile, str(count - 1)],
                              f"Remove a {profile} agent ({count} to {count - 1})?"))
+    if state.get("managed"):
+        commands.append(("Stop all agents", "theseus agents down --all: supervision pauses until Agents up",
+                         ["agents", "down", "--all"], "Stop every agent and pause supervision?"))
     for agent in state["agents"]:
         shown = agent.get("display") or agent["name"]
         if agent.get("managed"):

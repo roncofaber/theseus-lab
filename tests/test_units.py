@@ -302,6 +302,24 @@ class LongRunningQueueTests(Sandbox):
         self.assertIn("committed locally but not at the assignment base origin/main", message)
         self.assertIn("`git push origin HEAD:main`", message)
 
+    def test_down_all_pauses_supervision_until_agents_up(self):
+        from unittest import mock
+        from theseus import supervisor
+        self.write("theseus.local.toml", "[agents]\nmanaged = true\n\n[agents.counts]\nclaude-code = 2\n")
+        conf = cfg.load(root=self.project)
+        with mock.patch.object(supervisor, "records", return_value={}):
+            self.assertEqual("paused", supervisor.down(conf)[0][1])
+        with mock.patch.object(supervisor, "server", side_effect=AssertionError("reconcile must start nothing")):
+            self.assertEqual([("-", "paused")], [row[:2] for row in supervisor.reconcile(conf)])
+        self.assertTrue(json.loads(self.theseus("agents", "ls", "--json").stdout)["paused"])
+        with mock.patch.object(supervisor, "records", return_value={}):
+            supervisor.down(conf, ["x"])
+        self.assertTrue(supervisor.paused(conf), "down NAME leaves the pause alone")
+        self.theseus("agents", "up", "--dry-run")
+        self.assertTrue(supervisor.paused(conf), "a dry run resumes nothing")
+        supervisor.set_paused(conf, False)
+        self.assertFalse(supervisor.paused(conf))
+
     def test_down_force_on_a_busy_agent_kills_it_without_waiting_for_idle(self):
         from unittest import mock
         from theseus import supervisor
@@ -358,12 +376,11 @@ class CountPlanTests(unittest.TestCase):
         self.assertEqual(([1, 3], [], [4]), supervisor.plan(2, self.members(1, 3, 4), started=lambda n: 9 if n == 1 else n,
                                                            stopping=lambda n: n == 4), "a victim already stopping stays one")
 
-    def test_scale_up_reuses_the_lowest_free_name_down_or_removed(self):
+    def test_scale_up_takes_the_lowest_unused_or_removed_name_never_a_downed_one(self):
         from theseus import supervisor
         members = self.members(3, n2={"desired": "down"})
-        self.assertEqual([1, 2], supervisor.plan(3, members)[1])
-        self.assertEqual([4], supervisor.plan(2, {**members, 2: {"desired": "down"}}, holds=lambda n: n == 2,
-                                              taken=lambda n: n == 1)[1], "a name of an extra or a task holder is not free")
+        self.assertEqual([1, 4], supervisor.plan(3, members)[1])
+        self.assertEqual([4], supervisor.plan(2, members, taken=lambda n: n == 1)[1], "a name of an extra is not free")
 
     def test_a_deferred_victim_comes_back_before_a_new_name(self):
         from theseus import supervisor
@@ -375,6 +392,6 @@ class CountPlanTests(unittest.TestCase):
         from theseus import supervisor
         downed = self.members(1, 3, 4, n2={"desired": "down"})
         self.assertEqual(([1, 3], [], [4]), supervisor.plan(2, downed, started=lambda n: n))
-        self.assertEqual([2], supervisor.plan(4, downed)[1])
-        refilled = self.members(1, 2, 3, 4)
-        self.assertEqual(([1, 3], [], [2, 4]), supervisor.plan(2, refilled, started=lambda n: 9 if n == 2 else n))
+        self.assertEqual([5], supervisor.plan(4, downed)[1])
+        replaced = self.members(1, 3, 4, 5, n2={"desired": "down"})
+        self.assertEqual(([1, 3], [], [4, 5]), supervisor.plan(2, replaced, started=lambda n: n))

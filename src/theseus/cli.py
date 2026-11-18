@@ -609,6 +609,8 @@ def cmd_supervised(args):
                     sys.exit("theseus: " + "; ".join(errors))
                 from . import workqueue
                 with workqueue.locked(conf):
+                    if not args.dry_run:
+                        supervisor.set_paused(conf, False)
                     if names and not args.dry_run:
                         for name in names:
                             supervisor.update(conf, name, desired="up")
@@ -743,9 +745,12 @@ def list_supervised(conf, as_json=False):
                "uptime": int(time.time() - item["started"]) if item.get("started") and item.get("running") else None}
         rows.append(row)
     legacy = [info for name, info in states.items() if not info.get("managed")]
+    paused = supervisor.paused(conf)
     if as_json:
-        print(json.dumps({"supervised": rows, "unmanaged": legacy}, indent=2, default=str))
+        print(json.dumps({"paused": paused, "supervised": rows, "unmanaged": legacy}, indent=2, default=str))
         return
+    if paused:
+        print("supervision paused (`theseus agents down --all`); `theseus agents up` resumes it")
     for row in rows:
         uptime = f"{row['uptime'] // 60}m" if row["uptime"] is not None else "-"
         print(f"{row['name']:<24} {row['state'] or '-':<10} {row['profile'] or '-':<10} gen {row['gen'] or '-':<4} "

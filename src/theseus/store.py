@@ -365,6 +365,11 @@ def set_meta(conn, key, value):
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, str(value)))
 
 
+def delete_meta(conn, key):
+    with transaction(conn):
+        conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+
+
 def touch_project(conn, name):
     conn.execute("INSERT OR IGNORE INTO projects (name) VALUES (?)", (name,))
 

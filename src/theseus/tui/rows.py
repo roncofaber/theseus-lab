@@ -420,6 +420,8 @@ def overview(state, width=200):
               ("trouble", ", ".join(f"{v} {k}" for k, v in trouble.items()) or "none",
                f"bold {theme.RED}" if trouble else theme.GREEN),
               ("pool", pool_line(state), ""), ("gateway", text, style)]
+    if state.get("supervisionPaused"):
+        agents.insert(1, ("supervision", "paused", f"bold {theme.YELLOW}"))
     today = state.get("today") or {}
     last_merge = top.age(today["lastMerge"]) if today.get("lastMerge") else None
     outcomes = [("merged", str(today.get("merged", 0)), "bold"), ("completed", str(today.get("completed", 0)), "bold"),

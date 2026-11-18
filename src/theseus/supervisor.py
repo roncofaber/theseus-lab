@@ -203,9 +203,9 @@ def counted_live(rec):
     return rec.get("desired") not in ("down", "retire") and rec.get("enabled", True)
 
 
-def name_free(rec, holds_task):
-    """Whether a counted name may go to a new agent: never used, removed, or taken down without a task."""
-    return rec is None or (rec.get("desired") == "down" and not holds_task)
+def name_free(rec):
+    """Whether a counted name may go to a new agent: never used or removed. A downed name stays down."""
+    return rec is None
 
 
 def plan(count, members, holds=lambda n: False, started=lambda n: None, taken=lambda n: False, keep=(),
@@ -225,7 +225,7 @@ def plan(count, members, holds=lambda n: False, started=lambda n: None, taken=la
         n += 1
         if n in starts or (n not in members and taken(n)):
             continue
-        if name_free(members.get(n), n in members and holds(n)):
+        if name_free(members.get(n)):
             starts.append(n)
     return sorted(live), sorted(starts), []
 
@@ -714,7 +714,7 @@ def next_start(conf, name, now=None):
 
 def wake_times(conf, now=None):
     """Epochs when a crashed agent of this project becomes due for its restart (for `theseus queue wait`)."""
-    if not managed(conf):
+    if not managed(conf) or paused(conf):
         return []
     now = time.time() if now is None else now
     found = []
@@ -789,6 +789,8 @@ def reconcile(conf, names=None, wait=False, dry_run=False, reset=False):
     """One pass toward the project's [agents] configuration. Returns [(name, action, detail)]."""
     if not managed(conf):
         return []
+    if paused(conf):
+        return [("-", "paused", "supervision paused by `theseus agents down --all`; `theseus agents up` resumes it")]
     srv = server()
     regs = records(conf)
     wanted = standing(conf, regs, keep=names or ())
@@ -806,8 +808,8 @@ def reconcile(conf, names=None, wait=False, dry_run=False, reset=False):
         if names and name not in names:
             continue
         rec = regs.get(name)
-        if slot.get("revive") and rec and rec.get("desired") in ("down", "retire"):
-            fields = {"desired": "up", "enabled": True, **({"session_id": None} if rec["desired"] == "down" else {})}
+        if slot.get("revive") and rec and rec.get("desired") == "retire":
+            fields = {"desired": "up", "enabled": True}
             if not dry_run:
                 update(conf, name, **fields)
             rec = {**rec, **fields}
@@ -1097,11 +1099,28 @@ def stop(conf, rec, graceful=True, wait=True, reason="down", idle_timeout=180, g
     return True, "stopped"
 
 
+def paused(conf):
+    with store.for_project(conf) as conn:
+        return store.get_meta(conn, f"supervision.paused:{conf.name}") is not None
+
+
+def set_paused(conf, value):
+    with store.for_project(conf) as conn:
+        if value:
+            store.set_meta(conn, f"supervision.paused:{conf.name}", store.iso())
+        else:
+            store.delete_meta(conn, f"supervision.paused:{conf.name}")
+
+
 def down(conf, names=None, force=False, now=False):
-    """Stop managed agents and keep them stopped (desired = down). Returns [(name, action, detail)]."""
+    """Stop managed agents and keep them stopped (desired = down); without names every agent stops and supervision
+    pauses until `theseus agents up`. Returns [(name, action, detail)]."""
     regs = records(conf)
     chosen = names or [n for n, r in regs.items() if r.get("managed")]
     results = []
+    if not names:
+        set_paused(conf, True)
+        results.append(("-", "paused", "supervision paused; `theseus agents up` resumes it"))
     for name in chosen:
         rec = regs.get(name)
         if not rec or not rec.get("managed"):
