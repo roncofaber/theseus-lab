@@ -360,6 +360,31 @@ class LongRunningQueueTests(Sandbox):
         retire.assert_called_once_with(conf, server, regs[name(4)], False)
 
 
+class DriftTests(Sandbox):
+    def test_a_model_change_is_drift_that_names_the_model_and_the_env_built_from_it(self):
+        from theseus import store, supervisor
+        self.scaffold()
+        local = ('[agents]\nmanaged = true\n\n[agents.counts]\ngw = 1\n\n[workers.gw]\npreset = "claude-code"\n'
+                 'model = "{model}"\nenv = {{ CBORG_CLAUDE_MODEL = "{{model}}", TOKEN = "t" }}\n')
+        self.write("theseus.local.toml", local.format(model="m-1"))
+        conf = cfg.load(root=self.project)
+        name = "demo-port-gw-1"
+        spec = supervisor.launch(conf, "gw", name)[3]
+        with store.for_project(conf) as conn:
+            store.upsert_agent(conn, conf.name, name, pane="=demo-port--gw-1:", profile="gw", source="supervisor")
+            store.update_agent(conn, conf.name, name, managed=True)
+            run = store.add_run(conn, conf.name, name, "start", profile="gw", launch_hash=spec["hash"])
+        supervisor.save_spec(conf, name, run["gen"], spec)
+        self.assertEqual([], supervisor.drift(conf, supervisor.record(conf, name)))
+        self.assertIn("no drifted agents", self.theseus("agents", "restart", "--drifted").stdout)
+        self.write("theseus.local.toml", local.format(model="m-2"))
+        conf = cfg.load(root=self.project)
+        self.assertEqual(["model m-1 -> m-2", "env CBORG_CLAUDE_MODEL"], supervisor.drift(conf, supervisor.record(conf, name)))
+        self.assertIn("drift: model m-1 -> m-2; env CBORG_CLAUDE_MODEL", self.theseus("agents", "ls").stdout)
+        refused = self.theseus("agents", "restart", name, "--drifted", check=False)
+        self.assertIn("usage:", refused.stderr)
+
+
 class CountPlanTests(unittest.TestCase):
     """[agents.counts] as live agents per profile: supervisor.plan over {slot: record}."""
 

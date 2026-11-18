@@ -396,13 +396,73 @@ def current_task(conf, name):
 # launching
 
 def launch(conf, profile_name, name, session=None, resume=False):
-    """(argv, env, cwd, hash) of one agent run; the hash covers argv without session arguments, env names and cwd."""
+    """(argv, env, cwd, spec) of one agent run. spec describes the launch without session arguments and with env and
+    MCP definitions digested, so drift can name what changed without recording a secret."""
     profile = profiles.resolve(conf, profile_name)
-    argv, env = profiles.interactive_argv(conf, profile, name, session, resume)
-    base, _ = profiles.interactive_argv(conf, profile, name)
+    parts = profiles.interactive_parts(conf, profile, name)
+    argv, env = profiles.interactive_argv(conf, profile, name, session, resume, parts=parts)
     where = cwd(conf)
-    digest = hashlib.sha256(json.dumps([base, sorted(env), str(where)]).encode()).hexdigest()[:16]
-    return argv, env, where, digest
+    spec = {"command": parts["launch"][0], "args": parts["launch"][1:], "model": profile.get("model") or "",
+            "env": digests(parts["env"]), "interactive_env": digests(parts["interactive_env"]),
+            "mcp": mcp_digest(conf, profile, parts["mcp"]), "extra_args": parts["extra"], "cwd": str(where),
+            "launch_shell": str(settings().get("launch_shell") or "exec"),
+            # The run's launch_hash keeps the formula older theseus versions compare, since they share the host store.
+            "hash": short_digest([parts["launch"] + parts["mcp"] + parts["extra"], sorted(env), str(where)])}
+    return argv, env, where, spec
+
+
+def short_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def digests(variables):
+    return {key: short_digest(value) for key, value in variables.items()}
+
+
+def mcp_digest(conf, profile, flags):
+    path = profiles.mcp_config(conf, profile)
+    return short_digest([flags, json.loads(path.read_text()) if path else None])
+
+
+SPEC_LABELS = {"command": "command", "args": "arguments", "model": "model", "env": "env", "interactive_env":
+               "interactive env", "mcp": "MCP config", "extra_args": "extra_args", "cwd": "working directory",
+               "launch_shell": "launch_shell"}
+
+
+def spec_changes(old, new):
+    """What differs between two launch specs, naming changed variables but never their values."""
+    changes = []
+    for key, label in SPEC_LABELS.items():
+        before, after = old.get(key), new.get(key)
+        if before == after:
+            continue
+        if key == "model":
+            changes.append(f"model {before or '(default)'} -> {after or '(default)'}")
+        elif isinstance(before, dict) and isinstance(after, dict):
+            names = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+            changes.append(f"{label} {', '.join(names)}")
+        else:
+            changes.append(label)
+    return changes
+
+
+def spec_path(conf, name):
+    return agent_dir(conf, name) / "launch.json"
+
+
+def save_spec(conf, name, gen, spec):
+    path = spec_path(conf, name)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"gen": gen, "spec": spec}, indent=2) + "\n")
+    os.replace(temporary, path)
+
+
+def saved_spec(conf, name, gen):
+    try:
+        saved = json.loads(spec_path(conf, name).read_text())
+    except (OSError, ValueError):
+        return None
+    return saved.get("spec") if isinstance(saved, dict) and saved.get("gen") == gen else None
 
 
 def cwd(conf):
@@ -447,17 +507,18 @@ def spawn(conf, slot, intent="start", session=None, profile=None, srv=None):
     profile = profile or rec.get("profile") or slot["profile"]
     resume = bool(session)
     session = session or str(uuid.uuid4())
-    argv, _, where, digest = launch(conf, profile, name, session, resume)
+    argv, _, where, spec = launch(conf, profile, name, session, resume)
     width, height = size()
     target = tm.session_name(conf.name, name)
     with store.for_project(conf) as conn:
         if not rec:
             store.upsert_agent(conn, conf.name, name, pane=tm.address(target), profile=slot["profile"],
                                rooms=slot.get("rooms"), source="supervisor")
-        run = store.add_run(conn, conf.name, name, intent, profile=profile, launch_hash=digest, session_id=session,
+        run = store.add_run(conn, conf.name, name, intent, profile=profile, launch_hash=spec["hash"], session_id=session,
                             resume=resume)
         store.update_agent(conn, conf.name, name, managed=True, server=srv.name, target=target, pane=tm.address(target),
                            session_id=session, slot=slot.get("slot"), desired="up", phase="starting")
+    save_spec(conf, name, run["gen"], spec)
     command = [*theseus_argv(), "agents", "_exec", conf.name, name, str(run["gen"])]
     info = pane_info(srv, target)
     try:
@@ -945,26 +1006,22 @@ def reconcile_one(conf, srv, slot, rec, wait, dry_run, reset, names, lost, runni
             return label, detail
         if label is None:
             return "starting", ""
-    return check_drift(conf, rec, slot, dry_run)
+    return check_drift(conf, rec, dry_run)
 
 
-def check_drift(conf, rec, slot, dry_run):
+def check_drift(conf, rec, dry_run):
     from . import workqueue
-    run = last_run(conf, rec["name"]) or {}
     launched = workqueue.runtime(conf).get(rec["name"], {}).get("launched")
     if launched and launched != rec.get("profile"):
         return "kept", f"relaunched onto {launched} for a task"
-    profile = run.get("profile") or rec.get("profile")
-    try:
-        _, _, _, digest = launch(conf, profile, rec["name"])
-    except profiles.ProfileError as error:
-        return "drift", str(error)
-    if run.get("launch_hash") and digest != run["launch_hash"]:
-        if not dry_run and not drift_reported(conf, rec["name"], run["gen"]):
-            event(conf, "drift", rec["name"], None, f"gen {run['gen']}: the launch configuration changed; "
-                                                    f"`theseus agents restart {rec['name']}` applies it")
-        return "drift", "launch configuration changed; not restarted"
-    return "kept", ""
+    changes = drift(conf, rec)
+    if not changes:
+        return "kept", ""
+    run = last_run(conf, rec["name"]) or {}
+    if not dry_run and run.get("gen") and not drift_reported(conf, rec["name"], run["gen"]):
+        event(conf, "drift", rec["name"], None, f"gen {run['gen']}: the launch configuration changed ({'; '.join(changes)}); "
+                                                f"`theseus agents restart {rec['name']}` applies it")
+    return "drift", f"{'; '.join(changes)}; not restarted"
 
 
 def drift_reported(conf, name, gen):
@@ -972,12 +1029,26 @@ def drift_reported(conf, name, gen):
     return any(e["agent"] == name and e["detail"].startswith(f"gen {gen}:") for e in workqueue.events(conf, 50, kinds=["drift"]))
 
 
-def drifted(conf, rec):
-    run = last_run(conf, rec["name"]) or {}
+def drift(conf, rec):
+    """What differs between how the agent's current run launched and how it would launch now ([] when nothing does, or
+    when the queue relaunched it onto another profile for a task). A run started by a theseus that recorded only the
+    launch hash is compared by that hash, which does not cover env values, the model or MCP server definitions."""
+    from . import workqueue
+    name = rec["name"]
+    launched = workqueue.runtime(conf).get(name, {}).get("launched")
+    if launched and launched != rec.get("profile"):
+        return []
+    run = last_run(conf, name) or {}
+    if not run.get("launch_hash"):
+        return []
     try:
-        return bool(run.get("launch_hash")) and launch(conf, run.get("profile") or rec["profile"], rec["name"])[3] != run["launch_hash"]
-    except profiles.ProfileError:
-        return True
+        _, _, _, spec = launch(conf, run.get("profile") or rec["profile"], name)
+    except profiles.ProfileError as error:
+        return [str(error)]
+    saved = saved_spec(conf, name, run["gen"])
+    if saved is not None:
+        return spec_changes(saved, spec)
+    return [] if spec["hash"] == run["launch_hash"] else ["launch configuration"]
 
 
 def retire(conf, srv, rec, dry_run):
@@ -1155,6 +1226,10 @@ def restart(conf, name, fresh=False, intent="restart", profile=None, wait=True, 
     slot = next((w for w in desired(conf) if w["name"] == name),
                 {"name": name, "profile": rec["profile"], "slot": rec.get("slot")})
     srv = server_of(rec)
+    try:
+        launch(conf, profile or rec.get("profile") or slot["profile"], name)
+    except profiles.ProfileError as error:
+        return False, f"not restarted: {error}"
     session = None if fresh else (live_session(conf, rec) or rec.get("session_id"))
     if pane_info(srv, rec["target"]) is not None:
         ok, detail = stop(conf, rec, graceful=graceful, reason="relaunch" if intent == "relaunch" else "restart")

@@ -339,35 +339,52 @@ def resume_template(profile, session, model, conf=None):
 EMPTY_OPTION = re.compile(r" --?[\w-]+ \{(\w+)\}")
 
 
-def interactive_launch(conf, profile, agent=None):
-    """The command line that starts a persistent instance: `env VAR=value ...` for the profile's env and
-    interactive.env, the launch template, the MCP flags, then extra_args. An option whose placeholder value is empty is
-    dropped; without an agent name {agent} stays for instance-restart.sh to fill from the session record."""
+def launch_template(conf, profile, agent=None):
+    """The persistent-instance launch template ([instances] launch, interactive.launch or the bare command) with
+    {command}, {permission_mode}, {model} and {agent} filled; an option whose placeholder value is empty is dropped.
+    Without an agent name {agent} stays for instance-restart.sh to fill from the session record."""
     interactive = profile.get("interactive") or {}
     template = conf.section("instances").get("launch") or interactive.get("launch") or profile.get("command") or ""
-    values = {"command": profile.get("command") or "", "permission_mode": profile.get("permission_mode") or ""}
+    values = {"command": profile.get("command") or "", "permission_mode": profile.get("permission_mode") or "",
+              "model": profile.get("model") or ""}
     if agent:
         values["agent"] = shlex.quote(agent)
     template = EMPTY_OPTION.sub(lambda m: "" if m.group(1) in values and not values[m.group(1)] else m.group(0), template)
-    variables = {**env(profile), **{k: str(v) for k, v in (interactive.get("env") or {}).items()}}
+    return fill(template, values)
+
+
+def interactive_env(profile):
+    """The interactive.env variables of a persistent instance, which come after (and override) the profile's env."""
+    return {k: str(v) for k, v in ((profile.get("interactive") or {}).get("env") or {}).items()}
+
+
+def interactive_launch(conf, profile, agent=None):
+    """The command line that starts a persistent instance: `env VAR=value ...` for the profile's env and
+    interactive.env, the launch template, the MCP flags, then extra_args."""
+    variables = {**env(profile), **interactive_env(profile)}
     prefix = "env " + " ".join(shlex.quote(f"{k}={v}") for k, v in variables.items()) if variables else ""
     extra = shlex.join(extra_args(profile, agent=agent))
-    return " ".join(filter(None, [prefix, fill(template, values), shlex.join(mcp_args(conf, profile)), extra]))
+    return " ".join(filter(None, [prefix, launch_template(conf, profile, agent), shlex.join(mcp_args(conf, profile)), extra]))
 
 
-def interactive_argv(conf, profile, agent, session=None, resume=False):
+def interactive_parts(conf, profile, agent):
+    """The parts of a supervised instance's launch, before any session arguments: launch (the filled template as an
+    argument list), mcp (the MCP flags), extra (extra_args), env (the profile's env) and interactive_env."""
+    parts = {"launch": shlex.split(launch_template(conf, profile, agent)), "mcp": mcp_args(conf, profile),
+             "extra": extra_args(profile, agent=agent), "env": env(profile), "interactive_env": interactive_env(profile)}
+    if not parts["launch"]:
+        raise ProfileError(f"profile {profile.get('name')} has no launch command")
+    return parts
+
+
+def interactive_argv(conf, profile, agent, session=None, resume=False, parts=None):
     """(argv, env) that start a supervised instance: the launch command of interactive_launch as an argument list
     without the env prefix, then the session arguments: the resume template with session when resume is set,
     otherwise interactive.session_flag and session when the profile preassigns one. env is the profile's env and
     interactive.env, which the caller applies to its own process, never to a command line."""
     interactive = profile.get("interactive") or {}
-    template = conf.section("instances").get("launch") or interactive.get("launch") or profile.get("command") or ""
-    values = {"command": profile.get("command") or "", "permission_mode": profile.get("permission_mode") or "",
-              "agent": shlex.quote(agent)}
-    template = EMPTY_OPTION.sub(lambda m: "" if m.group(1) in values and not values[m.group(1)] else m.group(0), template)
-    argv = shlex.split(fill(template, values)) + mcp_args(conf, profile) + extra_args(profile, agent=agent)
-    if not argv:
-        raise ProfileError(f"profile {profile.get('name')} has no launch command")
+    parts = parts or interactive_parts(conf, profile, agent)
+    argv = parts["launch"] + parts["mcp"] + parts["extra"]
     if session and resume:
         template = interactive.get("resume") or ""
         if not template:
@@ -375,8 +392,7 @@ def interactive_argv(conf, profile, agent, session=None, resume=False):
         argv = shlex.split(fill(template, {"launch": shlex.join(argv), "session": shlex.quote(session)}))
     elif session and interactive.get("session_flag") and profile.get("session") == "preassign":
         argv += [interactive["session_flag"], session]
-    variables = {**env(profile), **{k: str(v) for k, v in (interactive.get("env") or {}).items()}}
-    return argv, variables
+    return argv, {**parts["env"], **parts["interactive_env"]}
 
 
 def stall_patterns(conf, profile_name=None):

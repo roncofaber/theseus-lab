@@ -222,7 +222,7 @@ Reconcile (one pass, also run at the start of every queue tick for managed proje
 3. For each desired agent:
    - no session: spawn (4.5), subject to `max_agents`;
    - session with a dead pane: apply the restart policy (4.6);
-   - live and its launch hash differs from the config: mark `drift` and report it; do not restart. `theseus agents restart --drifted` applies drift to free agents only;
+   - live and its recorded launch (command, arguments, model, env values, MCP config, extra_args, cwd) differs from the config: mark `drift` and report what changed; do not restart. `theseus agents restart --drifted` applies drift to free agents only;
    - live, its runtime profile differs from its registered profile because the queue relaunched it for a task (`launched`): leave it alone; the queue switches it back before its next task, as today;
    - live and healthy: no action.
 4. For each observed agent not desired (count lowered, extra removed): if free, stop it gracefully; if it holds an in-progress task, disable it (no new work) and stop it on a later pass once free.

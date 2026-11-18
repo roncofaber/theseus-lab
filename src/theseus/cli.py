@@ -48,18 +48,14 @@ def emit(lines):
 
 
 def guarded(function):
-    from . import gitutil, integrate, tasks
+    from . import gitutil, integrate, profiles, tasks
     def wrapper(args):
         try:
             return function(args)
-        except tasks.TaskError as error:
-            sys.exit(f"theseus: {error}")
         except integrate.IntegrationError as error:
             print(f"theseus: {error}", file=sys.stderr)
             sys.exit(error.code)
-        except gitutil.GitError as error:
-            sys.exit(f"theseus: {error}")
-        except cfg.ConfigError as error:
+        except (tasks.TaskError, gitutil.GitError, cfg.ConfigError, profiles.ProfileError) as error:
             sys.exit(f"theseus: {error}")
     return wrapper
 
@@ -562,6 +558,8 @@ def cmd_agents(args):
         return cmd_supervised(args)
     conf = load()
     action = args.action
+    if action in ("remove", "enable", "disable") and not args.name:
+        sys.exit(f"usage: theseus agents {action} NAME")
     try:
         if action in ("add", "remove"):
             from . import supervisor
@@ -621,6 +619,7 @@ def cmd_supervised(args):
     try:
         if action == "up":
             confs = all_managed() if args.all_projects else [load()]
+            failed = False
             for conf in confs:
                 if not supervisor.managed(conf):
                     sys.exit(f"theseus: {conf.name} does not supervise its agents; set [agents] managed = true and "
@@ -629,7 +628,9 @@ def cmd_supervised(args):
                 for line in warnings:
                     print(f"warning: {line}", file=sys.stderr)
                 if errors:
-                    sys.exit("theseus: " + "; ".join(errors))
+                    print(f"theseus: {conf.name}: " + "; ".join(errors), file=sys.stderr)
+                    failed = True
+                    continue
                 from . import workqueue
                 with workqueue.locked(conf):
                     if not args.dry_run:
@@ -642,7 +643,7 @@ def cmd_supervised(args):
                 if len(confs) > 1:
                     print(f"# {conf.name}")
                 print_actions(rows or [("-", "none", "no agents configured ([agents.counts])")])
-            return
+            sys.exit(1 if failed else 0)
         conf = load()
         if action == "ls":
             return list_supervised(conf, args.json)
@@ -658,7 +659,7 @@ def cmd_supervised(args):
                 print_actions(supervisor.reconcile(conf, wait=True))
             return
         if action == "down":
-            if not names and not args.all:
+            if bool(names) == bool(args.all):
                 sys.exit("usage: theseus agents down NAME... | --all [--force] [--now] [--replace]")
             print_actions(supervisor.down(conf, names or None, force=args.force, now=args.now))
             if args.replace and supervisor.managed(conf):
@@ -667,11 +668,10 @@ def cmd_supervised(args):
                     print_actions(supervisor.reconcile(conf, wait=True))
             return
         if action == "restart":
-            if args.drifted:
-                names = [n for n, r in supervisor.records(conf).items()
-                         if r.get("managed") and supervisor.drifted(conf, r) and not supervisor.current_task(conf, n)]
-            if not names:
-                sys.exit("usage: theseus agents restart NAME... [--fresh [--with-task [--file PROMPT]]] | --drifted")
+            if bool(names) == bool(args.drifted):
+                sys.exit("usage: theseus agents restart NAME... [--fresh [--with-task [--file PROMPT]]] | --drifted [--fresh]")
+            if args.drifted and (args.with_task or args.file):
+                sys.exit("theseus: --drifted restarts only agents without a task; --with-task and --file do not apply")
             if (args.with_task or args.file) and not args.fresh:
                 sys.exit("theseus: --with-task and --file go with --fresh (a plain restart resumes the conversation)")
             if args.file and not args.with_task:
@@ -679,17 +679,29 @@ def cmd_supervised(args):
             prompt = Path(args.file).read_text().strip() if args.file else None
             if args.file and not prompt:
                 sys.exit(f"theseus: {args.file} is empty")
-            sys.exit(restart_agents(conf, names, args.fresh, args.with_task, prompt))
+            if args.drifted:
+                changes = drifted_agents(conf)
+                if not changes:
+                    print("no drifted agents without a task")
+                    return
+            else:
+                unknown = [n for n in names if not (supervisor.record(conf, n) or {}).get("managed")]
+                if unknown:
+                    sys.exit(f"theseus: {', '.join(unknown)}: not a supervised agent (theseus agents ls)")
+                changes = {n: supervisor.drift(conf, supervisor.record(conf, n)) for n in names}
+            sys.exit(restart_agents(conf, list(changes), args.fresh, args.with_task, prompt, changes))
         if action == "migrate":
-            if not names and not args.all:
+            if bool(names) == bool(args.all):
                 sys.exit("usage: theseus agents migrate NAME... | --all [--with-task]")
             from . import workqueue
             with workqueue.locked(conf):
                 print_actions(supervisor.migrate(conf, names or None, with_task=args.with_task))
             return
-        rec = supervisor.record(conf, args.name) if args.name else None
+        if len(names) != 1:
+            sys.exit(f"usage: theseus agents {action} NAME")
+        rec = supervisor.record(conf, args.name)
         if not rec or not rec.get("managed"):
-            sys.exit(f"usage: theseus agents {action} NAME (a supervised agent; theseus agents ls)")
+            sys.exit(f"theseus: {args.name} is not a supervised agent (theseus agents ls)")
         if action == "attach":
             if args.window:
                 ok, message = supervisor.open_window(rec, read_only=args.read_only)
@@ -713,9 +725,27 @@ def cmd_supervised(args):
         sys.exit(f"theseus: {error}")
 
 
-def restart_agents(conf, names, fresh, with_task, prompt=None):
+def drifted_agents(conf):
+    """{name: changes} of the supervised agents whose launch configuration changed and that hold no task; those that
+    hold one are printed as skipped."""
+    from . import supervisor
+    found = {}
+    for name, rec in sorted(supervisor.records(conf).items()):
+        changes = supervisor.drift(conf, rec) if rec.get("managed") else []
+        if not changes:
+            continue
+        task = supervisor.current_task(conf, name)
+        if task:
+            print_actions([(name, "skipped", f"{'; '.join(changes)}; holds task {task['id']}, restart it once free")])
+        else:
+            found[name] = changes
+    return found
+
+
+def restart_agents(conf, names, fresh, with_task, prompt=None, changes=None):
     """agents restart: an agent that holds a task restarts fresh only with --with-task, and then gets exactly one
-    task-aware restart prompt (prompt, or one built from the task) before anything else is typed into it."""
+    task-aware restart prompt (prompt, or one built from the task) before anything else is typed into it. changes
+    names what each restart applies ({name: [change, ...]})."""
     from . import agents, supervisor, workqueue
     failed = False
     for name in names:
@@ -738,6 +768,9 @@ def restart_agents(conf, names, fresh, with_task, prompt=None):
                 detail += (f"; restart prompt for {task['id']} {sent}" if status == "sent" else
                            f"; restart prompt for {task['id']} not confirmed ({sent}); the queue retries it")
         failed |= not ok
+        applied = (changes or {}).get(name)
+        if ok and applied:
+            detail = f"applied {', '.join(applied)}; {detail}"
         print_actions([(name, "restarted" if ok else "failed", detail)])
     return 1 if failed else 0
 
@@ -763,8 +796,8 @@ def list_supervised(conf, as_json=False):
     for item in supervisor.snapshot(conf):
         info = states.get(item["name"], {})
         rec = supervisor.record(conf, item["name"])
-        row = {**item, "state": info.get("state"), "task": info.get("task"),
-               "drift": supervisor.drifted(conf, rec) if rec else False,
+        changes = supervisor.drift(conf, rec) if rec else []
+        row = {**item, "state": info.get("state"), "task": info.get("task"), "drift": bool(changes), "driftChanges": changes,
                "uptime": int(time.time() - item["started"]) if item.get("started") and item.get("running") else None}
         rows.append(row)
     legacy = [info for name, info in states.items() if not info.get("managed")]
@@ -778,7 +811,7 @@ def list_supervised(conf, as_json=False):
         uptime = f"{row['uptime'] // 60}m" if row["uptime"] is not None else "-"
         print(f"{row['name']:<24} {row['state'] or '-':<10} {row['profile'] or '-':<10} gen {row['gen'] or '-':<4} "
               f"pid {row['pid'] or '-':<8} {row['task'] or '-':<28} restarts {row['restarts']:<2} "
-              f"{'drift ' if row['drift'] else ''}up {uptime} session {row['sessionId'] or '-'}")
+              f"up {uptime} session {row['sessionId'] or '-'}" + (f" drift: {'; '.join(row['driftChanges'])}" if row["driftChanges"] else ""))
     for info in legacy:
         print(f"{info['name']:<24} {info['state']:<10} unmanaged pane {info['pane']}")
 
@@ -1203,7 +1236,8 @@ def build_parser():
     p.add_argument("--now", action="store_true", help="down: skip the graceful exit")
     p.add_argument("--replace", action="store_true", help="down: reconcile at once, starting replacements under free names")
     p.add_argument("--fresh", action="store_true", help="restart: start a new conversation")
-    p.add_argument("--drifted", action="store_true", help="restart: every free agent whose launch configuration changed")
+    p.add_argument("--drifted", action="store_true", help="restart: every agent without a task whose launch configuration "
+                                                          "(command, arguments, model, env, MCP config, extra_args) changed")
     p.add_argument("--read-only", action="store_true", help="attach: look without typing")
     p.add_argument("--window", action="store_true", help="attach: open in a new window of your own tmux")
     p.add_argument("--lines", type=int, default=200, help="logs: history lines (default 200)")
