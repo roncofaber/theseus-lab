@@ -183,6 +183,26 @@ class QueueTests(Sandbox):
         self.assertEqual(2, len(list((inbox.parent / "outbox/applied").iterdir())))
         self.assertIn("Halfway there.", self.theseus("tasks", "show", "first-task", "--history").stdout)
 
+    def test_a_hand_made_registration_whose_pane_now_runs_another_process_is_marked_stale(self):
+        from theseus import store
+        self.assertNotIn("stale pane", self.theseus("agents").stdout)
+        with store.opened() as conn:
+            self.assertEqual(1, store.list_agents(conn, "demo-port")[0]["pane_pid"], "registration records the pane pid")
+            store.update_agent(conn, "demo-port", "worker-a", pane_pid=999999)
+        self.assertIn("stale pane", self.theseus("agents").stdout)
+
+    def test_the_task_message_names_the_task_commands_only_to_an_agent_with_credentials(self):
+        from theseus import config as cfg, taskservice, workqueue as wq
+        self.add("first-task")
+        self.theseus("queue", "tick")
+        conf = cfg.load(root=self.project)
+        agent = {**next(a for a in wq.ag.agents(conf) if a["name"] == "worker-a"), "managed": True}
+        self.assertFalse(wq.has_credentials(conf, agent), "a supervised agent started before credentials existed")
+        self.assertIn("theseus tasks show first-task", wq.pointer("first-task", "/wt", agent, False))
+        taskservice.grant(taskservice.QUEUE, agent["id"], agent["id"], conf.data / "agents/worker-a/credentials")
+        self.assertTrue(wq.has_credentials(conf, agent))
+        self.assertIn("theseus task done first-task", wq.pointer("first-task", "/wt", agent, True))
+
     def test_a_running_task_s_patches_hold_a_task_that_owns_their_target(self):
         self.add("first-task")
         self.theseus("queue", "tick")

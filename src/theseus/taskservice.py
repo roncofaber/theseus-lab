@@ -27,6 +27,7 @@ from . import taskrepo
 from . import tasks as t
 
 NOTE_LIMIT = 4096
+EXPORTS_KEPT = 8
 EDITABLE = {"role", "objective", "contract", "accept", "owned", "add_owned", "touches", "depends", "milestone", "room",
             "profile", "priority", "min_capability", "note", "externalBlocker", "researchRequired"}
 WORKER_COMMANDS = "`theseus task show|note|done|blocked TASK`"
@@ -957,8 +958,15 @@ class TaskService:
                 return self.snapshot(repo, project)
         with self.unit() as (repo, project):
             snap = self.snapshot(repo, project)
-            repo.update_project(self.name, last_export={"time": now(), "head": head, "sha256": digests(snap)})
+            self.record_files(repo, project, snap, head)
             return snap
+
+    def record_files(self, repo, project, snap, head=None):
+        """Remember task files theseus wrote or read (an export or an import), newest first, the last few of them:
+        files in the checkout that match one are stale at worst, never a hand edit."""
+        recorded = project["last_export"] or {}
+        seen = [digests(snap)] + [d for d in recorded.get("seen") or [] if d != digests(snap)][:EXPORTS_KEPT - 1]
+        repo.update_project(self.name, last_export={"time": now(), "head": head, "sha256": digests(snap), "seen": seen})
 
     def export_state(self, p, files):
         """How the task files in the checkout (a Snapshot) stand against the store: current; stale (the store moved on
@@ -969,11 +977,15 @@ class TaskService:
             recorded = project["last_export"] or {}
             changed = sum(1 for task in repo.tasks(project["id"])
                           if task["updated"] > (recorded.get("time") or ""))
+        seen = recorded.get("seen") or ([recorded["sha256"]] if recorded.get("sha256") else [])
         if digests(files) == digests(fresh):
             return {"state": "current", "detail": "the committed export matches the store"}
-        if digests(files) == recorded.get("sha256"):
-            return {"state": "stale", "detail": f"{changed} task(s) changed since the export of {recorded.get('time')}; "
-                                                f"`theseus tasks export` (and commit docs/project/) records them"}
+        if digests(files) in seen:
+            return {"state": "stale", "detail": f"{changed} task(s) changed since {recorded.get('time')}; `theseus "
+                                                f"tasks export` (and commit docs/project/) records them"}
+        if not seen:
+            return {"state": "unexported", "detail": "no export written yet: `theseus tasks export`, then commit "
+                                                     "docs/project/"}
         return {"state": "edited", "detail": "docs/project/ task files differ from every export theseus wrote: a hand "
                                              "edit, which theseus ignores. Re-export to drop it, or take it with "
                                              "`theseus tasks import --replace`"}
@@ -1007,6 +1019,7 @@ class TaskService:
                 saved = self.save_export(repo, project, "replaced")
                 repo.delete_tasks(project["id"])
             ident, warnings, events, notes = self.load_snapshot(repo, project, doc, archived, history, new_id)
+            self.record_files(repo, repo.project(self.name), snap)
         canonical = rec.snapshot(doc, archived, history)
         return {"project": self.name, "id": ident, "open": len(doc["tasks"]), "archived": len(archived),
                 "events": events, "notes": notes, "warnings": warnings, "saved": saved,

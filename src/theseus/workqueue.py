@@ -260,7 +260,7 @@ def assign_and_send(conf, agent, task):
                                          owner=f"{provider}:{agent['name']}:{name}", instance=agent["name"],
                                          owner_id=agent.get("id"), principal=queue_principal())
     try:
-        record = pointer(task["id"], worktree, agent)
+        record = pointer(task["id"], worktree, agent, has_credentials(conf, agent))
         record += kept_work_note(task)
         record += rooms.message(conf, task)
         deadline = conf.section("queue").get("deadline") or ""
@@ -394,12 +394,24 @@ def roll_back(conf, task_id, name, worktree, base, reason):
     return f"{reason}; {task_id} released, {what}"
 
 
-def pointer(task_id, worktree, agent):
+def has_credentials(conf, agent):
+    """True when the agent's current run holds credentials that authenticate (written at its exec); a hand-made pane,
+    or a supervised agent started before credentials existed, has none."""
+    from . import taskservice
+    path = conf.data / "agents" / agent["name"] / "credentials"
+    try:
+        granted = json.loads(path.read_text())
+        return granted.get("agent_id") == agent.get("id") and taskservice.authenticate(granted).role == "worker"
+    except (OSError, ValueError, t.TaskError):
+        return False
+
+
+def pointer(task_id, worktree, agent, credentialed):
     """Where the task lives: the record, notes and how to report come from the task commands, so the typed message
-    stays short and carries no record text. A hand-made pane has no credentials: it reads with `theseus tasks show`
-    and its handoff is picked up when it settles."""
+    stays short and carries no record text. An agent without credentials (a hand-made pane, or one started before
+    credentials existed) reads with `theseus tasks show`, and its handoff is picked up when it settles."""
     handoff = f"{worktree}/{cfg.WORKER_LOG}/handoff.md"
-    if not agent.get("managed"):
+    if not credentialed:
         return (f"Read the record with `theseus tasks show {task_id}`; write the handoff to {handoff} when you finish "
                 f"(theseus picks it up).")
     return (f"Run `theseus task show {task_id}` for the record and notes; when you finish, write {handoff} and run "

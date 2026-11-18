@@ -319,9 +319,10 @@ class McpTests(TaskStoreCase):
 class MaintenanceTests(TaskStoreCase):
     def test_the_export_state_tells_current_stale_and_hand_edited_files(self):
         from theseus import tasks as t
-        self.start()
+        taskrecords.write(taskrecords.Snapshot(tasks='{"schema": 1, "tasks": []}\n'), self.conf.root)
         self.svc.add(COORDINATOR, spec("one"))
         queue = SimpleNamespace(service=self.svc, root=self.conf.root)
+        self.assertEqual("stale", t.export_state(queue)["state"], "the files a new project imported, not a hand edit")
         snapshot = self.svc.export(COORDINATOR, record=True, head="abc")
         taskrecords.write(snapshot, self.conf.root)
         self.assertEqual("current", t.export_state(queue)["state"])
@@ -330,6 +331,8 @@ class MaintenanceTests(TaskStoreCase):
         tasks_file = self.conf.root / "docs/project/tasks.json"
         tasks_file.write_text(tasks_file.read_text().replace("Build one.", "Build one, edited by hand."))
         self.assertEqual("edited", t.export_state(queue)["state"])
+        taskrecords.write(snapshot, self.conf.root)
+        self.assertEqual("stale", t.export_state(queue)["state"], "an earlier export put back (git restore) is not an edit")
 
     def test_hourly_and_off_site_backups(self):
         from unittest import mock

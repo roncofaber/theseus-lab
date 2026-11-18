@@ -358,7 +358,8 @@ def overview(state, width=200):
                                                                   theme.YELLOW if git["dirty"] else theme.GREEN)), ""),
                ("verified", verified, ""),
                ("export", (state.get("export") or {}).get("state") or "-",
-                {"current": theme.GREEN, "stale": theme.YELLOW, "edited": f"bold {theme.RED}"}.get(
+                {"current": theme.GREEN, "stale": theme.YELLOW, "unexported": theme.YELLOW,
+                 "edited": f"bold {theme.RED}"}.get(
                     (state.get("export") or {}).get("state"), "dim")),
                ("queue", "PAUSED" if state.get("paused") else "running", f"bold {theme.YELLOW}" if state.get("paused") else "")]
     review = oldest_review(state)

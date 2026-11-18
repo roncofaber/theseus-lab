@@ -321,7 +321,7 @@ def task_rows(conf):
     except t.TaskError as error:
         code = getattr(error, "code", "")
         return [("WARN", "tasks", f"{error}" if code == "not-imported" else f"cannot check: {error}")]
-    status = {"current": "ok", "stale": "ok", "edited": "WARN"}[state["state"]]
+    status = {"current": "ok", "stale": "ok", "unexported": "ok", "edited": "WARN"}[state["state"]]
     return [(status, f"tasks export ({state['state']})", state["detail"])]
 
 

@@ -53,6 +53,8 @@ def entry(row):
         record["rooms"] = row["rooms"]
     if row["source"]:
         record["source"] = row["source"]
+    if row.get("pane_pid"):
+        record["pane_pid"] = row["pane_pid"]
     if row.get("managed"):
         record.update({"managed": True, "server": row.get("server"), "target": row.get("target"),
                        "session_id": row.get("session_id"), "slot": row.get("slot"), "desired": row.get("desired"),
