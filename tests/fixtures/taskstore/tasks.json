@@ -1,0 +1,274 @@
+{
+  "schema": 1,
+  "updated": "2026-01-01T00:00:00Z",
+  "objectiveComplete": false,
+  "policy": {
+    "lifecycle": "Placeholder policy text."
+  },
+  "tasks": [
+    {
+      "id": "task-9",
+      "role": "implementation",
+      "status": "in_progress",
+      "owner": "prov-1:agent1-agent2-agent3:agent1-agent2-agent3",
+      "createdAt": "2026-11-18T14:49:43Z",
+      "dependencies": [
+        "task-1101"
+      ],
+      "ownedPaths": [
+        "part1/part2/part3/part4.cs",
+        "part1/part2/part3/part5.cs",
+        "part1/part2/part3/part6.cs",
+        "part1/part2/part3/part7.cs",
+        "docs/investigations/part8.md"
+      ],
+      "objective": "Résumé of the placeholder → kept as UTF-8.",
+      "generalContract": "Placeholder text 2.",
+      "acceptance": [
+        "Placeholder text 3.",
+        "Placeholder text 4.",
+        "Placeholder text 5.",
+        "Placeholder text 6."
+      ],
+      "sharedFilesReadOnly": true,
+      "result": null,
+      "priority": 4,
+      "worktree": "/work/project/part9/part10/part11.local/part12/part13/part14/part15",
+      "baseCommit": "872600596710",
+      "execution": {
+        "provider": "prov-1",
+        "model": "persistent-instance",
+        "logDir": "/work/project/part9/part10/part11.local/part12/part13/part14/part15/.theseus",
+        "assignedAt": "2026-11-18T18:00:48Z"
+      },
+      "ownerId": "017ADGKPSWZ258BEHMQTX0369C"
+    },
+    {
+      "id": "task-10",
+      "role": "implementation",
+      "status": "in_progress",
+      "owner": "prov-2:agent1-agent2-agent4:agent1-agent2-agent4",
+      "createdAt": "2026-11-18T17:25:33Z",
+      "dependencies": [
+        "task-1106"
+      ],
+      "ownedPaths": [
+        "src/part16.Core/part17/part18/part19.cs",
+        "docs/investigations/part20.md"
+      ],
+      "objective": "Placeholder text 7.",
+      "generalContract": "Placeholder text 8.",
+      "acceptance": [
+        "Placeholder text 9.",
+        "Placeholder text 10.",
+        "Placeholder text 6."
+      ],
+      "sharedFilesReadOnly": true,
+      "result": null,
+      "priority": 1,
+      "previousAttempts": [
+        {
+          "owner": "prov-2:agent1-agent2-agent4:agent1-agent2-agent4",
+          "worktree": "/work/project/part9/part10/part11.local/part12/part13/part14/part21",
+          "baseCommit": "f575338582b0",
+          "execution": {
+            "provider": "prov-2",
+            "model": "persistent-instance",
+            "logDir": "/work/project/part9/part10/part11.local/part12/part13/part14/part21/.theseus",
+            "assignedAt": "2026-11-18T18:11:39Z"
+          },
+          "agentId": "01EHMQTX0369CFJNRVY147ADGK",
+          "releasedAt": "2026-11-18T18:24:57Z",
+          "reason": "Placeholder text 11.",
+          "branch": "part22/part21"
+        }
+      ],
+      "worktree": "/work/project/part9/part10/part11.local/part12/part13/part14/part23",
+      "baseCommit": "d53cc5d4b7c5",
+      "execution": {
+        "provider": "prov-2",
+        "model": "persistent-instance",
+        "logDir": "/work/project/part9/part10/part11.local/part12/part13/part14/part23/.theseus",
+        "assignedAt": "2026-11-18T18:29:58Z"
+      },
+      "ownerId": "01EHMQTX0369CFJNRVY147ADGK"
+    },
+    {
+      "id": "task-13",
+      "role": "research",
+      "status": "in_progress",
+      "owner": "prov-2:agent1-agent2-agent4:agent1-agent2-agent4",
+      "createdAt": "2026-11-18T18:35:26Z",
+      "dependencies": [],
+      "ownedPaths": [
+        "docs/investigations/part24.md"
+      ],
+      "objective": "Placeholder text 12.",
+      "generalContract": "Placeholder text 13.",
+      "acceptance": [
+        "Placeholder text 14.",
+        "Placeholder text 15.",
+        "Placeholder text 16."
+      ],
+      "sharedFilesReadOnly": true,
+      "result": null,
+      "worktree": "/work/project/part9/part10/part11.local/part12/part13/part14/part25",
+      "baseCommit": "a3f6cf26c9ef",
+      "execution": {
+        "provider": "prov-2",
+        "model": "persistent-instance",
+        "logDir": "/work/project/part9/part10/part11.local/part12/part13/part14/part25/.theseus",
+        "assignedAt": "2026-11-18T18:53:59Z"
+      },
+      "ownerId": "01NRVY147ADGKPSWZ258BEHMQT"
+    },
+    {
+      "id": "task-7",
+      "role": "implementation",
+      "status": "pending",
+      "owner": null,
+      "createdAt": "2026-11-17T14:30:53Z",
+      "dependencies": [],
+      "ownedPaths": [
+        "docs/investigations/part26.md",
+        "src/part16.Core/part17/part27/part28",
+        "src/part16.Core/part17/part27/part29",
+        "part1/part2/part30/part31.cs"
+      ],
+      "objective": "Placeholder text 17.",
+      "generalContract": "Placeholder text 18.",
+      "acceptance": [
+        "Placeholder text 19.",
+        "Placeholder text 20.",
+        "Placeholder text 21.",
+        "Placeholder text 22.",
+        "Placeholder text 23."
+      ],
+      "sharedFilesReadOnly": true,
+      "result": null,
+      "priority": 5,
+      "hold": true,
+      "assignmentNote": "Placeholder text 24."
+    },
+    {
+      "id": "task-2",
+      "role": "verification",
+      "status": "pending",
+      "owner": null,
+      "dependencies": [
+        "task-413",
+        "task-362"
+      ],
+      "ownedPaths": [
+        "part1/part2/part30/part32/part33.cs",
+        "docs/investigations/part34.md"
+      ],
+      "objective": "Placeholder text 25.",
+      "generalContract": "Placeholder text 26.",
+      "acceptance": [
+        "Placeholder text 27.",
+        "Placeholder text 28.",
+        "Placeholder text 29."
+      ],
+      "sharedFilesReadOnly": true,
+      "result": null,
+      "researchRequired": {
+        "evidence": "Placeholder text 30.",
+        "unblockCondition": "Placeholder text 31."
+      }
+    },
+    {
+      "id": "task-4",
+      "role": "Placeholder text 32.",
+      "status": "pending",
+      "owner": null,
+      "dependencies": [],
+      "ownedPaths": [
+        "docs/investigations/part35.md",
+        "part36/part37",
+        "part36/part38",
+        "part36/part39",
+        "part36/part40",
+        "part36/part41",
+        "part36/part42",
+        "part36/part43",
+        "part36/part44",
+        "part36/part45",
+        "part36/part46",
+        "part36/part47",
+        "part36/part48"
+      ],
+      "objective": "Placeholder text 33.",
+      "generalContract": "Placeholder text 34.",
+      "acceptance": [
+        "Placeholder text 35.",
+        "Placeholder text 36.",
+        "Placeholder text 37.",
+        "Placeholder text 23."
+      ],
+      "sharedFilesReadOnly": true,
+      "result": null,
+      "previousAttempts": [
+        {
+          "owner": "prov-3:agent1-agent2-agent5:agent1-agent2-agent5",
+          "worktree": "/work/project/part9/part10/part11.local/part12/part49/part50/part51/part52",
+          "baseCommit": "ff0059ec",
+          "execution": {
+            "provider": "prov-3",
+            "model": "persistent-instance",
+            "logDir": "/work/project/part9/part10/part11.local/part12/part13/part53/part52"
+          },
+          "releasedAt": "2026-11-16T19:44:16Z",
+          "reason": "Placeholder text 38."
+        }
+      ],
+      "hold": true
+    },
+    {
+      "id": "task-11",
+      "role": "implementation",
+      "status": "pending",
+      "owner": null,
+      "createdAt": "2026-11-18T17:25:33Z",
+      "dependencies": [
+        "task-9"
+      ],
+      "ownedPaths": [
+        "part1/part2/part3",
+        "docs/investigations/part54.md"
+      ],
+      "objective": "Placeholder text 39.",
+      "generalContract": "Placeholder text 40.",
+      "acceptance": [
+        "Placeholder text 41.",
+        "Placeholder text 42.",
+        "Placeholder text 43."
+      ],
+      "sharedFilesReadOnly": true,
+      "result": null,
+      "priority": 1
+    },
+    {
+      "id": "task-12",
+      "role": "research",
+      "status": "pending",
+      "owner": null,
+      "createdAt": "2026-11-18T18:35:26Z",
+      "dependencies": [],
+      "ownedPaths": [
+        "docs/investigations/part55.md"
+      ],
+      "objective": "Placeholder text 44.",
+      "generalContract": "Placeholder text 45.",
+      "acceptance": [
+        "Placeholder text 46.",
+        "Placeholder text 47.",
+        "Placeholder text 48.",
+        "Placeholder text 16."
+      ],
+      "sharedFilesReadOnly": true,
+      "result": null,
+      "priority": -1
+    }
+  ]
+}

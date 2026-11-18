@@ -325,3 +325,26 @@ The real files also correct some figures in sections 9, 10 and 13:
 - There are no object contracts: `generalContract` is a string or absent (97 records). `dependencies` is absent (48 records), never null.
 - `previousAttempts` comes in four kinds (released, superseded, unmerged, and reopened in laserlab) plus one ad hoc entry, `{owner, outcome, evidence}`.
 - opends2's header has `updated` and no `currentMilestone` or `policy`.
+
+## 18. Phase 1 implementation notes
+
+Where phase 1 departs from sections 3 to 9, or fills in what they left open:
+
+- Lossless storage. `tasks.extra` holds unknown keys and any known key whose value its column cannot reproduce exactly, such as `"priority": "P2"`. The new column `tasks.legacy` holds the keys an imported record lacked and its key order; `projects.tasks_legacy` does the same for the `tasks.json` header. A service write normalizes only the keys it changes, so untouched records keep their exported text. Section 10 step 3 can drop key order from the documented normalizations: what remains is `schema: 2`, the `project` header, and completed tasks moving to the archive.
+- Schema additions not in the section 3 table:
+  - `n` columns on `task_deps` and `task_paths`, since list order is part of the record;
+  - a `superseded` attempt phase, the legacy force reassignment;
+  - `source` on attempts and deliveries (Q4);
+  - a `question` note kind and `task_notes.answered` (Q8).
+- Schema left out: `token_hash` (Q2). `Principal` has no `attempt_id`, and worker calls name their task.
+- Calls that touch files stay with the caller. Setting the handoff aside on reopen and unmerge is one (the service takes the new path as `handoff=`). The unintegrated-files check and `--from-log` of `complete` are others. The import-time backup is left to the CLI command in phase 2.
+- `claim` refuses a held task unless forced, as section 7 says. Today `tasks assign` ignores `hold` (only the queue skips held tasks), so that is a behavior change for scripted assignment.
+- `prune_projects` keeps any project with task rows, without asking; `--with-tasks` stays in phase 6. v7 takes the labelled `-pre-v7` backup before migrating a non-empty file.
+
+Questions for the coordinator:
+
+- Project identity. `projects` is keyed by name, so a name has exactly one id. "A different project reusing the name runs `tasks import --new-id`" (section 3) cannot work while the old project's tasks still reference that row. Phase 1 makes `--new-id` mint a fresh id, and an import over existing tasks requires `--replace`, which deletes them. Keeping both projects' tasks would need `projects` keyed by id.
+- Reads and deny-by-default. Q5 refuses a caller in a worktree that has no credentials, while Q10 has hand-made panes read through `tasks show`. Phase 1 applies the principal check to mutating calls only: `get`, `list`, `ready` and `questions` take any principal.
+- Section 9 says exported archive lines never change. `observe` on a completed task (allowed today while the task is still in `tasks.json`) rewrites that task's archive line. Either refuse it, or accept the change.
+- Dispatch workers. The minted worker id becomes the attempt's `agent_id`, so their tasks now export an `ownerId`, which today's `tasks.json` omits for unregistered workers.
+- The edit budget. Imported records reach 14 KB, so `edit` refuses only a change that grows a record past `TASK_RECORD_LIMIT`.
