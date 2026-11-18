@@ -140,6 +140,21 @@ class QueueTests(Sandbox):
         self.assertFalse(wq.fits(conf, strong, {"id": "x", "minCapability": 2, "profile": "with-mcp"}, {})[0],
                          "a relaunch onto a weaker compatible profile must still meet the minimum")
 
+    def test_a_worker_that_reports_with_task_done_is_reset_and_given_the_next_task(self):
+        from theseus import taskservice
+        self.add("first-task")
+        self.assertIn("assigned", self.theseus("queue", "tick").stdout)
+        record = json.loads(self.theseus("tasks", "show", "first-task").stdout)
+        self.write(f"{record['worktree']}/.theseus/handoff.md", "Task: first-task\nResult: delivered\n", root=self.tmp)
+        worker = {**self.env, **taskservice.grant(taskservice.QUEUE, record["ownerId"], record["ownerId"],
+                                                  self.tmp / "credentials")}
+        self.theseus("task", "done", "first-task", cwd=record["worktree"], env=worker)
+        self.add("second-task")
+        self.theseus("queue", "tick")
+        typed = self.typed()
+        self.assertLess(typed.index("/compact"), typed.index("New task second-task"), "reset before the next task")
+        self.assertEqual("in_progress", json.loads(self.theseus("tasks", "show", "second-task").stdout)["status"])
+
     def test_a_running_task_s_patches_hold_a_task_that_owns_their_target(self):
         self.add("first-task")
         self.theseus("queue", "tick")

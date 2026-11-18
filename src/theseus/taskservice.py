@@ -126,10 +126,7 @@ class TaskService:
                 except store.SchemaTooNew:
                     raise
                 except (sqlite3.Error, store.StoreError) as error:
-                    raise TaskError("unreadable", f"cannot read the host store {store.path()} read-only ({error}). A "
-                                                  f"reader that may not write its directory can read only while its "
-                                                  f"-wal and -shm files exist (another theseus process has it open); "
-                                                  f"ask the coordinator for `theseus tasks show ID`") from error
+                    raise unreadable(error) from error
             if not (project and project["tasks_imported"]):
                 fresh = self.fresh()
                 if not fresh:
@@ -342,6 +339,10 @@ class TaskService:
         the imported values it does not touch alone. Raises TaskError invalid."""
         if "owned" in changed and not any(p.startswith(t.REPORT_PREFIX) and p.endswith(".md") for p in values["owned"]):
             raise TaskError("invalid", f"ownedPaths must include a report under {t.REPORT_PREFIX} ending in .md")
+        unanchored = [p for p in values["owned"] if not p.split("*")[0]] if "owned" in changed else []
+        if unanchored:
+            raise TaskError("invalid", f"owned pattern {unanchored[0]} starts with a wildcard, so it would own (and hold "
+                                       f"the queue for) every path; start it with a directory")
         blank = [name for name in ("role", "objective", "contract")
                  if name in changed and (not isinstance(values[name], str) or not values[name].strip())]
         if "accept" in changed:
@@ -392,11 +393,20 @@ class TaskService:
         """The files an in-progress task's patches touch now (the tick's scan of its worktree); returns whether they
         changed. Observed touches hold conflicting tasks and are dropped when the task leaves verification."""
         allow(p, "coordinator", "queue")
-        paths = sorted(set(paths))
+
+        def unchanged(task, attempts):
+            # A path the task also declares stays a declared touch (one row per path), so it is not observed again.
+            wanted = sorted(set(paths) - set(task["touches"]))
+            active = next((a for a in attempts if a["phase"] in taskrepo.ACTIVE), None)
+            return active, wanted, active is None or sorted(task["observed"]) == wanted
+
+        with self.reading() as (repo, project):
+            if unchanged(*self.load(repo, project, task_id))[2]:
+                return False
         with self.unit() as (repo, project):
             task, attempts = self.load(repo, project, task_id)
-            active = next((a for a in attempts if a["phase"] in taskrepo.ACTIVE), None)
-            if active is None or sorted(task["observed"]) == paths:
+            active, paths, same = unchanged(task, attempts)
+            if same:
                 return False
             repo.drop_observed(task["pk"])
             repo.add_observed(task["pk"], active["id"], paths)
@@ -1194,6 +1204,13 @@ def revoke_credentials(p, agent_id, run_id, opener=taskrepo.opened):
         return repo.revoke_credential(agent_id, run_id)
 
 
+def unreadable(error):
+    return TaskError("unreadable", f"cannot read the host store {store.path()} read-only ({error}). A reader that may "
+                                   f"not write its directory can read only while its -wal and -shm files exist "
+                                   f"(another theseus process has it open); ask the coordinator for `theseus tasks "
+                                   f"show ID`")
+
+
 def facts(opener, readonly):
     """A repo for identity checks: read-only for a read command, and None before any store exists (then no agent,
     credentials or worktree exist either)."""
@@ -1220,8 +1237,15 @@ def principal(env=None, cwd=None, *, via="cli", opener=taskrepo.opened, readonly
     with neither THESEUS_AGENT_ID nor THESEUS_CREDENTIALS, not in a hand-made agent's tmux pane (TMUX_PANE, which only
     ever denies), whose working directory is not a task worktree. Anything else is refused, never promoted. Reads do
     not need this (see the module docstring)."""
-    env = os.environ if env is None else env
-    cwd = Path(cwd or os.getcwd())
+    try:
+        return identify(os.environ if env is None else env, Path(cwd or os.getcwd()), via, opener, readonly)
+    except store.SchemaTooNew:
+        raise
+    except (sqlite3.Error, store.StoreError) as error:
+        raise unreadable(error) from error
+
+
+def identify(env, cwd, via, opener, readonly):
     path = env.get("THESEUS_CREDENTIALS")
     if path:
         try:
@@ -1236,7 +1260,9 @@ def principal(env=None, cwd=None, *, via="cli", opener=taskrepo.opened, readonly
             agent = repo.hand_made_agent(env["TMUX_PANE"]) if repo else None
         if agent:
             raise TaskError("unauthenticated", f"this pane ({env['TMUX_PANE']}) is the registered agent {agent}; an agent "
-                                               f"is never the coordinator")
+                                               f"is never the coordinator (if that registration is stale, after a tmux "
+                                               f"restart reused the pane id, remove it with `theseus agents remove "
+                                               f"{agent.split('/', 1)[1]}`)")
     worktree = task_worktree(cwd, opener, readonly)
     if worktree:
         raise TaskError("unauthenticated", f"{cwd} is inside the task worktree {worktree}; the coordinator works from "

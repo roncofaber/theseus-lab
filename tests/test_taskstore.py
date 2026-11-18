@@ -159,7 +159,8 @@ class SoftOwnershipTests(TaskStoreCase):
         refused = self.code(svc.claim, QUEUE, "patcher", "agent-2", owner="o", provider="p")
         self.assertEqual("refused", refused)
 
-        svc.set_observed(QUEUE, "first", ["src/third.py"])
+        self.assertTrue(svc.set_observed(QUEUE, "first", ["src/third.py"]))
+        self.assertFalse(svc.set_observed(QUEUE, "first", ["src/third.py"]), "an unchanged scan writes nothing")
         self.assertEqual(["touches:src/third.py@first"], svc.holds(COORDINATOR)["third"],
                          "the tick's patch scan holds a conflicting task before the delivery")
         svc.deliver(QUEUE, "first", handoff_path="/h", observed_touches=["src/third.py"])

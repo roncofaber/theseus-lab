@@ -14,13 +14,16 @@ from . import __version__
 from . import config as cfg
 
 
-def load():
+def load(record=True):
+    """The project's configuration; record (not for read commands, which never write) also marks it seen in the host
+    store."""
     try:
         conf = cfg.load()
     except cfg.ConfigError as error:
         sys.exit(f"theseus: {error}")
-    from . import registry
-    registry.record(conf)
+    if record:
+        from . import registry
+        registry.record(conf)
     return conf
 
 
@@ -277,7 +280,7 @@ def json_reply(function):
 
 def cmd_tasks(args):
     from . import tasks as t
-    conf = load()
+    conf = load(record=args.task_action not in TASK_READS)
     acting = contextlib.nullcontext() if args.task_action in TASK_READS else t.acting(coordinator_principal())
     with acting, queue_locked(conf) if args.task_action in TASK_LOCKED else contextlib.nullcontext():
         tasks_action(conf, t.Queue(conf), args)
@@ -287,8 +290,8 @@ def cmd_task(args):
     """A worker's own task, named by the worker (the stale-context check): the coordinator may act for a subagent of
     its own session."""
     from . import tasks as t, taskservice
-    conf = load()
     action = args.task_command
+    conf = load(record=action != "show")
     principal = taskservice.principal(via="cli", readonly=action == "show")
     svc = taskservice.open(conf)
     if action == "show":

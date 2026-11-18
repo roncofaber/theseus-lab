@@ -434,6 +434,9 @@ def tick(conf, assign=True):
                     recorded.append(events(conf, 1)[-1])
                     drop_owed(conf, name)
                     info = ag.state(conf, agent)
+                elif not info["task"] and owed(conf, name):
+                    # The agent reported its task done itself (`theseus task done`): nothing is owed for it any more.
+                    drop_owed(conf, name)
                 pool_name = gateway.pool_key(conf, launched(conf, agent))
                 if info["task"]:
                     working[name] = info
