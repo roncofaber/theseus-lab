@@ -3,8 +3,9 @@
 The database lives at ~/.local/share/theseus/theseus.db (XDG_DATA_HOME is respected; THESEUS_DB overrides the path).
 THESEUS_DB_GUARD lists paths (files or directories, separated like PATH) the store must never open, so a test harness fails loudly instead of
 touching the real host database. It holds the projects this host runs, coordinator sessions, registered agents, queue events, pool leases and claims,
-deliveries, periodic agent-state samples, gateway errors, retry episodes and pauses, and the runs of supervised agents (agent_runs). Task records stay in each project's tasks.json in Git; the optional task
-index here is a read-only copy for cross-project queries. There is no daemon: every short-lived process opens the file
+deliveries, periodic agent-state samples, gateway errors, retry episodes and pauses, the runs of supervised agents (agent_runs), and
+the task tables (tasks and their dependencies, paths, attempts, notes and events), which only theseus.taskrepo reads
+and writes. There is no daemon: every short-lived process opens the file
 with connect(), and each write runs in its own BEGIN IMMEDIATE transaction so concurrent processes serialize on it.
 """
 import contextlib
@@ -213,6 +214,9 @@ MIGRATIONS = [
         "CREATE UNIQUE INDEX IF NOT EXISTS agents_id ON agents(id)",
         "CREATE INDEX IF NOT EXISTS agent_runs_agent_id ON agent_runs(agent_id, started_epoch)",
     ],
+    [
+        lambda conn: add_task_tables(conn),
+    ],
 ]
 AGENT_SUPERVISOR_COLUMNS = [("managed", "INTEGER NOT NULL DEFAULT 0"), ("server", "TEXT"), ("target", "TEXT"),
                             ("session_id", "TEXT"), ("slot", "INTEGER"), ("desired", "TEXT NOT NULL DEFAULT 'up'"),
@@ -249,7 +253,125 @@ def backfill_agent_ids(conn):
                          WHERE agents.project = "{table}".project AND agents.name = "{table}".agent) WHERE agent_id IS NULL""")
 
 
+PROJECT_TASK_COLUMNS = [("id", "TEXT"), ("tasks_root", "TEXT"), ("milestone", "TEXT"), ("objective_complete", "INTEGER"),
+                        ("policy", "TEXT"), ("tasks_legacy", "TEXT"), ("tasks_imported", "TEXT"), ("last_export", "TEXT")]
+TASK_STATUSES = "'pending', 'in_progress', 'verification', 'merged', 'completed'"
+ATTEMPT_PHASES = "'claimed', 'active', 'delivered', 'merged', 'released', 'reopened', 'unmerged', 'superseded', 'abandoned'"
+TASK_TABLES = [
+    f"""CREATE TABLE IF NOT EXISTS tasks (
+        pk INTEGER PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+        id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ({TASK_STATUSES})),
+        rev INTEGER NOT NULL DEFAULT 1,
+        role TEXT,
+        objective TEXT,
+        contract TEXT,
+        acceptance TEXT,
+        milestone TEXT,
+        priority INTEGER,
+        hold INTEGER NOT NULL DEFAULT 0,
+        room TEXT,
+        profile TEXT,
+        min_capability INTEGER,
+        note TEXT,
+        blockers TEXT,
+        merge TEXT,
+        result TEXT,
+        evidence TEXT,
+        extra TEXT,
+        legacy TEXT,
+        seq INTEGER NOT NULL,
+        created TEXT,
+        updated TEXT NOT NULL,
+        updated_epoch REAL NOT NULL,
+        UNIQUE (project_id, id))""",
+    "CREATE INDEX IF NOT EXISTS tasks_status ON tasks(project_id, status, seq)",
+    """CREATE TABLE IF NOT EXISTS task_deps (
+        task_pk INTEGER NOT NULL REFERENCES tasks(pk) ON DELETE CASCADE,
+        depends_on TEXT NOT NULL,
+        n INTEGER NOT NULL,
+        PRIMARY KEY (task_pk, depends_on))""",
+    "CREATE INDEX IF NOT EXISTS task_deps_target ON task_deps(depends_on)",
+    f"""CREATE TABLE IF NOT EXISTS task_attempts (
+        id TEXT PRIMARY KEY,
+        task_pk INTEGER NOT NULL REFERENCES tasks(pk) ON DELETE CASCADE,
+        n INTEGER NOT NULL,
+        agent_id TEXT,
+        owner TEXT,
+        phase TEXT NOT NULL CHECK (phase IN ({ATTEMPT_PHASES})),
+        worktree TEXT,
+        base TEXT,
+        log_dir TEXT,
+        execution TEXT,
+        handoff TEXT,
+        handoff_sha256 TEXT,
+        result TEXT,
+        source TEXT,
+        reason TEXT,
+        record TEXT,
+        started TEXT,
+        ended TEXT,
+        UNIQUE (task_pk, n))""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS task_attempts_task_active ON task_attempts(task_pk) WHERE phase IN ('claimed', 'active')",
+    """CREATE UNIQUE INDEX IF NOT EXISTS task_attempts_agent_active ON task_attempts(agent_id)
+        WHERE phase IN ('claimed', 'active') AND agent_id IS NOT NULL""",
+    "CREATE INDEX IF NOT EXISTS task_attempts_worktree ON task_attempts(worktree) WHERE worktree IS NOT NULL",
+    """CREATE TABLE IF NOT EXISTS task_paths (
+        task_pk INTEGER NOT NULL REFERENCES tasks(pk) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('owned', 'touches')),
+        path TEXT NOT NULL,
+        n INTEGER NOT NULL,
+        source TEXT NOT NULL DEFAULT 'declared' CHECK (source IN ('declared', 'observed')),
+        attempt_id TEXT REFERENCES task_attempts(id) ON DELETE CASCADE,
+        PRIMARY KEY (task_pk, kind, path))""",
+    "CREATE INDEX IF NOT EXISTS task_paths_path ON task_paths(kind, path)",
+    """CREATE TABLE IF NOT EXISTS task_notes (
+        id INTEGER PRIMARY KEY,
+        task_pk INTEGER NOT NULL REFERENCES tasks(pk) ON DELETE CASCADE,
+        attempt_id TEXT,
+        author TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('note', 'question', 'edit')),
+        text TEXT NOT NULL CHECK (length(text) <= 4096),
+        time TEXT NOT NULL,
+        answered TEXT)""",
+    "CREATE INDEX IF NOT EXISTS task_notes_task ON task_notes(task_pk, id)",
+    """CREATE TABLE IF NOT EXISTS task_events (
+        id INTEGER PRIMARY KEY,
+        task_pk INTEGER NOT NULL REFERENCES tasks(pk) ON DELETE CASCADE,
+        attempt_id TEXT,
+        time TEXT NOT NULL,
+        epoch REAL NOT NULL,
+        actor TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        detail TEXT NOT NULL DEFAULT '{}')""",
+    "CREATE INDEX IF NOT EXISTS task_events_task ON task_events(task_pk, id)",
+    """CREATE TABLE IF NOT EXISTS agent_credentials (
+        agent_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        secret_hash TEXT NOT NULL,
+        issued TEXT NOT NULL,
+        revoked TEXT,
+        PRIMARY KEY (agent_id, run_id))""",
+]
+
+
+def add_task_tables(conn):
+    """v7: an id per project (the key task rows reference, so a name handed to a new root keeps its tasks apart), the
+    project-level task fields, the task tables, deliveries.source; task_index, never written, goes."""
+    add_columns(conn, "projects", PROJECT_TASK_COLUMNS)
+    for (rowid,) in conn.execute("SELECT rowid FROM projects WHERE id IS NULL").fetchall():
+        conn.execute("UPDATE projects SET id = ? WHERE rowid = ?", (new_id(), rowid))
+    # A foreign key's parent needs a full (not partial) unique index; NULL ids stay distinct under it.
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS projects_id ON projects(id)")
+    add_columns(conn, "deliveries", [("source", "TEXT")])
+    conn.execute("DROP TABLE IF EXISTS task_index")
+    for statement in TASK_TABLES:
+        conn.execute(statement)
+
+
 SCHEMA_VERSION = len(MIGRATIONS)
+TASKS_VERSION = 7
 
 
 def path():
@@ -367,6 +489,9 @@ def migrate(conn):
                            f"theseus knows; upgrade theseus (or restore an older backup with `theseus db restore`)", current)
     if current == SCHEMA_VERSION:
         return
+    if 0 < current < TASKS_VERSION <= SCHEMA_VERSION:
+        # Rotation ignores labelled copies, so this one stays until removed by hand.
+        backup(conn, label=f"pre-v{TASKS_VERSION}")
     with transaction(conn):
         current = version(conn)
         if current > SCHEMA_VERSION:
@@ -398,7 +523,7 @@ def delete_meta(conn, key):
 
 
 def touch_project(conn, name):
-    conn.execute("INSERT OR IGNORE INTO projects (name) VALUES (?)", (name,))
+    conn.execute("INSERT OR IGNORE INTO projects (name, id) VALUES (?, ?)", (name, new_id()))
 
 
 def upsert_project(conn, name, root=None, data=None, coordinator=None, seen=None):
@@ -418,13 +543,14 @@ def list_projects(conn):
 
 def prune_projects(conn, missing_root=True, older_than=None, dry_run=False):
     """Remove projects whose root directory no longer exists, or (with older_than, in seconds) that nobody saw for
-    that long; their agents, agent runs, events, deliveries, samples, sessions, task index, gateway errors and retry
-    episodes and pool slots go with them. Returns the names
+    that long; their agents, agent runs, events, deliveries, samples, sessions, gateway errors and retry episodes and
+    pool slots go with them. A project with task rows is kept: its tasks outlive a missing root. Returns the names
     (with dry_run, the names it would remove). Nothing calls this automatically."""
     cutoff = time.time() - older_than if older_than is not None else None
     with transaction(conn):
         doomed = []
-        for row in conn.execute("SELECT name, root, last_seen_epoch FROM projects").fetchall():
+        for row in conn.execute("""SELECT name, root, last_seen_epoch FROM projects
+                                   WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.project_id = projects.id)""").fetchall():
             gone = missing_root and row["root"] and not Path(row["root"]).exists()
             stale = cutoff is not None and (row["last_seen_epoch"] or 0) < cutoff
             if gone or stale:
@@ -1008,14 +1134,16 @@ def status(conn, pool, spec=None):
             "claims": sorted(claims), "leases": leases, "capCut": cut, "capUntil": until}
 
 
-def add_delivery(conn, project, task, agent=None, handoff=None, result=None, at=None, origin=None, agent_id=None):
+def add_delivery(conn, project, task, agent=None, handoff=None, result=None, at=None, origin=None, agent_id=None,
+                 source=None):
+    """source: command when the worker reported the delivery, detected when the queue found its handoff."""
     text, epoch = stamp(at)
     with transaction(conn):
         touch_project(conn, project)
         cursor = conn.execute("""INSERT OR IGNORE INTO deliveries (project, task, agent, handoff, result, time, epoch, origin,
-                                 agent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                 agent_id, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                               (project, task, agent, None if handoff is None else str(handoff), result, text, epoch,
-                               origin, id_or_name(conn, project, agent, agent_id)))
+                               origin, id_or_name(conn, project, agent, agent_id), source))
     return cursor.lastrowid if cursor.rowcount else None
 
 
@@ -1024,7 +1152,7 @@ def deliveries(conn, project=None, since=None, until=None, task=None, limit=None
     if task is not None:
         where += (" AND" if where else " WHERE") + " task = ?"
         args.append(task)
-    sql = f"SELECT id, project, task, agent, agent_id, handoff, result, time, epoch FROM deliveries{where} ORDER BY id DESC"
+    sql = f"SELECT id, project, task, agent, agent_id, handoff, result, source, time, epoch FROM deliveries{where} ORDER BY id DESC"
     if limit:
         sql += f" LIMIT {int(limit)}"
     return [dict(row) for row in reversed(conn.execute(sql, args).fetchall())]
@@ -1148,15 +1276,15 @@ def import_registry(conn, registry_file):
         for root, entry in entries.items():
             seen = entry.get("last_seen")
             text, epoch = stamp(seen) if seen is not None else (None, None)
-            conn.execute("""INSERT INTO projects (name, root, data, coordinator, last_seen, last_seen_epoch)
-                            VALUES (?, ?, ?, ?, ?, ?)
+            conn.execute("""INSERT INTO projects (name, root, data, coordinator, last_seen, last_seen_epoch, id)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
                             ON CONFLICT (name) DO UPDATE SET root = COALESCE(projects.root, excluded.root),
                             data = COALESCE(projects.data, excluded.data),
                             coordinator = COALESCE(projects.coordinator, excluded.coordinator),
                             last_seen = CASE WHEN COALESCE(projects.last_seen_epoch, 0) >= COALESCE(excluded.last_seen_epoch, 0)
                                         THEN projects.last_seen ELSE excluded.last_seen END,
                             last_seen_epoch = MAX(COALESCE(projects.last_seen_epoch, 0), COALESCE(excluded.last_seen_epoch, 0))""",
-                         (entry["name"], root, entry.get("data"), entry.get("coordinator"), text, epoch))
+                         (entry["name"], root, entry.get("data"), entry.get("coordinator"), text, epoch, new_id()))
     return [entry["name"] for entry in entries.values()]
 
 

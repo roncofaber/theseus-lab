@@ -88,7 +88,7 @@ class SchemaTests(StoreCase):
         store.add_event(self.conn, "first", "tick")
         tables = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         self.assertTrue({"projects", "coordinator_sessions", "agents", "events", "pool_leases", "pool_claims",
-                         "deliveries", "samples", "task_index"} <= tables)
+                         "deliveries", "samples", "tasks", "task_attempts"} <= tables)
         for _ in range(2):
             with store.opened() as again:
                 self.assertEqual(store.SCHEMA_VERSION, store.version(again))
