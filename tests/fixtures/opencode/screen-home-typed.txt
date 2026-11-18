@@ -1,0 +1,49 @@
+   Pong reply                      Magic word and Proceed prompt   Greeting                        New session                     Reading FOO from .env         + New session
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                                            ▄
+                                                                                           █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█
+                                                                                           █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀
+                                                                                           ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
+
+
+                                                                         ┃
+                                                                         ┃  theseus: hello world typed but not sent
+                                                                         ┃
+                                                                         ┃  Build · CBorg Coder Ultra CBorg (free)
+                                                                         ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+                                                                         /work/proj:main                           shift+tab agents  ctrl+p commands
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                                                                                                                                     2.3.0

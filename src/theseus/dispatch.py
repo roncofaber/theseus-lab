@@ -11,7 +11,6 @@ import datetime
 import json
 import shlex
 import subprocess
-import uuid
 from importlib import resources
 
 from . import config as cfg
@@ -71,7 +70,7 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
     lines = []
     if consumers:
         lines.append(f"note: {len(consumers)} files outside ownedPaths use names declared inside them (`theseus tasks consumers {task_id}`)")
-    session = str(uuid.uuid4()) if profile.get("session") == "preassign" else ""
+    session = profiles.new_session(profile) if profile.get("session") == "preassign" else ""
     launch = profiles.launch_argv(profile, prompt, session, model, conf, agent=f"worker-{name}",
                                   credentials=record_dir / "credentials") or []
     resume = profiles.resume_template(profile, session, model, conf)

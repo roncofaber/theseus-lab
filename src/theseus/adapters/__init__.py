@@ -7,7 +7,8 @@ An adapter is a module of this package, registered in ADAPTERS under the name a 
   a registry record (name, pane, provider, managed, session_id, server); interactive is the profile's interactive
   table.
 - session_file(conf, interactive, session, cwd): the record of a known session id started in cwd (the coordinator),
-  or None.
+  or None. A path that exists; when the record holds several sessions (OpenCode's database) the path also carries
+  the session id.
 - read(path): the state of that record, or None. Reads are incremental and safe from several threads.
 
 A state is a dict with:
@@ -30,7 +31,7 @@ scrollback, for CLIs that print inline) and "none" (no Conversation tab; context
 pane only)."""
 import importlib
 
-ADAPTERS = {"claude-code-jsonl": "claude_code"}
+ADAPTERS = {"claude-code-jsonl": "claude_code", "opencode-sqlite": "opencode"}
 PANE_HISTORY = "pane-history"
 NONE = "none"
 NAMES = (*ADAPTERS, PANE_HISTORY, NONE)

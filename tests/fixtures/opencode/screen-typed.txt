@@ -1,0 +1,39 @@
+   Pong reply                      Reading FOO from .env         +
+
+  ┃                                                                                                 Reading FOO from .env
+  ┃  Use the read tool to read the file .env in this directory, then tell me the value of FOO.
+  ┃                                                                                                 Context
+                                                                                                    5,031 tokens
+     + 2 thoughts, 1 read                                                                           2% used
+
+     FOO is bar.
+
+     Build · CBorg Coder Ultra · 25.8s · 16.2 tok/s · 848ms ttft
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                      ⬖ Getting started                ✕
+
+                                                                                                        OpenCode includes free models so
+                                                                                                        you can start immediately.
+
+                                                                                                        Connect from 75+ providers to
+                                                                                                        use other models, including
+  ┃                                                                                                     Claude, GPT, Gemini etc
+  ┃  theseus: hello world typed but not sent
+  ┃                                                                                                     Connect provider        /connect
+  ┃  Build · CBorg Coder Ultra CBorg (free)
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  /work/proj:main                                                     5.0K (2%)  ctrl+p commands    /work/proj:main

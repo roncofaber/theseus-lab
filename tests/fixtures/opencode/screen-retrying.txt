@@ -1,0 +1,49 @@
+   Pong reply                      Magic word and Proceed prompt   Greeting                        New session                   ⠹ Reading FOO from .env         +
+     - Retain only the value of FOO; drop finished-task details.
+                                                                                                                                                                                    Reading FOO from .env
+     Decisions
+
+     - (none)
+
+     Work State
+
+     Completed
+
+     - Read .env and reported FOO=bar.
+
+     Active
+
+     - (none)
+
+     Blocked
+
+     - (none)
+
+     Next Move
+
+     (none)
+
+     Relevant Files
+
+     - .env: Contains the requested value.
+
+     Important Context
+
+     - FOO=bar
+
+     ◈ Instructions updated: core/skill-guidance, core/instructions
+
+  ┃
+  ┃  hello again                                                                                                                                                                      ⬖ Getting started                ✕
+  ┃
+                                                                                                                                                                                        OpenCode includes free models so
+     ⚠ Retrying in 4s · attempt 6 · stub 503: litellm error for testing                                                                                                                 you can start immediately.
+
+     Build · CBorg Coder Ultra                                                                                                                                                          Connect from 75+ providers to
+                                                                                                                                                                                        use other models, including
+  ┃                                                                                                                                                                                     Claude, GPT, Gemini etc
+  ┃
+  ┃                                                                                                                                                                                     Connect provider        /connect
+  ┃  Build · CBorg Coder Ultra CBorg (free)
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   ⬝⬝⬝⬝⬝⬝⬝⬝ esc interrupt                                                                                                                      shift+tab agents  ctrl+p commands    /work/proj:main

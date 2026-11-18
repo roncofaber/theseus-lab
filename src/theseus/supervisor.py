@@ -22,7 +22,6 @@ import shlex
 import shutil
 import sys
 import time
-import uuid
 from pathlib import Path
 
 from . import config as cfg
@@ -492,7 +491,7 @@ def spawn(conf, slot, intent="start", session=None, profile=None, srv=None):
     rec = record(conf, name) or {}
     profile = profile or rec.get("profile") or slot["profile"]
     resume = bool(session)
-    session = session or str(uuid.uuid4())
+    session = session or profiles.new_session(profiles.resolve(conf, profile))
     argv, _, where, spec = launch(conf, profile, name, session, resume)
     width, height = size()
     target = tm.session_name(conf.name, name)

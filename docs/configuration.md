@@ -288,3 +288,53 @@ The console measures context use against the window of the model each session's 
 
 A model not in the table falls back to the profile's `context_limit`.
 
+
+## OpenCode
+
+The `opencode` preset runs [OpenCode](https://opencode.ai) (checked with 2.3.0) as supervised agents and headless workers. Each agent runs `opencode --standalone`, its own private OpenCode server: without `--standalone` the TUI attaches to OpenCode's shared background service, which never sees the agent's environment, so the per-agent model and MCP file would not apply. A standalone agent takes about 190 MB of memory.
+
+What the preset does:
+- Session: theseus preassigns `ses_<uuid>` (`session_prefix`; OpenCode refuses other ids) and starts the agent with `--session ID`; a restart resumes with the same flag, which also creates a session that no longer exists, so there is no "resume missing" case.
+- Model: the TUI has no model flag, so `model` reaches it as `OPENCODE_CONFIG_CONTENT = {"model": "<model>"}` (`model_env`); `opencode run` also gets `--model`. A resumed session keeps the model it was started with; a model change applies to fresh sessions.
+- MCP: `mcp_servers` writes `<data>/mcp/<profile>/<agent>.json` in OpenCode's format and names it in `OPENCODE_CONFIG` (`mcp_format = "opencode"`, `mcp_env`). The `theseus` entry carries the agent's `THESEUS_CREDENTIALS` in `environment`; OpenCode passes local servers its whole environment plus that table, with the project root as working directory. OpenCode merges the file over its own configuration and ignores a partial entry, so the file also lists each server of your global OpenCode configuration (`~/.config/opencode/opencode.json`, `opencode.jsonc`, `config.json`) that `mcp_servers` leaves out as a complete entry with `"disabled": true`; `mcp_servers = []` thus starts an agent with no MCP servers at all, as for Claude Code. A server defined in the project's own `opencode.json` still loads.
+- Updates: the preset sets `OPENCODE_DISABLE_AUTOUPDATE=1` in `env`, so agents never replace the binary under each other; update OpenCode yourself (a profile that sets its own `env` replaces this, so keep it there).
+- Screen: busy is `esc interrupt` on the bottom row (also while compacting and while OpenCode retries a gateway error); its permission prompt (`Allow once  Always allow  Reject`) and question dialog (`enter submit  esc dismiss`) count as waiting for a human, and nothing is typed into them; the context hint is the `7.0K (3%)` figure of the bottom row; `/compact`, `/clear` and `/exit` are its commands; `C-u` empties the input box in one press, wrapped or not.
+- Transcript: `opencode-sqlite` reads the agent's session from OpenCode's database for the context meter, the gateway classification and the Conversation tab (see [Transcript adapters](agent-profiles.md#transcript-adapters)).
+- Gateway errors: OpenCode retries a 429 or 5xx itself, about ten times over a minute and a half, showing `Retrying in 5s · attempt 4 · <message>` while busy; theseus sees a working agent until the turn fails, then the `Error: <message>` row and the transcript's error (status and kind) start the usual recovery.
+
+Skills and instructions: OpenCode reads `AGENTS.md` from the working directory up to the project root (and `~/.config/opencode/AGENTS.md`), and discovers skills in the `.agents/skills`, `.claude/skills` and `.opencode/skills` directories of the project and of your home directory (checked for the project's `.agents/skills`). The skills `theseus scaffold` installs in `.agents/skills` (with the `.claude/skills` link) therefore load as they are; `/skills` in the TUI lists them, once each.
+
+An example host configuration, with OpenCode's providers defined in your OpenCode configuration and their API key in an environment variable (`"apiKey": "{env:GATEWAY_API_KEY}"`):
+
+```toml
+# ~/.config/theseus/config.toml
+[supervisor]
+env_passthrough = ["GATEWAY_API_KEY"]       # supervised agents start with an allowlisted environment
+
+# Workers on the gateway's free coding model ("provider/model" as OpenCode names it)
+[workers.opencode-gateway]
+preset = "opencode"
+model = "gateway/coder-model"
+context_limit = 229376
+capacity = 4
+pool = "gateway"
+mcp_servers = ["theseus"]
+
+# A coordinator on a larger model from another provider block of the same OpenCode configuration
+[workers.opencode-coordinator]
+preset = "opencode"
+model = "gateway-openai/large-model"
+context_limit = 200000
+capacity = 1
+```
+
+`env_passthrough` takes effect when the private tmux server starts, from the environment of the command that starts it; with the server already running, stop every supervised session (`theseus agents down --all` in each project) so the next `theseus agents up` starts it again. A launcher script that exports the key itself and runs `opencode "$@"`, set as the profile's `command`, needs neither. A project then runs workers with `[agents.counts] opencode-gateway = 2` (and `[agents] managed = true`) in `theseus.local.toml`. Raise `[instances] send_verify_seconds` for a slow model: a verified send waits that long for the busy marker.
+
+Limits:
+- After `/clear` OpenCode starts a new session, which it creates with an id of its own on the next message; the database names no process or pane, so theseus keeps the earlier id: the context meter and Conversation tab show the earlier session until the agent restarts, and a restart resumes the conversation from before the clear.
+- A hand-made OpenCode pane (`theseus agents add`) gets no transcript, only the context hint, and `theseus instance restart` does not support it.
+- Before the first message the TUI centers its input box, above the bottom rows the input checks read, so text typed there is not seen as typed; a verified send then relies on the busy marker alone.
+- The failed-turn `Error:` row is searched in the bottom `[gateway] screen_lines` (15) rows, and OpenCode draws a conversation shorter than the screen from the top, so a turn that fails early in a session is seen as an idle agent (the stall reminder then nudges it); `[gateway] screen_lines = 50` searches the whole default screen.
+- Below 80 columns OpenCode shortens the busy marker (`esc ...rrupt`), so theseus no longer sees the agent working; keep supervised panes at least 80 columns wide (the default `[supervisor] size` is 220x50).
+- No peer messaging: workers report through the handoff file and the task commands.
+- Permission prompts appear only for actions an agent's permission rules mark `ask` (OpenCode's default build agent: reading `.env` files); no startup dialog appeared with a new configuration.

@@ -9,7 +9,7 @@ theseus never assumes one agent vendor. An agent profile describes how to launch
 | `claude-code` (default) | Claude Code, own subscription or API key | `claude -p PROMPT --session-id ID --output-format json` | `claude -p MSG --resume ID` | yes, with peer messaging | yes (through a wrapper launcher; `--model` not exercised) |
 | `claude-subagent` | Claude Code subagents of the coordinator session | none: theseus prepares the worktree and `prompt.md`, the coordinator launches the subagent | the coordinator's own tools | no | yes |
 | `codex` | OpenAI Codex CLI | `codex exec -s workspace-write PROMPT` | `codex exec resume --last MSG` | without a busy marker until you set one | no |
-| `opencode` | OpenCode | `opencode run --format json --session ID PROMPT` | `opencode run --session ID MSG` | without a busy marker until you set one | no |
+| `opencode` | OpenCode, each agent on its own private OpenCode server | `opencode run --standalone --format json --session ID PROMPT` | `opencode run --standalone --session ID MSG` | yes, supervised, with its SQLite transcript; no peer messaging (see [OpenCode](configuration.md#opencode)) | persistent instances yes (OpenCode 2.3.0, supervised in tmux); the headless run by hand, not through `theseus dispatch` |
 | `gemini-cli` | Google Gemini CLI | `gemini -p PROMPT --yolo` | none | without a busy marker until you set one | no |
 
 `codex exec resume --last` picks the most recent session in the current directory, and each worker has its own worktree, so follow-ups reach the right worker.
@@ -82,15 +82,18 @@ A project section with the same name as a host profile overrides only the keys i
 | `headless` | Argument list of a one-shot run; omit (none) for coordinator-launched subagents |
 | `resume` | Argument list that continues a stopped run with `{message}`; stored in each worker's `launch.json` for `theseus followup` |
 | `session` | `preassign` when the CLI accepts a session ID theseus chooses (`{session}`), `none` otherwise |
+| `session_prefix` | What a preassigned session ID starts with, before a random UUID (OpenCode: `ses_`, the only ids it accepts) |
 | `model`, `model_flag` | The model; the item `{model_args}` expands to `[model_flag, model]` only when a model is set |
 | `context_limit` | The context window in tokens that the console measures an agent's context use against when its model is not in `[models] context` (200000) |
 | `permission_mode` | Substituted for `{permission_mode}` (Claude Code: `auto`, `acceptEdits`, `bypassPermissions`, ...) |
 | `env` | Extra environment for the run; `{model}` is substituted |
+| `model_env` | Environment added to `env` only when a model is set, for a CLI whose interactive mode has no model flag (OpenCode: `OPENCODE_CONFIG_CONTENT = '{"model": "{model}"}'`) |
 | `retry` | Resume automatically after a retryable gateway error (Claude JSON output with status 429, 5xx or 529) |
 | `capacity` | Concurrent active tasks under this profile |
 | `capability` | An integer rank of what the profile's agents can handle (default 1); a task with a higher minimum capability never goes to them (see [Capability](#capability)) |
 | `extra_args` | Arguments appended to the headless run, the resume and the persistent-instance launch, after the MCP flags. Placeholders are filled as in the templates and a leading `~` is expanded, for example `["--settings", "~/.config/theseus/worker-settings.json"]` to give workers their own client settings file |
-| `mcp_servers` | MCP servers the agent starts with, and only those (`--strict-mcp-config --mcp-config <data>/mcp/<profile>.json`, from `mcp_flags`); each is copied from your Claude Code configuration, and `theseus` is the theseus server. Unset: the client's own servers |
+| `mcp_servers` | MCP servers the agent starts with, and only those (`--strict-mcp-config --mcp-config <data>/mcp/<profile>.json`, from `mcp_flags`); each is copied from your Claude Code configuration, and `theseus` is the theseus server. Unset: the client's own servers. OpenCode has no MCP flag and merges the file over its own configuration, so for it the file also disables each server of your global OpenCode configuration the list leaves out (a project's own `opencode.json` still wins) |
+| `mcp_format`, `mcp_env` | How the MCP config file is written (`claude`, the default: `mcpServers`; `opencode`: `mcp.servers` with local `command` lists and `environment`) and, for a CLI that reads it from its environment instead of a flag, the variables that name it (`{mcp_config}`; OpenCode: `OPENCODE_CONFIG`). The variables join `env` in the headless run, the resume and the persistent instance |
 | `pool` | A host-wide pool shared with other projects (see [Configuration](configuration.md#sharing-agents-between-projects)) |
 | `fallback`, `health` | Host file only: the profile that takes over this profile's agents while it is down, and how its health is probed (see [Profile fallback](configuration.md#profile-fallback)) |
 | `interactive.launch`, `interactive.resume` | How a persistent instance is started and resumed (`{launch}`, `{session}`) by `theseus instance restart`; the Claude Code presets launch `{command} --name {agent} --permission-mode {permission_mode}`, so a restarted agent keeps its name and permissions, and an option whose value is empty is left out |
@@ -108,10 +111,10 @@ A project section with the same name as a host profile overrides only the keys i
 | `interactive.status_command` | A command that prints the CLI's sessions as a JSON list with `pid`, `sessionId`, `status` (`busy`, `idle`, `waiting`) and `waitingFor`, matched to a supervised agent by its pane's process tree (Claude Code: `["claude", "agents", "--json"]`). Without one, readiness and busy come from the screen |
 | `interactive.ready_pattern` | Optional screen text of a ready prompt, for CLIs without a status command |
 | `interactive.startup_dialogs` | Screen texts of startup questions only a human may answer (Claude Code: the folder trust question and a new MCP server); a supervised agent showing one is `blocked` and theseus never answers it |
-| `interactive.prompt_patterns` | Regular expressions for a question on screen that needs a human, matched in the pane's last 15 lines (Claude Code: the `1. Yes` choice line of a permission prompt; the other presets set none). Any agent, supervised or hand-made, showing one or a startup dialog is `waiting`, and theseus types nothing into it (no task message, nudge, compact, clear or exit command, no `theseus instance send`) until a human answers, for example from the console's send line |
-| `interactive.compact`, `interactive.clear` | Commands typed between tasks: compact (same room, or clean to dirty) and clear (dirty to clean); `{keep}` is what compaction keeps |
+| `interactive.prompt_patterns` | Regular expressions for a question on screen that needs a human, matched in the pane's last 15 lines (Claude Code: the `1. Yes` choice line of a permission prompt; OpenCode: the footer rows of its permission prompt and question dialog; codex and gemini-cli set none). Any agent, supervised or hand-made, showing one or a startup dialog is `waiting`, and theseus types nothing into it (no task message, nudge, compact, clear or exit command, no `theseus instance send`) until a human answers, for example from the console's send line |
+| `interactive.compact`, `interactive.clear` | Commands typed between tasks: compact (same room, or clean to dirty) and clear (dirty to clean); `{keep}` is what compaction keeps (OpenCode's `/compact` takes no text: with any, it is sent as an ordinary message, so its preset leaves `{keep}` out) |
 | `interactive.sessions_dir` | Where the CLI records running sessions (needed by `instance restart`) |
-| `interactive.transcript` | The transcript adapter that reads the CLI's own record of a session (see [Transcript adapters](#transcript-adapters)): `claude-code-jsonl` (the Claude Code presets), `pane-history` (the codex, opencode and gemini-cli presets: the console shows the pane's tmux scrollback) or `none` |
+| `interactive.transcript` | The transcript adapter that reads the CLI's own record of a session (see [Transcript adapters](#transcript-adapters)): `claude-code-jsonl` (the Claude Code presets), `opencode-sqlite` (the opencode preset), `pane-history` (the codex and gemini-cli presets: the console shows the pane's tmux scrollback) or `none` |
 | `interactive.messaging` | Whether the agent can message the coordinator session; without it workers reply in their pane and the queue detects the handoff file |
 
 Placeholders: `{command}`, `{prompt}`, `{message}`, `{session}`, `{model}`, `{permission_mode}`, `{keep}`, `{launch}`, `{agent}` (the registered agent name, shell-quoted), and the list item `{model_args}`.
@@ -212,6 +215,7 @@ What theseus reads from a CLI's record of its own session goes through one adapt
 | Adapter | Reads |
 | --- | --- |
 | `claude-code-jsonl` | Claude Code's JSONL transcript: the session of a supervised agent from its stored session id, of another pane from the client's `interactive.sessions_dir`; user prompts and slash commands as typed, assistant text as Markdown, each tool call as one `Tool: key argument` line and each result as a one-line preview (both unfold), never thinking, system reminders, command output or compaction summaries |
+| `opencode-sqlite` | OpenCode's session database (`OPENCODE_DB`, else `$XDG_DATA_HOME/opencode/opencode.db`, also when set in `interactive.env`), read-only: the session of a supervised agent from its stored session id (the database names no pane or process, so a hand-made pane gets none); user text, assistant text as Markdown, tool calls and their results, the error that ended a failed turn (with OpenCode's error kind mapped to `rate_limit`, `server_error` or `connection_lost`), never reasoning or compaction summaries; the context in use is the last answer's input, output, reasoning and cached tokens, the figure OpenCode's own meter shows |
 | `pane-history` | Nothing; the console shows the pane's scrollback (`capture-pane -S`) |
 | `none` | Nothing; no Conversation tab |
 
@@ -231,7 +235,7 @@ A state is a dict with:
 Adding a CLI means writing that module in its own record format, adding its name to `ADAPTERS`, and setting `transcript = "<name>"` in the preset's `interactive` table. The console redacts API keys, key hashes and email addresses in everything it shows from a transcript or the scrollback.
 ## What depends on the preset
 
-Every theseus feature is driven by profile keys, never by a hard-coded agent. The `claude-code` preset sets them all; the other presets set only `launch`, `compact`, `clear`, `transcript = "pane-history"` and `messaging = false`, and degrade as follows until you add the missing keys to their `[workers.<name>.interactive]`:
+Every theseus feature is driven by profile keys, never by a hard-coded agent. The `claude-code` preset sets them all; `opencode` sets all but `status_command`, `sessions_dir` and `messaging` (see [OpenCode](configuration.md#opencode)); the codex and gemini-cli presets set only `launch`, `compact`, `clear`, `transcript = "pane-history"` and `messaging = false`, and degrade as follows until you add the missing keys to their `[workers.<name>.interactive]`:
 
 | Feature | Needs | Without it |
 | --- | --- | --- |

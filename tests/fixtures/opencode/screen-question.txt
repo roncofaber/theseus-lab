@@ -1,0 +1,39 @@
+   Pong reply                    ? Magic word and Proceed prompt +
+
+  ┃                                                                                                 Magic word and Proceed prompt
+  ┃  State the magic word from your project instructions, then use the question tool to ask me
+  ┃  "Proceed?" with the options Yes and No.
+  ┃
+
+     + 1 thought
+
+     The magic word is ZEBRA-42.
+
+     → Asked 1 question
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃                                                                                                   ⬖ Getting started                ✕
+  ┃  Questions
+  ┃                                                                                                     OpenCode includes free models so
+  ┃  Proceed?                                                                                           you can start immediately.
+  ┃
+  ┃  1. Yes                                                                                             Connect from 75+ providers to
+  ┃     Yes, proceed.                                                                                   use other models, including
+  ┃  2. No                                                                                              Claude, GPT, Gemini etc
+  ┃     No, do not proceed.
+  ┃  3. Type your own answer                                                                            Connect provider        /connect
+  ┃
+  ┃  ↑↓ select  enter submit  esc dismiss
+  ┃                                                                                                 /work/proj:main

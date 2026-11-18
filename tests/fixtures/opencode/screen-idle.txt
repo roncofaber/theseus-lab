@@ -1,0 +1,49 @@
+   Single-word pong reply        +
+
+  ┃                                                                                                                                                                                 Single-word pong reply
+  ┃  Reply with the single word pong and nothing else.
+  ┃                                                                                                                                                                                 Context
+                                                                                                                                                                                    6,963 tokens
+     + 1 thought                                                                                                                                                                    3% used
+
+     pong                                                                                                                                                                           MCP
+                                                                                                                                                                                    • theseus                   Connected
+     Build · CBorg Coder Ultra · 1.8s · 49.7 tok/s · 542ms ttft
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                                                                                                      ⬖ Getting started                ✕
+
+                                                                                                                                                                                        OpenCode includes free models so
+                                                                                                                                                                                        you can start immediately.
+
+                                                                                                                                                                                        Connect from 75+ providers to
+                                                                                                                                                                                        use other models, including
+  ┃                                                                                                                                                                                     Claude, GPT, Gemini etc
+  ┃
+  ┃                                                                                                                                                                                     Connect provider        /connect
+  ┃  Build · CBorg Coder Ultra CBorg (free)
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  /work/proj:main                                                                                                                                     7.0K (3%)  ctrl+p commands    /work/proj:main

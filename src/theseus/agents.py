@@ -313,7 +313,9 @@ def input_holds(screen, text, pattern=None, lines=8, placeholder=None):
         content = " ".join(held[-1].split())
         if placeholder and re.match(placeholder, content):
             return True
-        return bool(content) and (wanted.startswith(content[:40]) or content.startswith(wanted))
+        # A CLI that draws every row of a wrapped input the same way (OpenCode) shows its last row as the input line.
+        return bool(content) and (wanted.startswith(content[:40]) or content.startswith(wanted)
+                                  or (len(content) >= 12 and content in " ".join(text.split())))
     if placeholder and any(re.search(placeholder, line) for line in bottom):
         return True
     return any(wanted[:20] in " ".join(line.split()) for line in bottom)

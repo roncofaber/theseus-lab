@@ -1,0 +1,415 @@
+{
+ "schema": [
+  "CREATE TABLE `session_message` (\n          `id` text PRIMARY KEY,\n          `session_id` text NOT NULL,\n          `type` text NOT NULL,\n          `seq` integer NOT NULL,\n          `time_created` integer NOT NULL,\n          `time_updated` integer NOT NULL,\n          `data` text NOT NULL,\n          CONSTRAINT `fk_session_message_session_id_session_v2_id_fk` FOREIGN KEY (`session_id`) REFERENCES `session_v2`(`id`) ON DELETE CASCADE\n        )",
+  "CREATE TABLE `session_v2` (\n          `id` text PRIMARY KEY,\n          `project_id` text NOT NULL,\n          `workspace_id` text,\n          `parent_id` text,\n          `fork_session_id` text,\n          `fork_boundary` text,\n          `slug` text NOT NULL,\n          `directory` text NOT NULL,\n          `path` text,\n          `title` text,\n          `version` text NOT NULL,\n          `share_url` text,\n          `summary_additions` integer,\n          `summary_deletions` integer,\n          `summary_files` integer,\n          `summary_diffs` text,\n          `metadata` text,\n          `cost` real DEFAULT 0 NOT NULL,\n          `tokens_input` integer DEFAULT 0 NOT NULL,\n          `tokens_output` integer DEFAULT 0 NOT NULL,\n          `tokens_reasoning` integer DEFAULT 0 NOT NULL,\n          `tokens_cache_read` integer DEFAULT 0 NOT NULL,\n          `tokens_cache_write` integer DEFAULT 0 NOT NULL,\n          `revert` text,\n          `permission` text,\n          `agent` text,\n          `model` text,\n          `time_created` integer NOT NULL,\n          `time_updated` integer NOT NULL,\n          `time_busy` integer,\n          `time_idle` integer,\n          `time_viewed` integer,\n          `idle_outcome` text,\n          `time_compacting` integer,\n          `time_archived` integer,\n          `time_suspended` integer,\n          `resume_attempts` integer DEFAULT 0 NOT NULL,\n          CONSTRAINT `fk_session_v2_project_id_project_id_fk` FOREIGN KEY (`project_id`) REFERENCES `project`(`id`) ON DELETE CASCADE\n        )"
+ ],
+ "sessions": {
+  "answer": {
+   "session": {
+    "id": "ses_e0f090a2effe6A879ppJxxA2W9",
+    "project_id": "0000000000000000000000000000000000000000",
+    "workspace_id": null,
+    "parent_id": null,
+    "fork_session_id": null,
+    "fork_boundary": null,
+    "slug": "tidy-eagle",
+    "directory": "/work/proj",
+    "path": "",
+    "title": "Pong reply",
+    "version": "2.3.0",
+    "share_url": null,
+    "summary_additions": null,
+    "summary_deletions": null,
+    "summary_files": null,
+    "summary_diffs": null,
+    "metadata": null,
+    "cost": 0.0,
+    "tokens_input": 5401,
+    "tokens_output": 31,
+    "tokens_reasoning": 108,
+    "tokens_cache_read": 0,
+    "tokens_cache_write": 0,
+    "revert": null,
+    "permission": null,
+    "agent": "build",
+    "model": "{\"id\":\"lbl/cborg-coder-ultra\",\"providerID\":\"cborg\"}",
+    "time_created": 1795044079065,
+    "time_updated": 1795044080876,
+    "time_busy": 1795044079102,
+    "time_idle": 1795044080066,
+    "time_viewed": 1795044080066,
+    "idle_outcome": "succeeded",
+    "time_compacting": null,
+    "time_archived": null,
+    "time_suspended": null,
+    "resume_attempts": 0
+   },
+   "messages": [
+    {
+     "id": "msg_1f0f6f5d5001sXfdNHLan4OCt8",
+     "type": "user",
+     "seq": 4,
+     "time_created": 1795044079108,
+     "time_updated": 1795044079108,
+     "data": "{\"time\":{\"created\":1795044079108},\"text\":\"Reply with the single word pong and nothing else.\",\"files\":[],\"agents\":[]}"
+    },
+    {
+     "id": "msg_1f0f6f60b0015P1WcPGyXlXHPq",
+     "type": "assistant",
+     "seq": 5,
+     "time_created": 1795044079117,
+     "time_updated": 1795044080061,
+     "data": "{\"time\":{\"created\":1795044079117,\"firstToken\":1795044079600,\"streamed\":1795044080050,\"completed\":1795044080059},\"agent\":\"build\",\"model\":{\"id\":\"lbl/cborg-coder-ultra\",\"providerID\":\"cborg\",\"variant\":\"default\"},\"content\":[{\"type\":\"reasoning\",\"text\":\"I need respond single word pong. I'll respond only pong. No tools needed. Ensure capital? exactly lower-case pong.\",\"native\":{\"reasoningField\":\"reasoning_content\"},\"time\":{\"created\":1795044079601,\"completed\":1795044080045}},{\"type\":\"text\",\"text\":\"pong\"}],\"snapshot\":{\"start\":\"e14e3d877b92f617e7190f27286261441ce90f97\",\"end\":\"e14e3d877b92f617e7190f27286261441ce90f97\",\"files\":[]},\"finish\":\"stop\",\"rawFinish\":\"stop\",\"cost\":0,\"tokens\":{\"input\":4863,\"output\":15,\"reasoning\":24,\"cache\":{\"read\":0,\"write\":0}}}"
+    },
+    {
+     "id": "msg_1f0f6f9c20013V42XoIUTAkkI8",
+     "type": "idle",
+     "seq": 13,
+     "time_created": 1795044080066,
+     "time_updated": 1795044080068,
+     "data": "{\"time\":{\"created\":1795044080066},\"outcome\":\"succeeded\"}"
+    }
+   ]
+  },
+  "tools": {
+   "session": {
+    "id": "ses_e3e6159e-7f67-427e-b48c-7ceb63566023",
+    "project_id": "0000000000000000000000000000000000000000",
+    "workspace_id": null,
+    "parent_id": null,
+    "fork_session_id": null,
+    "fork_boundary": null,
+    "slug": "stellar-planet",
+    "directory": "/work/proj",
+    "path": "",
+    "title": "Reading FOO from .env",
+    "version": "2.3.0",
+    "share_url": null,
+    "summary_additions": null,
+    "summary_deletions": null,
+    "summary_files": null,
+    "summary_diffs": null,
+    "metadata": null,
+    "cost": 0.0,
+    "tokens_input": 4847,
+    "tokens_output": 223,
+    "tokens_reasoning": 525,
+    "tokens_cache_read": 16384,
+    "tokens_cache_write": 0,
+    "revert": null,
+    "permission": null,
+    "agent": "build",
+    "model": "{\"id\":\"lbl/cborg-coder-ultra\",\"providerID\":\"cborg\"}",
+    "time_created": 1795044196768,
+    "time_updated": 1795044330808,
+    "time_busy": 1795044330809,
+    "time_idle": 1795044351196,
+    "time_viewed": 1795044351196,
+    "idle_outcome": "succeeded",
+    "time_compacting": null,
+    "time_archived": null,
+    "time_suspended": null,
+    "resume_attempts": 0
+   },
+   "messages": [
+    {
+     "id": "msg_1f0f8c19a0010wXUft7UpGd2TU",
+     "type": "user",
+     "seq": 4,
+     "time_created": 1795044196805,
+     "time_updated": 1795044196805,
+     "data": "{\"time\":{\"created\":1795044196805},\"text\":\"Use the read tool to read the file .env in this directory, then tell me the value of FOO.\",\"files\":[],\"agents\":[]}"
+    },
+    {
+     "id": "msg_1f0f8c1cc001s2qSAKwZHpiO44",
+     "type": "assistant",
+     "seq": 5,
+     "time_created": 1795044196815,
+     "time_updated": 1795044220862,
+     "data": "{\"time\":{\"created\":1795044196815,\"firstToken\":1795044197663,\"streamed\":1795044203390,\"completed\":1795044220860},\"agent\":\"build\",\"model\":{\"id\":\"lbl/cborg-coder-ultra\",\"providerID\":\"cborg\",\"variant\":\"default\"},\"content\":[{\"type\":\"reasoning\",\"text\":\"I need respond. Should use read tool read .env. Simple. Should consider secrets policy? User requests file .env and value FOO. I can read. Use read.\",\"native\":{\"reasoningField\":\"reasoning_content\"},\"time\":{\"created\":1795044197664,\"completed\":1795044203387}},{\"type\":\"tool\",\"id\":\"chatcmpl-tool-a8f6d396951f1f70\",\"name\":\"read\",\"executed\":false,\"state\":{\"status\":\"completed\",\"input\":{\"path\":\".env\"},\"content\":[{\"type\":\"text\",\"text\":\"Read file .env, lines 1-1\\n1: FOO=bar\"}],\"metadata\":{\"truncated\":false}},\"time\":{\"created\":1795044202863,\"ran\":1795044203389,\"completed\":1795044220851}}],\"snapshot\":{\"start\":\"e14e3d877b92f617e7190f27286261441ce90f97\",\"end\":\"e14e3d877b92f617e7190f27286261441ce90f97\",\"files\":[]},\"finish\":\"tool-calls\",\"rawFinish\":\"tool_calls\",\"cost\":0,\"tokens\":{\"input\":780,\"output\":48,\"reasoning\":36,\"cache\":{\"read\":4096,\"write\":0}}}"
+    },
+    {
+     "id": "msg_1f0f91fc3001ocuFmGs0FlaQ3I",
+     "type": "assistant",
+     "seq": 17,
+     "time_created": 1795044220870,
+     "time_updated": 1795044222580,
+     "data": "{\"time\":{\"created\":1795044220870,\"firstToken\":1795044221589,\"streamed\":1795044222576,\"completed\":1795044222579},\"agent\":\"build\",\"model\":{\"id\":\"lbl/cborg-coder-ultra\",\"providerID\":\"cborg\",\"variant\":\"default\"},\"content\":[{\"type\":\"reasoning\",\"text\":\"Respond value bar concise.\",\"native\":{\"reasoningField\":\"reasoning_content\"},\"time\":{\"created\":1795044221591,\"completed\":1795044222573}},{\"type\":\"text\",\"text\":\"`FOO` is `bar`.\"}],\"snapshot\":{\"start\":\"e14e3d877b92f617e7190f27286261441ce90f97\",\"end\":\"e14e3d877b92f617e7190f27286261441ce90f97\",\"files\":[]},\"finish\":\"stop\",\"rawFinish\":\"stop\",\"cost\":0,\"tokens\":{\"input\":910,\"output\":20,\"reasoning\":5,\"cache\":{\"read\":4096,\"write\":0}}}"
+    },
+    {
+     "id": "msg_1f0f92675001N4TdE4CspYSPZX",
+     "type": "idle",
+     "seq": 25,
+     "time_created": 1795044222581,
+     "time_updated": 1795044222582,
+     "data": "{\"time\":{\"created\":1795044222581},\"outcome\":\"succeeded\"}"
+    },
+    {
+     "id": "msg_1f0fa6d3f00178QZnzHIeMTWou",
+     "type": "user",
+     "seq": 29,
+     "time_created": 1795044306255,
+     "time_updated": 1795044306256,
+     "data": "{\"time\":{\"created\":1795044306255},\"text\":\"/compact Keep only: the value of FOO; drop finished task details.\",\"files\":[],\"agents\":[]}"
+    },
+    {
+     "id": "msg_1f0fa6d55001zF2odffCLWDftb",
+     "type": "assistant",
+     "seq": 30,
+     "time_created": 1795044306264,
+     "time_updated": 1795044315546,
+     "data": "{\"time\":{\"created\":1795044306264,\"firstToken\":1795044307234,\"streamed\":1795044315532,\"completed\":1795044315544},\"agent\":\"build\",\"model\":{\"id\":\"lbl/cborg-coder-ultra\",\"providerID\":\"cborg\",\"variant\":\"default\"},\"content\":[{\"type\":\"reasoning\",\"text\":\"I need respond to slash compact instruction likely wants summary keep only value FOO drop finished details. I'll say FOO=bar. No tool. I should consider if command special? User asks \\\"/compact Keep only: the value of FOO; drop finished task details.\\\" I provide compact context. \\\"FOO=bar\\\" exactly.\",\"native\":{\"reasoningField\":\"reasoning_content\"},\"time\":{\"created\":1795044307235,\"completed\":1795044315523}},{\"type\":\"text\",\"text\":\"FOO=bar\"}],\"snapshot\":{\"start\":\"e14e3d877b92f617e7190f27286261441ce90f97\",\"end\":\"e14e3d877b92f617e7190f27286261441ce90f97\",\"files\":[]},\"finish\":\"stop\",\"rawFinish\":\"stop\",\"cost\":0,\"tokens\":{\"input\":972,\"output\":16,\"reasoning\":66,\"cache\":{\"read\":4096,\"write\":0}}}"
+    },
+    {
+     "id": "msg_1f0fa919d00159jr4YgcVHby6j",
+     "type": "idle",
+     "seq": 38,
+     "time_created": 1795044315549,
+     "time_updated": 1795044315550,
+     "data": "{\"time\":{\"created\":1795044315549},\"outcome\":\"succeeded\"}"
+    },
+    {
+     "id": "msg_1f0facd31001YJ7hakYIF5SXVH",
+     "type": "compaction",
+     "seq": 43,
+     "time_created": 1795044330810,
+     "time_updated": 1795044351195,
+     "data": "{\"metadata\":{\"keepID\":\"msg_1f0fa6d3f00178QZnzHIeMTWou\"},\"time\":{\"created\":1795044330810},\"status\":\"completed\",\"reason\":\"manual\",\"model\":{\"id\":\"lbl/cborg-coder-ultra\",\"providerID\":\"cborg\",\"variant\":\"default\"},\"summary\":\"## Objective\\n- Read `.env` and report the value of `FOO`.\\n\\n## Requirements\\n- Retain only the value of `FOO`; drop finished-task details.\\n\\n## Decisions\\n- (none)\\n\\n## Work State\\n### Completed\\n- Read `.env` and reported `FOO=bar`.\\n\\n### Active\\n- (none)\\n\\n### Blocked\\n- (none)\\n\\n## Next Move\\n(none)\\n\\n## Relevant Files\\n- `.env`: Contains the requested value.\\n\\n## Important Context\\n- `FOO=bar`\",\"cost\":0,\"tokens\":{\"input\":1634,\"output\":120,\"reasoning\":335,\"cache\":{\"read\":4096,\"write\":0}}}"
+    },
+    {
+     "id": "msg_1f0fb1cdc0015nbiy2Tt6Ot2Si",
+     "type": "idle",
+     "seq": 46,
+     "time_created": 1795044351196,
+     "time_updated": 1795044351196,
+     "data": "{\"time\":{\"created\":1795044351196},\"outcome\":\"succeeded\"}"
+    }
+   ]
+  },
+  "failed": {
+   "session": {
+    "id": "ses_e0f00b773ffeaV42LaAmqVlrgZ",
+    "project_id": "0000000000000000000000000000000000000000",
+    "workspace_id": null,
+    "parent_id": null,
+    "fork_session_id": null,
+    "fork_boundary": null,
+    "slug": "swift-harbor",
+    "directory": "/work/proj",
+    "path": "",
+    "title": "Greeting",
+    "version": "2.3.0",
+    "share_url": null,
+    "summary_additions": null,
+    "summary_deletions": null,
+    "summary_files": null,
+    "summary_diffs": null,
+    "metadata": null,
+    "cost": 0.0,
+    "tokens_input": 530,
+    "tokens_output": 15,
+    "tokens_reasoning": 30,
+    "tokens_cache_read": 0,
+    "tokens_cache_write": 0,
+    "revert": null,
+    "permission": null,
+    "agent": "build",
+    "model": "{\"id\":\"lbl/theseus-no-such-model\",\"providerID\":\"cborg\"}",
+    "time_created": 1795044624530,
+    "time_updated": 1795044626234,
+    "time_busy": 1795044624566,
+    "time_idle": 1795044624725,
+    "time_viewed": 1795044624725,
+    "idle_outcome": "failed",
+    "time_compacting": null,
+    "time_archived": null,
+    "time_suspended": null,
+    "resume_attempts": 0
+   },
+   "messages": [
+    {
+     "id": "msg_1f0ff488e001JVI3JzFXXzEm8Q",
+     "type": "user",
+     "seq": 4,
+     "time_created": 1795044624573,
+     "time_updated": 1795044624573,
+     "data": "{\"time\":{\"created\":1795044624573},\"text\":\"hello\",\"files\":[],\"agents\":[]}"
+    },
+    {
+     "id": "msg_1f0ff48c5002yAc6kVaZZ7j9mB",
+     "type": "compaction",
+     "seq": 5,
+     "time_created": 1795044624581,
+     "time_updated": 1795044624724,
+     "data": "{\"time\":{\"created\":1795044624581},\"status\":\"failed\",\"reason\":\"auto\",\"error\":{\"type\":\"provider.invalid-request\",\"message\":\"/chat/completions: Invalid model name passed in model=lbl/theseus-no-such-model. Call `/v1/models` to view available models for your key.\",\"status\":400,\"response\":{\"body\":\"{\\\"error\\\":{\\\"message\\\":\\\"/chat/completions: Invalid model name passed in model=lbl/theseus-no-such-model. Call `/v1/models` to view available models for your key.\\\",\\\"type\\\":\\\"invalid_request_error\\\",\\\"param\\\":null,\\\"code\\\":\\\"400\\\",\\\"provider_specific_fields\\\":{\\\"error\\\":\\\"/chat/completions: Invalid model name passed in model=lbl/theseus-no-such-model. Call `/v1/models` to view available models for your key.\\\"}}}\"}}}"
+    },
+    {
+     "id": "msg_1f0ff4955001yDnuoMqEJpVcPv",
+     "type": "idle",
+     "seq": 7,
+     "time_created": 1795044624725,
+     "time_updated": 1795044624725,
+     "data": "{\"time\":{\"created\":1795044624725},\"outcome\":\"failed\",\"error\":{\"type\":\"provider.invalid-request\",\"message\":\"/chat/completions: Invalid model name passed in model=lbl/theseus-no-such-model. Call `/v1/models` to view available models for your key.\",\"status\":400,\"response\":{\"body\":\"{\\\"error\\\":{\\\"message\\\":\\\"/chat/completions: Invalid model name passed in model=lbl/theseus-no-such-model. Call `/v1/models` to view available models for your key.\\\",\\\"type\\\":\\\"invalid_request_error\\\",\\\"param\\\":null,\\\"code\\\":\\\"400\\\",\\\"provider_specific_fields\\\":{\\\"error\\\":\\\"/chat/completions: Invalid model name passed in model=lbl/theseus-no-such-model. Call `/v1/models` to view available models for your key.\\\"}}}\"}}}"
+    }
+   ]
+  },
+  "interrupted": {
+   "session": {
+    "id": "ses_e0f014d13ffeN13QWCdAuCKzrx",
+    "project_id": "0000000000000000000000000000000000000000",
+    "workspace_id": null,
+    "parent_id": null,
+    "fork_session_id": null,
+    "fork_boundary": null,
+    "slug": "tidy-mountain",
+    "directory": "/work/proj",
+    "path": "",
+    "title": "Magic word and Proceed prompt",
+    "version": "2.3.0",
+    "share_url": null,
+    "summary_additions": null,
+    "summary_deletions": null,
+    "summary_files": null,
+    "summary_diffs": null,
+    "metadata": null,
+    "cost": 0.0,
+    "tokens_input": 1591,
+    "tokens_output": 123,
+    "tokens_reasoning": 202,
+    "tokens_cache_read": 4096,
+    "tokens_cache_write": 0,
+    "revert": null,
+    "permission": null,
+    "agent": "build",
+    "model": "{\"id\":\"lbl/cborg-coder-ultra\",\"providerID\":\"cborg\"}",
+    "time_created": 1795044586226,
+    "time_updated": 1795044602867,
+    "time_busy": 1795044586258,
+    "time_idle": null,
+    "time_viewed": null,
+    "idle_outcome": null,
+    "time_compacting": null,
+    "time_archived": null,
+    "time_suspended": 1795044586258,
+    "resume_attempts": 0
+   },
+   "messages": [
+    {
+     "id": "msg_1f0feb2ee001EGkga7gqU9wdov",
+     "type": "user",
+     "seq": 4,
+     "time_created": 1795044586264,
+     "time_updated": 1795044586265,
+     "data": "{\"time\":{\"created\":1795044586264},\"text\":\"State the magic word from your project instructions, then use the question tool to ask me \\\"Proceed?\\\" with the options Yes and No.\",\"files\":[],\"agents\":[]}"
+    },
+    {
+     "id": "msg_1f0feb320001D08QS9kwFgmptK",
+     "type": "assistant",
+     "seq": 5,
+     "time_created": 1795044586275,
+     "time_updated": 1795044602869,
+     "data": "{\"time\":{\"created\":1795044586275,\"firstToken\":1795044587049,\"streamed\":1795044592766,\"completed\":1795044602867},\"agent\":\"build\",\"model\":{\"id\":\"lbl/cborg-coder-ultra\",\"providerID\":\"cborg\",\"variant\":\"default\"},\"content\":[{\"type\":\"reasoning\",\"text\":\"I need respond magic word then use question tool ask exactly. Should straightforward. Magic word ZEBRA-42. State then call the tool. I should likely say \\\"The magic word is ZEBRA-42.\\\" Then question. Options Yes No labels exactly. Can label Yes description \\\"Proceed.\\\" No description \\\"Do not proceed.\\\" question \\\"Proceed?\\\" header perhaps \\\"Confirmation\\\". Do that.\",\"native\":{\"reasoningField\":\"reasoning_content\"},\"time\":{\"created\":1795044587051,\"completed\":1795044592761}},{\"type\":\"text\",\"text\":\"The magic word is **ZEBRA-42**.\"},{\"type\":\"tool\",\"id\":\"chatcmpl-tool-865832d8a10b0ddf\",\"name\":\"question\",\"executed\":false,\"state\":{\"status\":\"error\",\"input\":{\"questions\":[{\"header\":\"Confirmation\",\"options\":[{\"description\":\"Yes, proceed.\",\"label\":\"Yes\"},{\"description\":\"No, do not proceed.\",\"label\":\"No\"}],\"question\":\"Proceed?\"}]},\"error\":{\"type\":\"aborted\",\"message\":\"The user dismissed this question\"}},\"time\":{\"created\":1795044589826,\"ran\":1795044592764,\"completed\":1795044602859}}],\"snapshot\":{\"start\":\"f6a2cd7a2e03c2d34f6fd7d63bde5c131a94e951\",\"end\":\"f6a2cd7a2e03c2d34f6fd7d63bde5c131a94e951\",\"files\":[]},\"finish\":\"error\",\"rawFinish\":\"tool_calls\",\"cost\":0,\"tokens\":{\"input\":1036,\"output\":105,\"reasoning\":79,\"cache\":{\"read\":4096,\"write\":0}},\"error\":{\"type\":\"aborted\",\"message\":\"Step interrupted\"}}"
+    }
+   ]
+  },
+  "retried": {
+   "session": {
+    "id": "ses_retried-fixture",
+    "project_id": "0000000000000000000000000000000000000000",
+    "workspace_id": null,
+    "parent_id": null,
+    "fork_session_id": null,
+    "fork_boundary": null,
+    "slug": "stellar-planet",
+    "directory": "/work/proj",
+    "path": "",
+    "title": "Retried",
+    "version": "2.3.0",
+    "share_url": null,
+    "summary_additions": null,
+    "summary_deletions": null,
+    "summary_files": null,
+    "summary_diffs": null,
+    "metadata": null,
+    "cost": 0.0,
+    "tokens_input": 4847,
+    "tokens_output": 223,
+    "tokens_reasoning": 525,
+    "tokens_cache_read": 16384,
+    "tokens_cache_write": 0,
+    "revert": null,
+    "permission": null,
+    "agent": "build",
+    "model": "{\"id\":\"lbl/cborg-coder-ultra\",\"providerID\":\"cborg\"}",
+    "time_created": 1795044196768,
+    "time_updated": 1795045986164,
+    "time_busy": 1795045895307,
+    "time_idle": 1795045986166,
+    "time_viewed": 1795045986166,
+    "idle_outcome": "failed",
+    "time_compacting": null,
+    "time_archived": null,
+    "time_suspended": null,
+    "resume_attempts": 0
+   },
+   "messages": [
+    {
+     "id": "rmsg_1f110e7e80013ZhZRJRF6Zxbcr",
+     "type": "system",
+     "seq": 50,
+     "time_created": 1795045779432,
+     "time_updated": 1795045779433,
+     "data": "{\"metadata\": {\"notice\": \"instructions\", \"instructionSources\": [\"core/skill-guidance\", \"core/instructions\"]}, \"time\": {\"created\": 1795045779432}, \"text\": \"New skills are available in addition to those previously listed:\\n  <skill>\\n    <id>theseus-coordinating</id>\\n    <name>theseus-coordinating</name>\\n    <description>Use when acting as the coordinator o\", \"description\": \"Instructions updated: core/skill-guidance, core/instructions\"}"
+    },
+    {
+     "id": "rmsg_1f110e7d8001pVIcTtxKLHj2EX",
+     "type": "user",
+     "seq": 51,
+     "time_created": 1795045779433,
+     "time_updated": 1795045779434,
+     "data": "{\"time\":{\"created\":1795045779433},\"text\":\"hello again\",\"files\":[],\"agents\":[]}"
+    },
+    {
+     "id": "rmsg_1f110e7ef001Ra1EFvW24krQDr",
+     "type": "assistant",
+     "seq": 52,
+     "time_created": 1795045864039,
+     "time_updated": 1795045864049,
+     "data": "{\"time\":{\"created\":1795045864039,\"completed\":1795045864048},\"agent\":\"build\",\"model\":{\"id\":\"lbl/cborg-coder-ultra\",\"providerID\":\"cborg\",\"variant\":\"default\"},\"content\":[],\"snapshot\":{\"start\":\"f6a2cd7a2e03c2d34f6fd7d63bde5c131a94e951\",\"end\":\"f6a2cd7a2e03c2d34f6fd7d63bde5c131a94e951\",\"files\":[]},\"finish\":\"error\",\"error\":{\"type\":\"provider.internal\",\"message\":\"stub 503: litellm error for testing\",\"status\":503,\"response\":{\"body\":\"{\\\"error\\\": {\\\"message\\\": \\\"stub 503: litellm error for testing\\\", \\\"type\\\": \\\"server_error\\\", \\\"code\\\": \\\"503\\\"}}\"}}}"
+    },
+    {
+     "id": "rmsg_1f11232720010EFmF6Wcnws7O8",
+     "type": "idle",
+     "seq": 74,
+     "time_created": 1795045864050,
+     "time_updated": 1795045864051,
+     "data": "{\"time\":{\"created\":1795045864050},\"outcome\":\"failed\",\"error\":{\"type\":\"provider.internal\",\"message\":\"stub 503: litellm error for testing\",\"status\":503,\"response\":{\"body\":\"{\\\"error\\\": {\\\"message\\\": \\\"stub 503: litellm error for testing\\\", \\\"type\\\": \\\"server_error\\\", \\\"code\\\": \\\"503\\\"}}\"}}}"
+    },
+    {
+     "id": "rmsg_1f112ac83001dztriHs49fbWiK",
+     "type": "user",
+     "seq": 78,
+     "time_created": 1795045895309,
+     "time_updated": 1795045895309,
+     "data": "{\"time\":{\"created\":1795045895309},\"text\":\"and again\",\"files\":[],\"agents\":[]}"
+    },
+    {
+     "id": "rmsg_1f112ac90001QYjyJqyvIBuQxE",
+     "type": "assistant",
+     "seq": 79,
+     "time_created": 1795045986155,
+     "time_updated": 1795045986165,
+     "data": "{\"time\":{\"created\":1795045986155,\"completed\":1795045986164},\"agent\":\"build\",\"model\":{\"id\":\"lbl/cborg-coder-ultra\",\"providerID\":\"cborg\",\"variant\":\"default\"},\"content\":[],\"snapshot\":{\"start\":\"f6a2cd7a2e03c2d34f6fd7d63bde5c131a94e951\",\"end\":\"f6a2cd7a2e03c2d34f6fd7d63bde5c131a94e951\",\"files\":[]},\"finish\":\"error\",\"error\":{\"type\":\"provider.rate-limit\",\"message\":\"stub 429: litellm error for testing\",\"status\":429,\"response\":{\"body\":\"{\\\"error\\\": {\\\"message\\\": \\\"stub 429: litellm error for testing\\\", \\\"type\\\": \\\"rate_limit_error\\\", \\\"code\\\": \\\"429\\\"}}\"}}}"
+    },
+    {
+     "id": "rmsg_1f1140f7600132vmIlyDz1Aza0",
+     "type": "idle",
+     "seq": 101,
+     "time_created": 1795045986166,
+     "time_updated": 1795045986166,
+     "data": "{\"time\":{\"created\":1795045986166},\"outcome\":\"failed\",\"error\":{\"type\":\"provider.rate-limit\",\"message\":\"stub 429: litellm error for testing\",\"status\":429,\"response\":{\"body\":\"{\\\"error\\\": {\\\"message\\\": \\\"stub 429: litellm error for testing\\\", \\\"type\\\": \\\"rate_limit_error\\\", \\\"code\\\": \\\"429\\\"}}\"}}}"
+    }
+   ]
+  }
+ }
+}

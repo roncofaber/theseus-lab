@@ -3,6 +3,10 @@
 A profile describes one agent CLI:
 - headless: the argument template of a one-shot run (`theseus dispatch`); None means the coordinator launches the
   worker itself (a Claude Code subagent) and theseus only prepares the worktree and prompt;
+- session_prefix: what a preassigned session id starts with (OpenCode: `ses_`);
+- model_env: environment that carries the model when one is set, for a CLI whose interactive mode has no model flag;
+- mcp_format and mcp_env: the MCP config file's format ("claude", "opencode") and, for a CLI with no MCP flag, the
+  environment variables that name the file ({mcp_config});
 - resume: the template that continues a run with a follow-up message (`theseus followup`, gateway retries);
 - session: "preassign" when the CLI accepts a session ID chosen by theseus, "none" otherwise;
 - env, model_flag, permission_mode: how the model and permissions are passed;
@@ -34,6 +38,7 @@ import os
 import re
 import shlex
 import shutil
+import uuid
 from pathlib import Path
 
 CLAUDE_INTERACTIVE = {
@@ -64,6 +69,35 @@ CLAUDE_INTERACTIVE = {
                         "New MCP server found"],
     "paste_placeholder": r"\[Pasted text #\d+",
     "prompt_patterns": [r"[>\u276f]\s*1\.\s*Yes\b"],
+}
+
+# The OpenCode TUI draws every input and dialog row behind a left bar (U+2503) and puts the sidebar on the same rows, so
+# the input line is a barred row of text that is not the agent and model row (`Build · Model Provider`) or the empty
+# prompt's placeholder; text after a run of four or more spaces is the sidebar. A failed turn is an `Error:` row above
+# the turn's footer, which then ends at its duration, where an answer's footer goes on with its token rate.
+OPENCODE_INTERACTIVE = {
+    "launch": "{command} --standalone",
+    "resume": "{launch} --session {session}",
+    "resume_missing": "",
+    "busy_pattern": "esc interrupt",
+    "stall_patterns": [],
+    "gateway_patterns": [r"(?m)^\s+Error: .*(?:\n.*){0,8}?\n\s+\S+ \u00b7 [^\u00b7\n]+ \u00b7 (?:\d+m )?\d+(?:\.\d+)?m?s(?:\s{4,}\S.*)?$"],
+    "gateway_ready": "",
+    "context_pattern": r"\b([0-9.]+)(K?) \(\d+%\)",
+    "input_pattern": "^\\s*┃  (?!\\S+ · |Ask anything…)(\\S.*?)(?:\\s{4,}\\S.*)?$",
+    "clear_input": "C-u",
+    "env": {},
+    "compact": "/compact",
+    "clear": "/clear",
+    "sessions_dir": "",
+    "transcript": "opencode-sqlite",
+    "messaging": False,
+    "exit": "/exit",
+    "session_flag": "--session",
+    "ready_pattern": r"ctrl\+p commands",
+    "startup_dialogs": [],
+    "prompt_patterns": [r"Allow once\s+Always allow\s+Reject", r"⇆ select\s+enter confirm",
+                        r"enter submit\s+esc dismiss"],
 }
 
 PRESETS = {
@@ -121,21 +155,30 @@ PRESETS = {
                         "transcript": "pane-history"},
     },
     "opencode": {
-        "label": "OpenCode (opencode run)",
-        "verified": False,
+        "label": "OpenCode, each agent on its own private server (opencode --standalone)",
+        "verified": True,
+        "notes": "OpenCode 2.3.0 supervised in tmux: busy, permission and question prompts, /compact, /clear, /exit, "
+                 "resume by --session, MCP through OPENCODE_CONFIG, the SQLite transcript, and 429 and 503 from a stub "
+                 "provider after OpenCode's own retries; the headless run was exercised by hand, not through dispatch",
         "command": "opencode",
-        "headless": ["{command}", "run", "--format", "json", "--session", "{session}", "{model_args}", "{prompt}"],
-        "resume": ["{command}", "run", "--format", "json", "--session", "{session}", "{model_args}", "{message}"],
+        "headless": ["{command}", "run", "--standalone", "--format", "json", "--session", "{session}", "{model_args}",
+                     "{prompt}"],
+        "resume": ["{command}", "run", "--standalone", "--format", "json", "--session", "{session}", "{model_args}",
+                   "{message}"],
         "session": "preassign",
+        "session_prefix": "ses_",
         "model_flag": "--model",
         "model": "",
+        "model_env": {"OPENCODE_CONFIG_CONTENT": '{"model": "{model}"}'},
         "permission_mode": "",
-        "env": {},
+        "env": {"OPENCODE_DISABLE_AUTOUPDATE": "1"},
         "retry": False,
         "capacity": 2,
-        "interactive": {"launch": "opencode", "resume": "", "busy_pattern": "", "compact": "/compact", "clear": "/new",
-                        "sessions_dir": "", "messaging": False,
-                        "transcript": "pane-history"},
+        "interactive": OPENCODE_INTERACTIVE,
+        "mcp_servers": None,
+        "mcp_flags": [],
+        "mcp_format": "opencode",
+        "mcp_env": {"OPENCODE_CONFIG": "{mcp_config}"},
     },
     "gemini-cli": {
         "label": "Google Gemini CLI (gemini -p)",
@@ -168,7 +211,9 @@ def model_context_limit(conf, model):
     return int(table[max(matches, key=len)]) if matches else None
 DEFAULT = "claude-code"
 OVERRIDABLE = set(PRESETS["claude-code"]) | {"preset", "fallback", "pool", "mcp_servers", "mcp_flags", "extra_args",
-                                             "capability", "health"}
+                                             "capability", "health", "session_prefix", "model_env", "mcp_format",
+                                             "mcp_env"}
+MCP_FORMATS = ("claude", "opencode")
 CAPABILITY = 1
 INTERACTIVE_KEYS = set(CLAUDE_INTERACTIVE) | {"launch", "resume"}
 THESEUS_MCP = {"command": "theseus", "args": ["mcp"]}
@@ -196,6 +241,12 @@ def problems(name, section):
     capability = section.get("capability")
     if capability is not None and (isinstance(capability, bool) or not isinstance(capability, int) or capability < 0):
         found.append("capability must be a non-negative integer")
+    for key in ("model_env", "mcp_env"):
+        value = section.get(key)
+        if value is not None and not (isinstance(value, dict) and all(isinstance(v, str) for v in value.values())):
+            found.append(f"{key} must be a table of strings")
+    if section.get("mcp_format") is not None and section["mcp_format"] not in MCP_FORMATS:
+        found.append(f"mcp_format must be one of {', '.join(MCP_FORMATS)}")
     preset = section.get("preset")
     if preset is not None and preset not in PRESETS:
         found.append(f"preset {preset!r} is not a preset; presets: {', '.join(sorted(PRESETS))}")
@@ -287,9 +338,18 @@ def render(template, profile, **values):
     return argv
 
 
+def new_session(profile):
+    """A fresh conversation id for a profile that preassigns one: a UUID after the profile's session_prefix (OpenCode
+    takes only ids that start with `ses`)."""
+    return f"{profile.get('session_prefix') or ''}{uuid.uuid4()}"
+
+
 def env(profile, model=None):
+    """The profile's env with {model} filled, plus model_env when a model is set (for a CLI whose interactive mode has
+    no model flag)."""
     model = model if model is not None else profile.get("model") or ""
-    return {k: fill(v, {"model": model}) for k, v in (profile.get("env") or {}).items()}
+    variables = {**(profile.get("env") or {}), **((profile.get("model_env") or {}) if model else {})}
+    return {k: fill(v, {"model": model}) for k, v in variables.items()}
 
 
 def mcp_config(conf, profile, agent=None, credentials=None, role=None):
@@ -298,7 +358,8 @@ def mcp_config(conf, profile, agent=None, credentials=None, role=None):
     Claude Code configuration; "theseus" is the theseus MCP server. With theseus listed the file is per agent, and its
     theseus entry names the agent's credentials file in `env`: some clients (Codex, the MCP SDK's own) pass a stdio
     server only an allow list of the environment plus that entry. role "coordinator" writes the supervised
-    coordinator's own file instead, whose theseus entry passes --role coordinator and names no credentials."""
+    coordinator's own file instead, whose theseus entry passes --role coordinator and names no credentials. In
+    OpenCode's format (mcp_format) the file also disables the user's global OpenCode servers it does not list."""
     names = profile.get("mcp_servers")
     if names is None:
         return None
@@ -325,19 +386,69 @@ def mcp_config(conf, profile, agent=None, credentials=None, role=None):
         path = conf.data / "mcp" / (f"{profile['name']}/{agent}.json" if "theseus" in names and agent else
                                     f"{profile['name']}.json")
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps({"mcpServers": servers}, indent=2) + "\n"
+    if profile.get("mcp_format") == "opencode":
+        entries = {name: opencode_server(server) for name, server in servers.items()}
+        entries.update({name: dict(OPENCODE_DISABLED) for name in opencode_servers() if name not in entries})
+        document = {"mcp": {"servers": entries}}
+    else:
+        document = {"mcpServers": servers}
+    text = json.dumps(document, indent=2) + "\n"
     if not path.exists() or path.read_text() != text:
         path.write_text(text)
     return path
+
+
+OPENCODE_DISABLED = {"type": "local", "command": ["true"], "disabled": True}
+JSONC_COMMENT = re.compile(r'("(?:\\.|[^"\\])*")|//[^\n]*|/\*.*?\*/', re.S)
+JSONC_COMMA = re.compile(r'("(?:\\.|[^"\\])*")|,(?=\s*[}\]])')
+
+
+def opencode_servers():
+    """Names of the MCP servers in the user's global OpenCode configuration. OpenCode merges a profile's MCP file over
+    it and ignores a partial entry, so the file disables each server it leaves out with a complete one."""
+    root = Path(os.environ.get("OPENCODE_CONFIG_DIR") or
+                Path(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")) / "opencode")
+    names = set()
+    for file in ("config.json", "opencode.json", "opencode.jsonc"):
+        try:
+            text = JSONC_COMMENT.sub(lambda m: m.group(1) or "", (root / file).read_text())
+            data = json.loads(JSONC_COMMA.sub(lambda m: m.group(1) or "", text))
+        except (OSError, ValueError):
+            continue
+        servers = ((data.get("mcp") or {}) if isinstance(data, dict) else {}).get("servers")
+        names |= set(servers) if isinstance(servers, dict) else set()
+    return sorted(names)
+
+
+def opencode_server(server):
+    """A Claude Code MCP server definition in OpenCode's form: a local command list with `environment`, or a remote
+    URL with `headers`."""
+    if server.get("url"):
+        return {"type": "remote", "url": server["url"], **({"headers": server["headers"]} if server.get("headers") else {})}
+    return {"type": "local", "command": [server.get("command") or "", *(server.get("args") or [])],
+            **({"environment": server["env"]} if server.get("env") else {})}
 
 
 def mcp_args(conf, profile, agent=None, credentials=None, role=None):
     path = mcp_config(conf, profile, agent, credentials, role) if conf is not None else None
     if path is None:
         return []
-    if not profile.get("mcp_flags"):
-        raise ProfileError(f"profile {profile['name']} sets mcp_servers but its CLI has no mcp_flags")
-    return [fill(flag, {"mcp_config": str(path)}) for flag in profile["mcp_flags"]]
+    if not profile.get("mcp_flags") and not profile.get("mcp_env"):
+        raise ProfileError(f"profile {profile['name']} sets mcp_servers but its CLI has no mcp_flags or mcp_env")
+    return [fill(flag, {"mcp_config": str(path)}) for flag in profile.get("mcp_flags") or []]
+
+
+def mcp_environment(conf, profile, agent=None, credentials=None, role=None):
+    """The mcp_env variables that name the MCP config for a CLI that reads it from its environment (OpenCode:
+    OPENCODE_CONFIG), or {}."""
+    if not profile.get("mcp_env") or conf is None:
+        return {}
+    path = mcp_config(conf, profile, agent, credentials, role)
+    return {k: fill(v, {"mcp_config": str(path)}) for k, v in profile["mcp_env"].items()} if path else {}
+
+
+def env_prefix(variables):
+    return ["env", *(f"{k}={v}" for k, v in variables.items())] if variables else []
 
 
 def agent_credentials(conf, agent):
@@ -359,8 +470,8 @@ def launch_argv(profile, prompt, session, model, conf=None, agent=None, credenti
     argv = render(profile.get("headless"), profile, prompt=prompt, session=session, model=model)
     if not argv:
         return argv
-    return argv + mcp_args(conf, profile, agent, credentials) + extra_args(profile, prompt=prompt, session=session,
-                                                                           model=model)
+    return (env_prefix(mcp_environment(conf, profile, agent, credentials)) + argv
+            + mcp_args(conf, profile, agent, credentials) + extra_args(profile, prompt=prompt, session=session, model=model))
 
 
 def resume_template(profile, session, model, conf=None):
@@ -368,7 +479,8 @@ def resume_template(profile, session, model, conf=None):
     argv = render(profile.get("resume"), profile, session=session, model=model, message="{message}")
     if not argv:
         return argv
-    return argv + mcp_args(conf, profile) + extra_args(profile, session=session, model=model, message="{message}")
+    return (env_prefix(mcp_environment(conf, profile)) + argv + mcp_args(conf, profile)
+            + extra_args(profile, session=session, model=model, message="{message}"))
 
 
 EMPTY_OPTION = re.compile(r" --?[\w-]+ \{(\w+)\}")
@@ -394,9 +506,9 @@ def interactive_env(profile):
 
 
 def interactive_launch(conf, profile, agent=None):
-    """The command line that starts a persistent instance: `env VAR=value ...` for the profile's env and
+    """The command line that starts a persistent instance: `env VAR=value ...` for the profile's env, its MCP env and
     interactive.env, the launch template, the MCP flags, then extra_args."""
-    variables = {**env(profile), **interactive_env(profile)}
+    variables = {**env(profile), **mcp_environment(conf, profile), **interactive_env(profile)}
     prefix = "env " + " ".join(shlex.quote(f"{k}={v}") for k, v in variables.items()) if variables else ""
     extra = shlex.join(extra_args(profile, agent=agent))
     return " ".join(filter(None, [prefix, launch_template(conf, profile, agent), shlex.join(mcp_args(conf, profile)), extra]))
@@ -404,10 +516,14 @@ def interactive_launch(conf, profile, agent=None):
 
 def interactive_parts(conf, profile, agent):
     """The parts of a supervised instance's launch, before any session arguments: launch (the filled template as an
-    argument list), mcp (the MCP flags), extra (extra_args), env (the profile's env) and interactive_env."""
+    argument list), mcp (the MCP flags), extra (extra_args), env (the profile's env and its MCP env) and
+    interactive_env."""
+    credentials = agent_credentials(conf, agent)
     parts = {"launch": shlex.split(launch_template(conf, profile, agent)),
-             "mcp": mcp_args(conf, profile, agent, agent_credentials(conf, agent)),
-             "extra": extra_args(profile, agent=agent), "env": env(profile), "interactive_env": interactive_env(profile)}
+             "mcp": mcp_args(conf, profile, agent, credentials),
+             "extra": extra_args(profile, agent=agent), "env": {**env(profile), **mcp_environment(conf, profile, agent,
+                                                                                                   credentials)},
+             "interactive_env": interactive_env(profile)}
     if not parts["launch"]:
         raise ProfileError(f"profile {profile.get('name')} has no launch command")
     return parts

@@ -1,0 +1,49 @@
+ ! Single-word pong reply        +
+
+  ┃                                                                                                                                                                                 Single-word pong reply
+  ┃  Reply with the single word pong and nothing else.
+  ┃                                                                                                                                                                                 Context
+                                                                                                                                                                                    6,963 tokens
+     + 1 thought                                                                                                                                                                    3% used
+
+     pong                                                                                                                                                                           MCP
+                                                                                                                                                                                    • theseus                   Connected
+     Build · CBorg Coder Ultra · 1.8s · 49.7 tok/s · 542ms ttft
+
+  ┃
+  ┃  Use the read tool to read the file .env in this directory, then tell me the value of FOO.
+  ┃
+
+     + 1 thought
+     ⠼ Read .env
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                                                                                                      ⬖ Getting started                ✕
+
+                                                                                                                                                                                        OpenCode includes free models so
+                                                                                                                                                                                        you can start immediately.
+  ┃
+  ┃  △ Permission required                                                                                                                                                              Connect from 75+ providers to
+  ┃    → Read .env                                                                                                                                                                      use other models, including
+  ┃                                                                                                                                                                                     Claude, GPT, Gemini etc
+  ┃  Path: .env
+  ┃                                                                                                                                                                                     Connect provider        /connect
+  ┃
+  ┃   Allow once   Always allow   Reject                                                                                           ctrl+f fullscreen  ⇆ select  enter confirm
+  ┃                                                                                                                                                                                 /work/proj:main

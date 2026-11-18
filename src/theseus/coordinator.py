@@ -17,7 +17,6 @@ import shlex
 import shutil
 import sys
 import time
-import uuid
 from importlib import resources
 
 from . import store
@@ -109,7 +108,8 @@ def launch(conf, profile_name, session_id=None, resume=False):
     agent = f"{conf.name}-{NAME}"
     parts = {"launch": shlex.split(profiles.launch_template(conf, profile, agent)),
              "mcp": profiles.mcp_args(conf, profile, NAME, role="coordinator"),
-             "extra": profiles.extra_args(profile, agent=agent), "env": profiles.env(profile),
+             "extra": profiles.extra_args(profile, agent=agent),
+             "env": {**profiles.env(profile), **profiles.mcp_environment(conf, profile, NAME, role="coordinator")},
              "interactive_env": profiles.interactive_env(profile)}
     if not parts["launch"]:
         raise CoordinatorError(f"profile {profile_name} has no launch command")
@@ -168,11 +168,11 @@ def event(conf, kind, detail):
 def spawn(conf, profile, intent, session_id=None, srv=None):
     """Start (or respawn) the coordinator's pane; session_id resumes that conversation, otherwise a new one starts
     and owes the start prompt."""
-    from . import supervisor, tmuxconf
+    from . import profiles, supervisor, tmuxconf
     srv = srv or server()
     supervisor.ensure_conf(srv)
     resume = bool(session_id)
-    session_id = session_id or str(uuid.uuid4())
+    session_id = session_id or profiles.new_session(profiles.resolve(conf, profile))
     launch(conf, profile, session_id, resume)
     target = session(conf)
     with store.for_project(conf) as conn:
