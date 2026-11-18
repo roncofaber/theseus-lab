@@ -264,6 +264,11 @@ class SupervisorTests(Sandbox):
         self.assertRegex(out, r"demo-fake-1\s+kept")
         self.assertTrue((self.tmp / "data/agents/demo-fake-1/crash-1.txt").exists())
         self.assertTrue(self.events("exited"))
+        refused = self.theseus("agents", "remove", "demo-fake-2", check=False)
+        self.assertIn("is running", refused.stderr)
+        self.theseus("agents", "down", "demo-fake-2")
+        self.wait_for(lambda: self.runs("demo-fake-2")[-1].get("ended"), message="demo-fake-2 to stop")
+        self.assertIn("removed demo-fake-2", self.theseus("agents", "remove", "demo-fake-2").stdout)
         sessions = self.tmp / "claude/sessions"
         sessions.mkdir(parents=True)
         self.replace_config("status_command = []", f'status_command = []\nsessions_dir = "{sessions}"')

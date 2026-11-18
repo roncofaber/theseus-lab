@@ -554,8 +554,18 @@ def cmd_agents(args):
     try:
         if action in ("add", "remove"):
             from . import supervisor
-            if supervisor.managed(conf) and (args.name in {w["name"] for w in supervisor.desired(conf)}
-                                             or (supervisor.record(conf, args.name) or {}).get("managed")):
+            rec = supervisor.record(conf, args.name) or {}
+            supervised = supervisor.managed(conf) and (args.name in {w["name"] for w in supervisor.desired(conf)}
+                                                        or rec.get("managed"))
+            if supervised and action == "remove" and rec:
+                if agents.current_task(conf, args.name):
+                    sys.exit(f"theseus: {args.name} holds a task; release it first (theseus tasks release ID)")
+                info = supervisor.pane_info(supervisor.server_of(rec), rec["target"]) if rec.get("target") else None
+                if info and info.get("pane_dead") == "0":
+                    sys.exit(f"theseus: {args.name} is running; stop it first (theseus agents down {args.name})")
+                if rec.get("target") and supervisor.server_of(rec).has_session(rec["target"]):
+                    supervisor.server_of(rec).kill_session(rec["target"])
+            elif supervised:
                 sys.exit(f"theseus: {args.name} is a supervised agent; edit [agents] in {cfg.LOCAL_NAME} and run "
                          f"`theseus agents up`")
         if action == "add":
