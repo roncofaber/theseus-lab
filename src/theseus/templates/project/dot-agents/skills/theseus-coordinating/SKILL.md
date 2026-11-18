@@ -58,7 +58,7 @@ Take the first action whose trigger holds, then loop. Occupied slots are never a
 
 1. On a subagent handback, stop the agent. Read the handoff and `theseus tasks check-delivery ID`. Anything OUTSIDE is rejected or moved to a patch, never merged silently.
 2. Check claims against code and evidence: cited lines, evidence IDs in the bundles, tests that assert independently derived values.
-3. `theseus merge ID` applies the delivery three-way with the worker's patches, regenerates the indexes and commits exactly the touched paths; any conflict restores main. It refuses a worktree whose HEAD moved.
+3. `theseus merge ID` applies the delivery three-way with the worker's patches, regenerates the indexes and commits exactly the touched paths; any conflict restores main (then `theseus tasks rebase ID`). It refuses worker commits.
 4. `theseus build` and `theseus smoke`; record the outcome.
 5. Runtime evidence is separate: `theseus tasks observe ID --how "..."` after you saw it work in the running application; `--user` after the user tested it.
 6. `theseus tasks complete ID --log PATH --check "cmd -> outcome" --summary "..."` (or `--from-log` with a passing `theseus verify` log), then `theseus tasks archive` and `theseus tasks retire ID`.

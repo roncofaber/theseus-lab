@@ -17,7 +17,7 @@ You implement one task inside its owned paths and hand back evidence. The coordi
 ## While working
 
 - Edit only owned paths. If the work needs a change elsewhere, save it as a `git diff` in `$LOG_DIR/patches/NN-name.patch` (it must pass `git apply --check` on your base) and list it in the handoff.
-- Never commit, never `git stash` (the stash list is shared by every worktree), never push. The coordinator's merge refuses a worktree whose HEAD moved.
+- Never commit, never `git stash` (the stash list is shared by every worktree), never push, never move HEAD (no reset to main followed by copying files back). When main moves under you, the coordinator runs `theseus tasks rebase`, which replays your uncommitted edits and may leave conflict markers for you to resolve.
 - Implement the general contract over representative variations of the original's inputs; a single device, file or scenario is a fixture.
 - Recover before you implement: the decompiled original, its data and recorded traffic first. Never invent behavior to fill a gap; return an explicit unsupported result and record what evidence would resolve it.
 - Never kill processes by pattern (`pkill`, `killall`); stop only PIDs you started. Never print the environment (`env`, `printenv`, `set`): it holds credentials.

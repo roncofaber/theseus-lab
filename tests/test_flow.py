@@ -161,6 +161,70 @@ class TaskFlowTests(Sandbox):
         self.assertEqual("MAIN = 1\n", (self.project / "src/capture/header.py").read_text())
         self.assertFalse((self.project / "README.md").exists())
         self.assertEqual("in_progress", self.record()["status"])
+        moved = self.git("log", "-1", "--format=%h main moved").stdout.strip()
+        for expected in ("src/capture/header.py: changed on main since the worktree base", moved, "<<<<<<< main",
+                         "MAIN = 1", "return data[:4]", ">>>>>>> worker", f"theseus tasks rebase {TASK}"):
+            self.assertIn(expected, result.stderr)
+
+    def test_an_owned_file_main_changed_after_the_base_merges_three_way(self):
+        lines = "".join(f"line {n}\n" for n in range(1, 13))
+        mine = lines.replace("line 10\n", "line 10 from the worker\n")
+        both = lines.replace("line 1\n", "line 1 from main\n").replace("line 10\n", "line 10 from the worker\n")
+        for task_id, name in ((TASK, "a"), ("parse-capture-footer", "b")):
+            self.write("src/capture/header.py", lines)
+            self.git("add", "-A")
+            self.git("commit", "-q", "-m", "header")
+            self.add_task(task_id, owned=("src/capture/header.py", f"docs/investigations/{task_id}.md"))
+            self.theseus("instance", "assign", task_id, "worker-1", name)
+            worktree = self.tmp / f"worktrees/worker-1-{name}"
+            self.write("src/capture/header.py", lines.replace("line 1\n", "line 1 from main\n"))
+            self.git("commit", "-q", "-am", "main edits line 1")
+            self.write(".theseus/handoff.md", f"Task: {task_id}\nResult: delivered\n", root=worktree)
+            if name == "b":
+                # The worker moved HEAD to main and copied its whole file back from the old base.
+                self.git("reset", "-q", "--hard", "main", cwd=worktree)
+            self.write("src/capture/header.py", mine, root=worktree)
+            merge = self.theseus("merge", task_id).stdout
+            self.assertEqual(both, (self.project / "src/capture/header.py").read_text())
+            self.assertEqual("", self.git("status", "--porcelain").stdout)
+        self.assertIn("moved from the base", merge)
+
+    def test_rebase_replays_uncommitted_edits_onto_main(self):
+        lines = "".join(f"line {n}\n" for n in range(1, 13))
+        self.write("src/capture/header.py", lines)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "header")
+        self.add_task()
+        self.theseus("instance", "assign", TASK, "worker-1", "a")
+        worktree = self.tmp / "worktrees/worker-1-a"
+        self.write("src/capture/header.py", lines.replace("line 1\n", "line 1 from main\n"))
+        self.git("commit", "-q", "-am", "main edits line 1")
+        self.deliver(worktree)
+        self.write("src/capture/header.py", lines.replace("line 10\n", "line 10 from the worker\n"), root=worktree)
+        self.theseus("tasks", "rebase", TASK)
+        head = self.git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        self.assertEqual(head, self.git("rev-parse", "--short=12", "HEAD", cwd=worktree).stdout.strip())
+        self.assertEqual(head, self.record()["baseCommit"])
+        self.assertEqual(lines.replace("line 1\n", "line 1 from main\n").replace("line 10\n", "line 10 from the worker\n"),
+                         (worktree / "src/capture/header.py").read_text())
+
+        self.git("commit", "-q", "-am", "record the rebase")
+        self.write("src/capture/header.py", lines.replace("line 10\n", "line 10 from main\n"))
+        self.git("commit", "-q", "-am", "main edits line 10")
+        refused = self.theseus("tasks", "rebase", TASK, check=False)
+        self.assertEqual(3, refused.returncode, refused.stdout + refused.stderr)
+        self.assertIn("src/capture/header.py hold conflict markers", refused.stderr)
+        text = (worktree / "src/capture/header.py").read_text()
+        for expected in ("<<<<<<< Updated upstream", "line 10 from main", "line 10 from the worker", ">>>>>>> Stashed changes"):
+            self.assertIn(expected, text)
+        self.assertTrue((worktree / f"docs/investigations/{TASK}.md").exists())
+        self.assertEqual(head, self.record()["baseCommit"])
+        refused = self.theseus("merge", TASK, check=False)
+        self.assertIn("still holds the conflict markers", refused.stderr)
+        self.write("src/capture/header.py", lines.replace("line 10\n", "line 10 from main and the worker\n"), root=worktree)
+        self.theseus("merge", TASK)
+        self.assertIn("line 10 from main and the worker", (self.project / "src/capture/header.py").read_text())
+        self.assertEqual("", self.git("stash", "list").stdout)
 
     def test_a_deleted_file_is_in_the_merge_commit_and_completes(self):
         self.write("src/capture/old.py", "OLD = 1\n")

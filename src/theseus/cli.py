@@ -1032,8 +1032,9 @@ def build_parser():
     p.add_argument("id")
     p.add_argument("--reason", default="merge reverted")
     p.add_argument("--no-revert", action="store_true", help="the merge is already reverted; only update the record")
-    p = ts.add_parser("rebase", help="record the worktree HEAD as the task base after the worker rebased onto the base "
-                                     "branch; refuses when the worker committed")
+    p = ts.add_parser("rebase", help="bring the worktree up to the base ref: record a rebase the worker did, or move HEAD "
+                                     "and replay its uncommitted edits (conflicts stay as markers); refuses when the "
+                                     "worker committed")
     p.add_argument("id")
     p = ts.add_parser("merged", help="record a merge the coordinator committed by hand")
     p.add_argument("id")
