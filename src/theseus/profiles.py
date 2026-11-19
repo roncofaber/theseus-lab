@@ -109,7 +109,7 @@ ANTIGRAVITY_INTERACTIVE = {
     "gateway_patterns": [],
     "gateway_ready": "",
     "context_pattern": "",
-    "input_pattern": "",
+    "input_pattern": "^\\s*>\\s?(.*)$",
     "clear_input": "C-u",
     "env": {},
     "compact": "/compact",
@@ -333,8 +333,11 @@ def resolve(conf, name=None):
     section = section if isinstance(section, dict) else {}
     base_name = section.get("preset") or ALIASES.get(name, name)
     if base_name not in PRESETS:
+        from . import hostconfig
+        hidden = "" if hostconfig.path().is_file() else (
+            f" (no host config is visible at {hostconfig.path()}; in a sandboxed shell, run theseus outside the sandbox)")
         raise ProfileError(f"unknown agent profile {name!r}; presets: {', '.join(sorted(PRESETS))}, or set preset = ... "
-                           f"in [workers.{name}]")
+                           f"in [workers.{name}]{hidden}")
     profile = copy.deepcopy(PRESETS[base_name])
     for key, value in section.items():
         if key == "interactive" and isinstance(value, dict) and isinstance(profile.get("interactive"), dict):

@@ -95,7 +95,7 @@ DEFAULTS = {
     "tools": {"need": [], "paths": {}},
     "queue": {"deadline": "", "nudge": "", "interval": 30, "send_budget_seconds": 25, "assign_backoff_seconds": 300,
               "driver": True, "aging_hours": 24},
-    "attention": {"notify": "", "remind_minutes": 30, "escalate_minutes": 60},
+    "attention": {"notify": "", "remind_minutes": 30, "escalate_minutes": 60, "quiet_seconds": 30},
     "gateway": {"attempts": 3, "backoff": [120, 240, 480], "slow_codes": [530], "slow_factor": 2, "resend": "",
                 "clear_tokens": 120000, "fresh_after_errors": 2, "screen_lines": 15, "stagger_seconds": 30,
                 "recovery_seconds": 900},

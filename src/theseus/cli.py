@@ -1058,6 +1058,9 @@ def list_supervised(conf, as_json=False):
     from . import profiles
     import time
     from . import agents, supervisor
+    hidden = supervisor.visibility_problem(conf)
+    if hidden:
+        print(f"warning: {hidden}", file=sys.stderr)
     states = {info["name"]: info for info in agents.states(conf)}
     rows = []
     for item in supervisor.snapshot(conf):
@@ -1160,6 +1163,10 @@ def cmd_attention(args):
         attention.follow(conf, interval=args.interval)
         return
     found = attention.items(conf)
+    from . import supervisor
+    hidden = supervisor.visibility_problem(conf)
+    if hidden:
+        print(f"warning: {hidden}", file=sys.stderr)
     if args.json:
         s = attention.settings(conf)
         print(json.dumps({"project": conf.name, "summary": attention.summary(found), "items": found,

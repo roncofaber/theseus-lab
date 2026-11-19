@@ -298,10 +298,17 @@ class QueueTests(Sandbox):
         self.assertRegex(listed, r"parked-task .*held")
         self.assertNotRegex(listed, r"parked-task .*ready")
 
-    def test_a_truncated_worktree_name_never_ends_in_a_hyphen(self):
+    def test_a_long_task_id_gets_a_short_distinct_worktree_name(self):
+        from theseus.workqueue import worktree_suffix
         self.add("fix-placed-item-restore-identity")
         self.assertRegex(self.theseus("queue", "tick").stdout, r"assigned\s+worker-a\s+fix-placed-item-restore-identity")
-        self.assertTrue((self.tmp / "worktrees/worker-a-fix-placed-item-restore").is_dir())
+        suffix = worktree_suffix("fix-placed-item-restore-identity")
+        self.assertRegex(suffix, r"^fix-placed-item-res-[0-9a-f]{4}$")
+        self.assertTrue((self.tmp / f"worktrees/worker-a-{suffix}").is_dir())
+        self.assertNotEqual(suffix, worktree_suffix("fix-placed-item-restore-other-thing"),
+                            "two ids that share a long prefix never name the same worktree")
+        self.assertEqual("short-id", worktree_suffix("short-id"))
+        self.assertFalse(worktree_suffix("a" * 18 + "-" * 6 + "b").startswith("-"))
 
     def test_an_assignment_failure_backs_off_that_task_and_the_queue_keeps_going(self):
         self.add("blocked-task")

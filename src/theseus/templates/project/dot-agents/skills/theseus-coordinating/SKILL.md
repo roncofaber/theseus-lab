@@ -59,12 +59,12 @@ An item stays listed until its cause is resolved. `theseus queue log` shows the 
 
 ## Safety rules
 
-- Commit locally as the loop requires. Push only when the user asked (a standing instruction in MANIFEST.md or STATE.md counts); the pre-push guard refuses unverified code. Never force-push, rewrite history or change remotes without asking.
+- Commit locally as the loop requires. Push when the user asked or a standing instruction in MANIFEST.md or STATE.md says to (then push each verified commit without asking again; never write a narrower rule into STATE.md than the one MANIFEST.md states); the pre-push guard refuses unverified code. Never force-push, rewrite history or change remotes without asking.
 - Workers never commit, stash, push or move HEAD. In a worker's worktree you only move a stale handoff aside, revert a rejected outside path, resolve a merge conflict or undo a worker commit (events.md).
 - Clean and dirty rooms (`[rooms]`): every record gets `--room`; clean workers never see the original's code or dirty paths; the specification is the only channel and you review it for copied code before clean work starts. An agent moves from dirty to clean work only after a clear (the queue does it; `taint = "permanent"` forbids it).
 - Secrets: never print the environment; never put credentials, tokens or local configuration in records, messages, reports or commits.
 - Type into agents only with `theseus instance send`, never raw `tmux send-keys`. Never kill processes by name pattern; use `theseus stop NAME` or `theseus agents down NAME`.
-- When the user asks to close or pause the project: `theseus close --commit --reason "..."` (it stops your own session last); push only if the user asked. Never close on your own initiative; `theseus reopen` brings it back.
+- When the user asks to close or pause the project: `theseus close --commit --reason "..."` (it stops your own session last), then push under the rule above. Never close on your own initiative; `theseus reopen` brings it back.
 - The original is read-only. Real hardware is touched only by a task whose record says so, and never with commands not first seen in recorded original traffic.
 - Merged, observed and user-tested are three claims; never report one as another.
 - When theseus itself costs you time (a bug, a misleading message, a missing option, a stale instruction), append an entry to `.theseus/friction.md` at once (references/friction.md).

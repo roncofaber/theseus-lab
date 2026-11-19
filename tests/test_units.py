@@ -694,3 +694,56 @@ class ProfileFileTests(Sandbox):
         self.assertIn("added [workers.gemini-carbon]", added.stdout)
         self.assertIn('extra_args = ["--effort", "high"]', self.host.read_text())
         self.assertEqual(0, self.theseus("config", "check", cwd=self.tmp).returncode)
+
+
+class PushGuardTests(Sandbox):
+    def test_a_keypress_in_an_attached_terminal_holds_the_push(self):
+        from types import SimpleNamespace
+        from theseus import attention
+        server = SimpleNamespace(display=lambda pane, fmt: "demo--coordinator",
+                                 run=lambda *args: SimpleNamespace(stdout="1000\n1090\n"))
+        self.assertTrue(attention.human_typing(server, "%1", 30, now=1100))
+        self.assertFalse(attention.human_typing(server, "%1", 30, now=1200), "a terminal idle for 30 s lets it through")
+        self.assertFalse(attention.human_typing(server, "%1", 0, now=1100), "quiet_seconds = 0 turns the guard off")
+
+    def test_agy_shows_typed_text_on_its_input_line(self):
+        from theseus import agents as ag, profiles
+        pattern = profiles.ANTIGRAVITY_INTERACTIVE["input_pattern"]
+        screen = ["● Ran tools", "─" * 40, "> half a sentence", "─" * 40, "? for shortcuts"]
+        self.assertFalse(ag.input_empty(screen, pattern))
+        self.assertTrue(ag.input_empty(["─" * 40, ">", "─" * 40, "? for shortcuts"], pattern))
+
+    def test_a_merge_being_verified_is_not_pushed_again(self):
+        import subprocess
+        from types import SimpleNamespace
+        from theseus import attention, verify
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        git = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True, text=True).stdout.strip()
+        git("init", "-q")
+        git("commit", "-q", "--allow-empty", "-m", "merge")
+        merged = git("rev-parse", "HEAD")
+        git("commit", "-q", "--allow-empty", "-m", "docs")
+        head = git("rev-parse", "HEAD")
+        logs = self.tmp / "logs"
+        logs.mkdir()
+        conf = SimpleNamespace(root=repo, logs=logs)
+        (logs / "verify-x.log").write_text(f"{verify.LOG_HEADER}{head}\n")
+        (logs / "verify-x.running").write_text(f"{os.getpid()}\n")
+        self.assertEqual([head], verify.running(conf))
+        self.assertTrue(attention.being_verified(conf, merged[:12]))
+        (logs / "verify-x.running").write_text("999999999\n")
+        self.assertFalse(attention.being_verified(conf, merged[:12]), "a verify whose process is gone covers nothing")
+
+    def test_a_shell_that_cannot_see_the_tmux_server_is_told_so(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from theseus import supervisor, workqueue
+        queue = self.tmp / "queue"
+        queue.mkdir()
+        (queue / "watcher.json").write_text("{}")
+        conf = SimpleNamespace()
+        with mock.patch.object(workqueue, "queue_dir", lambda conf: queue), \
+                mock.patch.object(supervisor, "server", lambda: SimpleNamespace(path=str(self.tmp / "no-socket"))):
+            self.assertIn("cannot see theseus's tmux server", supervisor.visibility_problem(conf))
+            self.assertIsNone(supervisor.visibility_problem(conf, now=time.time() + 600), "a stale driver says nothing")

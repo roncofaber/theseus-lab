@@ -41,6 +41,7 @@ maintenance and backup.
 nothing reads it after the one-time import.
 """
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -234,12 +235,20 @@ def relaunch(conf, agent, profile):
     return True, f"{where}: {output}"
 
 
+def worktree_suffix(task_id, width=24):
+    """The task part of a worktree name: the id itself up to width characters, else its start and a short hash of
+    the whole id, so two ids that share a long prefix never name the same worktree."""
+    if len(task_id) <= width:
+        return task_id
+    digest = hashlib.sha1(task_id.encode()).hexdigest()[:4]
+    return f"{task_id[:width - 5].rstrip('-.')}-{digest}"
+
+
 def assign_and_send(conf, agent, task):
     from . import integrate
     from . import profiles
     provider = agent.get("provider") or profiles.default_name(conf)
-    suffix = task["id"][:24].rstrip("-.")
-    name = f"{agent['name']}-{suffix}"
+    name = f"{agent['name']}-{worktree_suffix(task['id'])}"
     worktree, base, _ = integrate.assign(conf, task["id"], name, provider, "persistent-instance",
                                          owner=f"{provider}:{agent['name']}:{name}", instance=agent["name"],
                                          owner_id=agent.get("id"), principal=queue_principal())

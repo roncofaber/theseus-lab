@@ -953,6 +953,23 @@ def driver_died(conf, srv, status=None, now=None):
     return 0
 
 
+def visibility_problem(conf, now=None):
+    """Why this shell cannot see the project's live state although the queue driver ticks (a sandboxed agent shell
+    hides the private tmux socket and the host config), or None."""
+    from . import hostconfig, workqueue
+    now = time.time() if now is None else now
+    try:
+        fresh = now - (workqueue.queue_dir(conf) / "watcher.json").stat().st_mtime < 300
+    except OSError:
+        return None
+    socket = server().path
+    if fresh and socket and not Path(socket).exists():
+        return (f"this shell cannot see theseus's tmux server ({socket}) although the queue driver ticked in the last "
+                f"5 minutes, so agents look offline; run theseus outside a sandbox"
+                + ("" if hostconfig.path().is_file() else f" (the host config {hostconfig.path()} is not visible either)"))
+    return None
+
+
 def driver_project(session):
     """The project whose queue driver runs in this session, or None."""
     with store.for_host() as conn:

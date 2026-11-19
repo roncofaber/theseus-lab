@@ -256,7 +256,7 @@ A state is a dict with:
 Adding a CLI means writing that module in its own record format, adding its name to `ADAPTERS`, and setting `transcript = "<name>"` in the preset's `interactive` table. The console redacts API keys, key hashes and email addresses in everything it shows from a transcript or the scrollback.
 ## What depends on the preset
 
-Every theseus feature is driven by profile keys, never by a hard-coded agent. The `claude-code` preset sets them all; `opencode` sets all but `status_command`, `sessions_dir` and `messaging` (see [OpenCode](configuration.md#opencode)); the `antigravity` preset leaves `gateway_patterns`, `input_pattern` and `prompt_patterns` unset (see [Antigravity](configuration.md#antigravity)), and the `codex` and `gemini-cli` presets also `busy_pattern`; they degrade as follows until you add the missing keys to their `[workers.<name>.interactive]`:
+Every theseus feature is driven by profile keys, never by a hard-coded agent. The `claude-code` preset sets them all; `opencode` sets all but `status_command`, `sessions_dir` and `messaging` (see [OpenCode](configuration.md#opencode)); the `antigravity` preset leaves `gateway_patterns` and `prompt_patterns` unset (see [Antigravity](configuration.md#antigravity)), and the `codex` and `gemini-cli` presets also `busy_pattern`; they degrade as follows until you add the missing keys to their `[workers.<name>.interactive]`:
 
 | Feature | Needs | Without it |
 | --- | --- | --- |

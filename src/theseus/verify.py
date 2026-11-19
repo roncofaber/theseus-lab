@@ -120,6 +120,8 @@ def full(conf, revision="HEAD"):
     conf.logs.mkdir(parents=True, exist_ok=True)
     log = conf.logs / f"verify-{sha[:12]}-{time.strftime('%Y%m%dT%H%M%S')}.log"
     log.write_text(f"{LOG_HEADER}{sha}\n")
+    marker = log.with_suffix(".running")
+    marker.write_text(f"{os.getpid()}\n")
     print(f"verify: {sha[:12]} {g.out(conf.root, 'log', '-1', '--format=%s', sha)} ({revision})")
     conf.scratch.mkdir(parents=True, exist_ok=True)
     tree = Path(tempfile.mkdtemp(prefix="verify-", dir=conf.scratch)) / "tree"
@@ -140,10 +142,26 @@ def full(conf, revision="HEAD"):
     finally:
         g.git(conf.root, "worktree", "remove", "--force", str(tree), check=False)
         shutil.rmtree(tree.parent, ignore_errors=True)
+        marker.unlink(missing_ok=True)
     with open(log, "a") as handle:
         handle.write(f"final status {1 if status else 0}\n")
     print(f"verify log: {log}")
     return (1 if status else 0), log
+
+
+def running(conf):
+    """The commits a `theseus verify` is verifying now (its .running marker names a live process)."""
+    found = []
+    for marker in conf.logs.glob("verify-*.running") if conf.logs.is_dir() else []:
+        try:
+            pid = int(marker.read_text().split()[0])
+            os.kill(pid, 0)
+            commit = parse_log_commit(marker.with_suffix(".log").read_text(errors="replace"))
+        except (OSError, ValueError, IndexError):
+            continue
+        if commit:
+            found.append(commit)
+    return found
 
 
 def verified_commits(conf):

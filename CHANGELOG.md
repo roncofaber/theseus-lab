@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- The attention push never types into the coordinator pane while a terminal attached to it had a keypress in the last `[attention] quiet_seconds` (30), whatever the agent CLI shows; the line waits for a later tick. The `antigravity` preset now has an input pattern (`> text`), so typed text there also holds the push. A merge is not pushed as "merge to verify" while a `theseus verify` covering it runs (verify keeps a `.running` marker beside its log).
+- A worktree name for a task id longer than 24 characters ends in a 4-character hash of the whole id, so two ids that share a long prefix no longer collide.
+- A shell that cannot see theseus's tmux server while the queue driver ticks (a sandboxed agent shell) gets a warning from `theseus attention` and `agents ls` instead of silent offline agents, and an unknown profile error says when no host config is visible.
+- The coordinating skill's push rule says a standing push instruction in MANIFEST.md or STATE.md covers each verified commit, and never to write a narrower rule into STATE.md.
 - Antigravity agents show their context and model: a supervised agy agent or coordinator now records its conversation id, read from the `presence/<id>.lock` its process holds open (transcript adapters may implement `live_session`), so its transcript is read and a restart resumes it. The preset's busy marker is `esc to cancel`, so a long thinking turn is no longer taken for a stall and nudged.
 - A profile's own `busy_pattern` and `sessions_dir` now take precedence over the project-wide `[instances]` values, which apply only to a profile that sets none; a Claude-specific `[instances] busy_pattern` no longer makes every other CLI look idle.
 - An agent whose transcript is being written counts as active even when it changes no file, so a slow model is not nudged as stalled.

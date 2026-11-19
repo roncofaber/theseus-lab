@@ -4,7 +4,7 @@ only when its cause is resolved, never because someone saw it.
 
 Kinds and the condition that resolves each:
 - delivery: a task in verification, until it is merged, reopened or released;
-- merged: a merged task, until it is completed (verified) or unmerged;
+- merged: a merged task, until it is completed (verified) or unmerged; not while a `theseus verify` covering it runs;
 - question: a worker's open question (`task note --question`), until `tasks note ID` or an edit answers it;
 - agent: an agent at a permission prompt (waiting) or startup dialog (blocked), failed after its restart budget, a
   hand-made pane gone (offline), or given up on by the queue (still idle after its nudge, thrashing in a hand-made
@@ -26,6 +26,7 @@ sight of an item without a time of its own, what was pushed and escalated) is th
 <data>/queue/attention.json.
 """
 import json
+import subprocess
 import os
 import re
 import shlex
@@ -61,8 +62,10 @@ def settings(conf):
         command = hostconfig.attention().get("escalate_command") or ""
     except hostconfig.ConfigError:
         command = ""
+    quiet = section.get("quiet_seconds")
     return {"notify": str(section.get("notify") or "").strip(), "remind_minutes": float(section.get("remind_minutes") or 0),
-            "escalate_minutes": float(section.get("escalate_minutes") or 0), "escalate_command": command}
+            "escalate_minutes": float(section.get("escalate_minutes") or 0), "escalate_command": command,
+            "quiet_seconds": 30.0 if quiet is None else float(quiet)}
 
 
 def iso(epoch):
@@ -122,6 +125,18 @@ def streak_start(conf, name, state, now):
     return start
 
 
+def being_verified(conf, merge):
+    """Whether a running `theseus verify` covers the merge commit (verifies it or a descendant)."""
+    from . import verify
+    if not merge:
+        return False
+    for commit in verify.running(conf):
+        if subprocess.run(["git", "-C", str(conf.root), "merge-base", "--is-ancestor", merge, commit],
+                          capture_output=True).returncode == 0:
+            return True
+    return False
+
+
 def task_items(conf, queue, tasks, events, now):
     found = []
     results = {record["task"]: record["kind"] for record in events
@@ -134,7 +149,7 @@ def task_items(conf, queue, tasks, events, now):
             found.append(entry(conf, f"delivery:{task_id}", "delivery", "delivery", epoch(execution.get("deliveredAt")),
                                f"{task_id}: handoff {result or 'delivered'}, waiting for review and merge",
                                f"theseus tasks check-delivery {task_id}, then theseus merge {task_id}", task=task_id))
-        elif status == "merged":
+        elif status == "merged" and not being_verified(conf, (task.get("merge") or {}).get("commit")):
             found.append(entry(conf, f"merged:{task_id}", "merged", "merge to verify",
                                epoch((task.get("merge") or {}).get("mergedAt")), f"{task_id} merged, not yet verified",
                                f"theseus verify, then theseus tasks complete {task_id} --from-log VERIFY_LOG", task=task_id))
@@ -434,14 +449,34 @@ def own_line(screen, pattern):
     return bool(held) and held[-1].strip().startswith("theseus:")
 
 
+def human_typing(server, pane, quiet, now=None):
+    """Whether a terminal attached to the pane's session had a keypress in the last quiet seconds (tmux's
+    client_activity): someone may be typing there, whatever the agent CLI shows."""
+    if not quiet:
+        return False
+    session = server.display(pane, "#{session_name}")
+    if not session:
+        return False
+    result = server.run("list-clients", "-t", f"={session}", "-F", "#{client_activity}")
+    stamps = [int(value) for value in (result.stdout or "").split() if value.isdigit()]
+    now = time.time() if now is None else now
+    return any(now - stamp < quiet for stamp in stamps)
+
+
 def type_line(conf, record, text):
     """Type one line into the coordinator pane through the checked send. Returns (ok, detail); nothing is typed while
-    the pane shows a prompt for a human or its input line holds text (the user is typing)."""
+    the pane shows a prompt for a human, its input line holds text, or a terminal attached to it had a keypress in
+    the last [attention] quiet_seconds (the user is typing); the line then waits for a later tick."""
     from . import profiles
     problem = pane_problem(record)
     if problem:
         return False, f"the coordinator pane {record['pane']} is {problem}"
     server, pane = where(record)
+    try:
+        if human_typing(server, pane, settings(conf)["quiet_seconds"]):
+            return False, "someone is typing in the coordinator pane; the line waits"
+    except Exception:
+        pass
     profile = record.get("profile")
     try:
         screen = ag.pane_screen(pane, server)
