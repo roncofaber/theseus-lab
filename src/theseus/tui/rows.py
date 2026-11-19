@@ -464,7 +464,7 @@ def overview(state, width=200):
             ("attention", str(len(issues)), f"bold {theme.RED}" if issues else theme.GREEN)]
     counts = agent_counts(state)
     busy = counts.get("working", 0) + counts.get("busy", 0)
-    trouble = {k: v for k, v in counts.items() if k in ("blocked", "failed", "waiting", "offline", "stalled", "thrashing")}
+    trouble = {k: v for k, v in counts.items() if k in ("blocked", "failed", "waiting", "stalled", "thrashing")}
     text, style = gateway_line(state)
     agents = [("agents", f"{busy} working · {counts.get('free', 0)} free of {len(state['agents'])}", ""),
               ("trouble", ", ".join(f"{v} {k}" for k, v in trouble.items()) or "none",
@@ -517,7 +517,7 @@ def project_rows(projects):
         issues = top.issues(state)
         counts = agent_counts(state)
         busy = counts.get("working", 0) + counts.get("busy", 0)
-        trouble = sum(v for k, v in counts.items() if k in ("blocked", "failed", "waiting", "offline", "stalled", "thrashing"))
+        trouble = sum(v for k, v in counts.items() if k in ("blocked", "failed", "waiting", "stalled", "thrashing"))
         text, style = gateway_line(state)
         today = state.get("today") or {}
         rows.append(row(f"project:{item['root']}", [

@@ -24,7 +24,7 @@ from . import workqueue as wq
 R, B, DIM = "\033[0m", "\033[1m", "\033[2m"
 RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN = (f"\033[{c}m" for c in (31, 32, 33, 34, 35, 36))
 ANSI = re.compile(r"\033\[[0-9;]*m")
-STATE_COLOR = {"working": GREEN, "quiet": YELLOW, "busy": CYAN, "free": YELLOW, "delivered": MAGENTA, "stalled": RED, "offline": RED,
+STATE_COLOR = {"working": GREEN, "quiet": YELLOW, "busy": CYAN, "free": YELLOW, "delivered": MAGENTA, "stalled": RED, "offline": DIM,
                "disabled": DIM, "thrashing": RED, "gateway_error": RED, "starting": CYAN, "blocked": RED, "failed": RED,
                "waiting": RED}
 KIND_COLOR = {"relaunched": YELLOW, "delivered": MAGENTA, "partial": YELLOW, "blocked": BLUE, "stalled": RED, "error": RED, "assigned": GREEN,
@@ -697,7 +697,7 @@ def issues(state):
     if any(item["kind"] == "driver" for item in attention.get("items") or []):
         found.append(f"{RED}●{R} no queue driver runs: nothing is assigned or recorded; `theseus agents up` starts it")
     for agent in state["agents"]:
-        if agent["state"] in ("stalled", "offline", "blocked", "failed", "waiting"):
+        if agent["state"] in ("stalled", "blocked", "failed", "waiting"):
             found.append(f"{RED}●{R} {agent['name']} is {agent['state']}")
     for entry in state.get("health") or []:
         if entry.get("onFallback") or entry.get("state") == "down":

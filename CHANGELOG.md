@@ -72,6 +72,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- An offline agent (stopped or scaled away) shows grey in the console instead of red, and no longer counts as trouble or an issue line; stalled, blocked, failed and waiting agents stay red.
 - Task priority is a fixed scale from 1 (last) to 5 (first), default 3; `tasks add`, `tasks edit` and `tasks priority` refuse other values, and older records are read onto the scale (none or 0 as 3, the rest clamped). A ready task gains one level per `[queue] aging_hours` it has waited (default 24, 0 turns it off), up to 5.
 - The queue plans each tick's free agents together: the strongest choose first and take the tasks only they can do, a stronger agent leaves easier tasks to free weaker agents unless there are more such tasks than weaker agents, and an agent that left its tasks to others takes whatever they did not. Equal effective priorities go to the task that has waited longest.
 - The console's WAITING list has a priority column (`P3`, `P2+1` with aging) and shows a task's minimum capability as pips (`≥●●`, `any` without one, red when no agent meets it); AGENTS shows each agent's capability the same way. `theseus tasks ls` prints the priority and minimum capability, and `theseus agents ls` the capability.
