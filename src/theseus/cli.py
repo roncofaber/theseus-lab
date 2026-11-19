@@ -759,12 +759,33 @@ def cmd_agents(args):
             sys.exit("usage: theseus agents _exec PROJECT AGENT GEN")
         sys.exit(supervisor.exec_agent(*args.targets))
     args.name, args.pane = (args.targets + [None, None])[:2]
+    if args.action == "list" and args.json:
+        args.action = "ls"
     if args.action in ("up", "down", "restart", "attach", "logs", "migrate", "ls", "scale"):
         return cmd_supervised(args)
     conf = load()
     action = args.action
-    if action in ("remove", "enable", "disable") and not args.name:
-        sys.exit(f"usage: theseus agents {action} NAME")
+    if action in ("remove", "enable", "disable"):
+        if not args.targets:
+            sys.exit(f"usage: theseus agents {action} NAME...")
+        failed = []
+        for name in dict.fromkeys(args.targets):
+            try:
+                agent_action(conf, action, name, None, args)
+            except SystemExit as error:
+                if error.code not in (0, None):
+                    print(error.code if isinstance(error.code, str) else f"theseus: {name}: failed", file=sys.stderr)
+                    failed.append(name)
+        if failed:
+            sys.exit(1)
+        return
+    agent_action(conf, action, args.name, args.pane, args)
+
+
+def agent_action(conf, action, name, pane, args):
+    """One agents action (add, remove, enable, disable, profiles, or the legacy listing) for one agent name."""
+    from . import agents
+    args.name, args.pane = name, pane
     try:
         if action in ("add", "remove"):
             from . import supervisor
@@ -1028,6 +1049,7 @@ def list_supervised(conf, as_json=False):
         rec = supervisor.record(conf, item["name"])
         changes = supervisor.drift(conf, rec) if rec else []
         row = {**item, "state": info.get("state"), "task": info.get("task"), "drift": bool(changes), "driftChanges": changes,
+               "capability": profiles.capability(conf, item.get("profile")) if item.get("profile") else None,
                "uptime": int(time.time() - item["started"]) if item.get("started") and item.get("running") else None}
         rows.append(row)
     legacy = [info for name, info in states.items() if not info.get("managed")]
@@ -1043,8 +1065,12 @@ def list_supervised(conf, as_json=False):
               f"cap {profiles.capability(conf, row['profile']) if row['profile'] else '-'} gen {row['gen'] or '-':<4} "
               f"pid {row['pid'] or '-':<8} {row['task'] or '-':<28} restarts {row['restarts']:<2} "
               f"up {uptime} session {row['sessionId'] or '-'}" + (f" drift: {'; '.join(row['driftChanges'])}" if row["driftChanges"] else ""))
+    stale = {a["name"] for a in agents.agents(conf) if agents.stale_pane(a)}
     for info in legacy:
-        print(f"{info['name']:<24} {info['state']:<10} unmanaged pane {info['pane']}")
+        marks = ["tainted:" + info["tainted"]] if info.get("tainted") else []
+        marks += ["stale pane (re-add the agent)"] if info["name"] in stale else []
+        print(f"{info['name']:<24} {info['state']:<10} unmanaged pane {info['pane']:<6} {info.get('task') or '-':<28} "
+              f"{' '.join(marks)}".rstrip())
 
 
 def cmd_pool(args):
@@ -1734,7 +1760,7 @@ def build_parser():
                                                             "prompt for the task")
     p.add_argument("--file", metavar="PROMPT", help="restart --fresh --with-task: the restart prompt to send instead of the "
                                                     "one built from the task")
-    p.add_argument("--json", action="store_true", help="ls: JSON")
+    p.add_argument("--json", action="store_true", help="ls and list: JSON")
     p.set_defaults(func=guarded(cmd_agents))
     p = sub.add_parser("pool", help="host-wide worker pools shared across projects ([pools.NAME] in ~/.config/theseus/config.toml)",
                        description="Show who holds the slots of each pool. A pool caps the agents working at once across "

@@ -226,6 +226,20 @@ class QueueTests(Sandbox):
                 coordinator.send_prompt(conf)
             self.assertEqual(owed, bool(coordinator.state(conf).get("prompt_owed")), result[1])
 
+    def test_agents_remove_takes_every_name_and_list_honors_json(self):
+        self.theseus("agents", "add", "worker-b", "%2")
+        self.theseus("agents", "add", "worker-c", "%3")
+        listed = json.loads(self.theseus("agents", "list", "--json").stdout)
+        self.assertEqual({"worker-a", "worker-b", "worker-c"}, {a["name"] for a in listed["unmanaged"]})
+        self.theseus("agents", "remove", "worker-b", "worker-c")
+        listed = json.loads(self.theseus("agents", "ls", "--json").stdout)
+        self.assertEqual(["worker-a"], [a["name"] for a in listed["unmanaged"]])
+        failed = self.theseus("agents", "remove", "worker-a", "nobody", check=False)
+        self.assertEqual(1, failed.returncode)
+        self.assertIn("nobody", failed.stderr)
+        self.assertEqual([], json.loads(self.theseus("agents", "ls", "--json").stdout)["unmanaged"],
+                         "a bad name does not stop the others")
+
     def test_a_running_task_s_patches_hold_a_task_that_owns_their_target(self):
         self.add("first-task")
         self.theseus("queue", "tick")

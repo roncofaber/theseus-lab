@@ -114,6 +114,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- `theseus agents remove`, `enable` and `disable` act on every name given (they acted on the first and ignored the rest), and report each name that failed; `theseus agents list --json` prints JSON like `ls --json`, which now also carries each agent's capability.
 - A supervised queue driver restarts cleanly when the installed code changes: it runs as `python -c <boot line> queue run`, and the restart re-ran `python -c queue run`, which exited 1, so every release counted as a driver crash against its restart budget.
 - The coordinator's start prompt is typed at most once per conversation: a send that typed the prompt but saw no busy marker (a fast answer, as with OpenCode) used to stay owed, and every queue tick typed the whole prompt again.
 - An attached terminal now resizes a session's window on the private server as the terminal resizes: the attach hook ran `resize-window -A`, which sized the window once and left it at a manual size; it now sets `window-size latest` until detach pins the agent size again.
