@@ -74,10 +74,16 @@ class CodeWatch:
 
 
 def restart(argv, execv=None):
-    """Become a fresh process of the same entry point (`python -m theseus` or the console script) with argv."""
-    entry = ["-m", "theseus"] if Path(sys.argv[0]).name == "__main__.py" else [sys.argv[0]]
+    """Become a fresh process of the same entry point (`python -m theseus`, the console script, or the `python -c`
+    boot line the supervisor starts drivers and agents' hooks with) with argv."""
+    if sys.argv[0] == "-c":
+        from . import supervisor
+        command = [*supervisor.theseus_argv(), *argv]
+    else:
+        entry = ["-m", "theseus"] if Path(sys.argv[0]).name == "__main__.py" else [sys.argv[0]]
+        command = [sys.executable, *entry, *argv]
     print("theseus: the installed theseus code changed; restarting with the same arguments", file=sys.stderr, flush=True)
-    (execv or os.execv)(sys.executable, [sys.executable, *entry, *argv])
+    (execv or os.execv)(command[0], command)
 
 
 def newer_store(error, argv, interval=30, sleep=time.sleep, execv=os.execv):

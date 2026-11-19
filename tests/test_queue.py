@@ -435,6 +435,17 @@ class CodeChangeTests(Sandbox):
         execv.assert_called_once()
         self.assertEqual(["/bin/theseus", *argv], execv.call_args[0][1][1:])
 
+    def test_a_driver_started_with_the_boot_line_restarts_into_theseus_not_into_python_c(self):
+        from unittest import mock
+        from theseus import supervisor, upgrade
+        argv = ["queue", "run"]
+        with mock.patch("os.execv") as execv, mock.patch("sys.argv", ["-c"]):
+            upgrade.restart(argv)
+        program, command = execv.call_args[0]
+        self.assertEqual([*supervisor.theseus_argv(), *argv], command)
+        self.assertEqual(command[0], program)
+        self.assertIn("from theseus.cli import main", command[2], "the code after -c is the boot line, not 'queue'")
+
 
 if __name__ == "__main__":
     unittest.main()
