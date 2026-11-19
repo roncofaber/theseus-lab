@@ -100,6 +100,29 @@ OPENCODE_INTERACTIVE = {
                         r"enter submit\s+esc dismiss"],
 }
 
+ANTIGRAVITY_INTERACTIVE = {
+    "launch": "{command} --mode {permission_mode} --model {model}",
+    "resume": "{launch} --conversation {session}",
+    "resume_missing": "",
+    "busy_pattern": "",
+    "stall_patterns": [],
+    "gateway_patterns": [],
+    "gateway_ready": "",
+    "context_pattern": "",
+    "input_pattern": "",
+    "clear_input": "C-u",
+    "env": {},
+    "compact": "/compact",
+    "clear": "/clear",
+    "sessions_dir": "~/.gemini/antigravity-cli/brain",
+    "transcript": "antigravity-jsonl",
+    "messaging": False,
+    "exit": "/exit",
+    "ready_pattern": "",
+    "startup_dialogs": [],
+    "prompt_patterns": [],
+}
+
 PRESETS = {
     "claude-code": {
         "label": "Claude Code with the developer's own login or API key",
@@ -197,8 +220,25 @@ PRESETS = {
                         "sessions_dir": "", "messaging": False,
                         "transcript": "pane-history"},
     },
+    "antigravity": {
+        "label": "Google Antigravity CLI (agy)",
+        "verified": False,
+        "command": "agy",
+        "headless": ["{command}", "-p", "{prompt}", "--output-format", "json", "--mode", "{permission_mode}", "{model_args}"],
+        "resume": ["{command}", "-p", "{message}", "--continue", "--output-format", "json", "--mode", "{permission_mode}",
+                   "{model_args}"],
+        "session": "none",
+        "model_flag": "--model",
+        "model": "",
+        "context_limit": 1000000,
+        "permission_mode": "auto",
+        "env": {},
+        "retry": False,
+        "capacity": 2,
+        "interactive": ANTIGRAVITY_INTERACTIVE,
+    },
 }
-ALIASES = {"claude": "claude-subagent"}
+ALIASES = {"claude": "claude-subagent", "agy": "antigravity"}
 CONTEXT_LIMIT = 200000
 
 

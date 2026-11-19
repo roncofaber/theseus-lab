@@ -36,7 +36,7 @@ heavy_runs = 2
 
 [workers]
 # Agent profile for workers (`theseus agents profiles` lists them): claude-code (your own Claude Code login or API
-# key), codex, opencode, gemini-cli, claude-subagent (launched by a Claude Code coordinator). A [workers.<name>]
+# key), codex, opencode, gemini-cli, antigravity (agy), claude-subagent (launched by a Claude Code coordinator). A [workers.<name>]
 # section adjusts a profile (model, capacity, permission_mode, command, env, interactive); a section with another name
 # sets preset = "<profile>" to define a variant. A profile defined in the host config.toml can be named here too; a
 # section here with the same name overrides only the keys it sets. Unset keys come from the host config

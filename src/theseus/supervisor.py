@@ -472,7 +472,7 @@ def resume_session(conf, name, intent):
     resumes; a crash or reboot resumes only an agent that holds a task ([agents] resume = "task")."""
     rec = record(conf, name) or {}
     session = rec.get("session_id")
-    if not session:
+    if not session or not profiles.interactive(conf, rec.get("profile")).get("resume"):
         return None
     mode = str(section(conf).get("resume") or "task")
     if intent in ("relaunch", "migrate", "restart"):
@@ -491,7 +491,8 @@ def spawn(conf, slot, intent="start", session=None, profile=None, srv=None):
     rec = record(conf, name) or {}
     profile = profile or rec.get("profile") or slot["profile"]
     resume = bool(session)
-    session = session or profiles.new_session(profiles.resolve(conf, profile))
+    resolved = profiles.resolve(conf, profile)
+    session = session or (profiles.new_session(resolved) if resolved.get("session") == "preassign" else "")
     argv, _, where, spec = launch(conf, profile, name, session, resume)
     width, height = size()
     target = tm.session_name(conf.name, name)

@@ -172,7 +172,8 @@ def spawn(conf, profile, intent, session_id=None, srv=None):
     srv = srv or server()
     supervisor.ensure_conf(srv)
     resume = bool(session_id)
-    session_id = session_id or profiles.new_session(profiles.resolve(conf, profile))
+    resolved = profiles.resolve(conf, profile)
+    session_id = session_id or (profiles.new_session(resolved) if resolved.get("session") == "preassign" else "")
     launch(conf, profile, session_id, resume)
     target = session(conf)
     with store.for_project(conf) as conn:
@@ -309,9 +310,11 @@ def up(conf, profile=None, wait=True):
             return "kept", f"session {session(conf)} ({st.get('profile') or name})"
         if info:
             record_exit(conf, srv, info.get("pane_dead_status"), info.get("pane_dead_signal"))
-        resume = st.get("session_id") if st.get("desired") == "up" and (st.get("profile") or name) == name else None
+        from . import profiles
+        can_resume = bool(profiles.interactive(conf, name).get("resume"))
+        resume = st.get("session_id") if can_resume and st.get("desired") == "up" and (st.get("profile") or name) == name else None
         if st.get("phase") == "failed":
-            resume = st.get("session_id") if st.get("profile") == name else None
+            resume = st.get("session_id") if can_resume and st.get("profile") == name else None
         spawn(conf, name, "resume" if resume else "start", resume, srv)
     detail = f"session {session(conf)}, {'resuming ' + resume if resume else 'new conversation'}"
     if wait:
@@ -379,7 +382,9 @@ def restart(conf, fresh=False, profile=None, wait=True):
     with workqueue.locked(conf):
         st = state(conf)
         launch(conf, name)
-        session_id = None if fresh or st.get("profile") not in (None, name) else (live_session(conf, srv) or st.get("session_id"))
+        from . import profiles
+        can_resume = bool(profiles.interactive(conf, name).get("resume"))
+        session_id = None if fresh or not can_resume or st.get("profile") not in (None, name) else (live_session(conf, srv) or st.get("session_id"))
         if pane(srv, conf) is not None:
             stop(conf, srv, "restart")
         spawn(conf, name, "restart", session_id, srv)
@@ -448,7 +453,10 @@ def recover(conf, srv, now=None):
         return "failed"
     if due and due > (time.time() if now is None else now):
         return "backoff"
-    spawn(conf, st.get("profile"), "resume" if st.get("session_id") else "fresh", st.get("session_id"), srv)
+    from . import profiles
+    can_resume = bool(profiles.interactive(conf, st.get("profile")).get("resume"))
+    sid = st.get("session_id") if can_resume else None
+    spawn(conf, st.get("profile"), "resume" if sid else "fresh", sid, srv)
     return "restarted"
 
 

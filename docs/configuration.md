@@ -338,3 +338,18 @@ Limits:
 - Below 80 columns OpenCode shortens the busy marker (`esc ...rrupt`), so theseus no longer sees the agent working; keep supervised panes at least 80 columns wide (the default `[supervisor] size` is 220x50).
 - No peer messaging: workers report through the handoff file and the task commands.
 - Permission prompts appear only for actions an agent's permission rules mark `ask` (OpenCode's default build agent: reading `.env` files); no startup dialog appeared with a new configuration.
+
+## Antigravity
+
+The `antigravity` preset (alias `agy`) runs the Google Antigravity CLI (`agy`) as headless workers and interactive tmux agents.
+
+What the preset does:
+- Headless and resume: runs `agy -p PROMPT --output-format json --mode auto [--model MODEL]` inside the worker's own worktree, and resumes follow-ups with `--continue` (each headless worker has its own worktree). Pass `extra_args = ["--dangerously-skip-permissions"]` if you want headless runs to auto-approve all tool permission requests, or override `permission_mode` (`accept-edits`, `auto`, `plan`).
+- Interactive launch: runs `agy --mode auto [--model MODEL]` (dropping `--model` when empty), with `/compact`, `/clear`, `/exit` and `C-u` to clear the input line. Because `agy` does not preassign a conversation ID on fresh start (`session = "none"`), supervised restarts start a fresh conversation and receive the task-aware restart prompt; when a conversation ID is known, `interactive.resume` resumes it with `--conversation ID`.
+- Skills and instructions: Antigravity discovers `AGENTS.md` and `.agents/skills/` from the working directory up to the repository root, so the project skills `theseus scaffold` installs work out of the box. For the global `theseus-setup` skill, run `theseus setup skill --client antigravity` (installs to `~/.gemini/config/skills/theseus-setup`).
+- MCP: `agy` reads MCP servers from `~/.gemini/config/mcp_config.json` (global) and `.agents/mcp_config.json` (workspace) and has no per-launch MCP config flag, so `mcp_servers` is unset by default. Register `theseus mcp` with `agy mcp add theseus theseus mcp` (or `-- --role coordinator` for a coordinator), and for REA add `"antigravity"` to `[re] clients` in `theseus.toml`.
+- Transcript: `antigravity-jsonl` reads `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/transcript.jsonl` (overridable via `interactive.sessions_dir` or `AGY_APP_DATA_DIR`) for context tokens, model, errors and the Conversation tab when a conversation ID is recorded.
+
+Limits:
+- The preset is marked `verified = false` until exercised end to end against a live `agy` session; `busy_pattern`, `input_pattern`, `gateway_patterns` and `prompt_patterns` are left unset so they do not misdetect screen state.
+- No peer messaging: workers report through `.theseus/handoff.md` and the `theseus task` commands.

@@ -1716,8 +1716,8 @@ def build_parser():
                                      "agent skill), setup rea [--update]")
     p.add_argument("component", choices=("host", "rea", "skill"))
     p.add_argument("--update", action="store_true", help="rea: run `rea update` first")
-    p.add_argument("--client", default="agents", choices=("agents", "claude_code"),
-                   help="skill: ~/.agents/skills (agents, default) or ~/.claude/skills (claude_code)")
+    p.add_argument("--client", default="agents", choices=("agents", "claude_code", "antigravity"),
+                   help="skill: ~/.agents/skills (agents, default), ~/.claude/skills (claude_code) or ~/.gemini/config/skills (antigravity)")
     p.add_argument("--dir", help="skill: install into this skills directory instead")
     p.add_argument("--force", action="store_true", help="skill: replace an existing, different copy; host: replace an existing file")
     p.add_argument("--print-path", action="store_true", help="skill: print the packaged SKILL.md path and exit")

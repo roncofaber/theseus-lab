@@ -31,7 +31,7 @@ scrollback, for CLIs that print inline) and "none" (no Conversation tab; context
 pane only)."""
 import importlib
 
-ADAPTERS = {"claude-code-jsonl": "claude_code", "opencode-sqlite": "opencode"}
+ADAPTERS = {"claude-code-jsonl": "claude_code", "opencode-sqlite": "opencode", "antigravity-jsonl": "antigravity"}
 PANE_HISTORY = "pane-history"
 NONE = "none"
 NAMES = (*ADAPTERS, PANE_HISTORY, NONE)

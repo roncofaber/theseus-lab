@@ -1,6 +1,6 @@
 ---
 name: theseus-setup
-description: Use when installing or setting up theseus-lab (the `theseus` CLI) for someone - installing it, choosing the agent profile for their coding agent (Claude Code, Codex, OpenCode, Gemini CLI or another), scaffolding a new port or adopting an existing repository, registering persistent worker agents, wiring REA and Ghidra, or when `theseus doctor` reports a failure.
+description: Use when installing or setting up theseus-lab (the `theseus` CLI) for someone - installing it, choosing the agent profile for their coding agent (Claude Code, Codex, OpenCode, Gemini CLI, Antigravity or another), scaffolding a new port or adopting an existing repository, registering persistent worker agents, wiring REA and Ghidra, or when `theseus doctor` reports a failure.
 ---
 
 # Setting up theseus-lab
@@ -35,6 +35,7 @@ theseus agents profiles
 | `codex` | OpenAI Codex CLI | no |
 | `opencode` | OpenCode, with any provider it supports | no |
 | `gemini-cli` | Google Gemini CLI | no |
+| `antigravity` | Google Antigravity CLI (`agy`) | no |
 
 **Ask** which agent and plan the person uses if it is not obvious from the installed CLIs. Unverified profiles follow the CLI's documented flags but were not run end to end: before relying on one, dispatch a trivial task and check that the worker starts, writes its handoff and that `theseus followup` resumes it. Fix any mismatch with an override (in the host profile, step 3, or `theseus.toml`, step 5) rather than editing the package.
 

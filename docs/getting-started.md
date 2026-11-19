@@ -29,7 +29,7 @@ Linux is the primary platform. On macOS the workflow runs, with fewer features: 
 theseus agents profiles
 ```
 
-The default profile is `claude-code`, which uses your own Claude Code login. If you use another agent, note its profile name (`codex`, `opencode`, `gemini-cli`) for step 4, and read [agent-profiles.md](agent-profiles.md) for what verified means and how to add an agent theseus does not know.
+The default profile is `claude-code`, which uses your own Claude Code login. If you use another agent, note its profile name (`codex`, `opencode`, `gemini-cli`, `antigravity`) for step 4, and read [agent-profiles.md](agent-profiles.md) for what verified means and how to add an agent theseus does not know.
 
 ## 3. Create the project
 
@@ -61,7 +61,7 @@ build = ["make -C src"]
 verify = ["make -C src test"]
 
 [workers]
-default = "claude-code"      # or codex, opencode, gemini-cli, a variant
+default = "claude-code"      # or codex, opencode, gemini-cli, antigravity, a variant
 
 [workers.claude-code]
 capacity = 2                 # concurrent workers; keep within your plan's limits

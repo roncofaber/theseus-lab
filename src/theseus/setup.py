@@ -18,10 +18,10 @@ from pathlib import Path
 from . import hostconfig, tools
 
 SKILL = "reverse-engineer-anything"
-SKILL_HOMES = {"claude_code": "~/.claude/skills", "default": "~/.agents/skills"}
+SKILL_HOMES = {"claude_code": "~/.claude/skills", "antigravity": "~/.gemini/config/skills", "default": "~/.agents/skills"}
 
 
-USER_SKILLS = {"claude_code": "~/.claude/skills", "agents": "~/.agents/skills"}
+USER_SKILLS = {"claude_code": "~/.claude/skills", "antigravity": "~/.gemini/config/skills", "agents": "~/.agents/skills"}
 
 
 def packaged_skill(name="theseus-setup"):
@@ -249,7 +249,7 @@ def doctor(conf):
     except profiles.ProfileError as error:
         rows.append(("FAIL", "profile", str(error)))
     detected = [f"{cmd} ({name})" for name, cmd, path in profiles.detected() if path]
-    rows.append(("ok" if detected else "WARN", "agent CLIs", ", ".join(detected) or "none of claude, codex, opencode, gemini on PATH"))
+    rows.append(("ok" if detected else "WARN", "agent CLIs", ", ".join(detected) or "none of claude, codex, opencode, gemini, agy on PATH"))
     for status, name, value, source, purpose in tools.table(conf):
         if status == "ok":
             rows.append(("ok", name, f"{value} ({source})"))

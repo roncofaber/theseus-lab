@@ -12,7 +12,7 @@ You give the project a legacy program: binaries, installers, data files, maybe t
 
 - **Task queue for agents.** Small, owned tasks with acceptance criteria, dependencies and milestones; idle agents pick up the next task automatically.
 - **Isolated workers.** Each worker gets its own Git worktree and never commits; the coordinator merges deliveries with ownership checks.
-- **Works with your agent.** Claude Code, Codex, OpenCode, Gemini CLI, or any CLI you describe in a few lines of config.
+- **Works with your agent.** Claude Code, Codex, OpenCode, Gemini CLI, Antigravity (`agy`), or any CLI you describe in a few lines of config.
 - **Verification gate.** Builds and tests run on a clean checkout; pushing unverified code is refused.
 - **Reverse-engineering support.** Decompile each binary once, index it and query it; cite addresses and captures in reports; run the original in a VM or compatibility layer.
 - **Clean-room mode.** Separate the agents that read original code from the ones that write the new implementation.
@@ -82,6 +82,7 @@ theseus-lab ships a setup skill that walks an agent through installation and con
 ```sh
 theseus setup skill                         # installs to ~/.agents/skills
 theseus setup skill --client claude_code    # installs to ~/.claude/skills
+theseus setup skill --client antigravity    # installs to ~/.gemini/config/skills
 ```
 
 Then ask your agent: "Use the theseus-setup skill to set up theseus-lab for me."
@@ -93,8 +94,9 @@ Then ask your agent: "Use the theseus-setup skill to set up theseus-lab for me."
 | Claude Code | `claude-code` (default) | Tested |
 | Claude Code subagents | `claude-subagent` | Tested |
 | OpenAI Codex CLI | `codex` | Untested |
-| OpenCode | `opencode` | Untested |
+| OpenCode | `opencode` | Tested (supervised) |
 | Gemini CLI | `gemini-cli` | Untested |
+| Google Antigravity CLI | `antigravity` (`agy`) | Untested |
 
 Select one in `theseus.toml`:
 

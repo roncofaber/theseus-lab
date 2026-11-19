@@ -11,6 +11,7 @@ theseus never assumes one agent vendor. An agent profile describes how to launch
 | `codex` | OpenAI Codex CLI | `codex exec -s workspace-write PROMPT` | `codex exec resume --last MSG` | without a busy marker until you set one | no |
 | `opencode` | OpenCode, each agent on its own private OpenCode server | `opencode run --standalone --format json --session ID PROMPT` | `opencode run --standalone --session ID MSG` | yes, supervised, with its SQLite transcript; no peer messaging (see [OpenCode](configuration.md#opencode)) | persistent instances yes (OpenCode 2.3.0, supervised in tmux); the headless run by hand, not through `theseus dispatch` |
 | `gemini-cli` | Google Gemini CLI | `gemini -p PROMPT --yolo` | none | without a busy marker until you set one | no |
+| `antigravity` (alias `agy`) | Google Antigravity CLI | `agy -p PROMPT --output-format json --mode auto` | `agy -p MSG --continue --output-format json --mode auto` | without a busy marker until you set one; `antigravity-jsonl` transcript adapter (see [Antigravity](configuration.md#antigravity)) | no |
 
 `codex exec resume --last` picks the most recent session in the current directory, and each worker has its own worktree, so follow-ups reach the right worker.
 
@@ -216,6 +217,7 @@ What theseus reads from a CLI's record of its own session goes through one adapt
 | --- | --- |
 | `claude-code-jsonl` | Claude Code's JSONL transcript: the session of a supervised agent from its stored session id, of another pane from the client's `interactive.sessions_dir`; user prompts and slash commands as typed, assistant text as Markdown, each tool call as one `Tool: key argument` line and each result as a one-line preview (both unfold), never thinking, system reminders, command output or compaction summaries |
 | `opencode-sqlite` | OpenCode's session database (`OPENCODE_DB`, else `$XDG_DATA_HOME/opencode/opencode.db`, also when set in `interactive.env`), read-only: the session of a supervised agent from its stored session id (the database names no pane or process, so a hand-made pane gets none); user text, assistant text as Markdown, tool calls and their results, the error that ended a failed turn (with OpenCode's error kind mapped to `rate_limit`, `server_error` or `connection_lost`), never reasoning or compaction summaries; the context in use is the last answer's input, output, reasoning and cached tokens, the figure OpenCode's own meter shows |
+| `antigravity-jsonl` | Antigravity CLI's JSONL transcript (`<sessions_dir>/<conversation-id>/.system_generated/logs/transcript.jsonl`, defaulting to `~/.gemini/antigravity-cli/brain` or `$AGY_APP_DATA_DIR/brain`): user prompts, assistant text as Markdown, tool calls and their finished results, model, context tokens (`input_tokens + cache_read_tokens + output_tokens`) and error steps; thinking and system messages are left out |
 | `pane-history` | Nothing; the console shows the pane's scrollback (`capture-pane -S`) |
 | `none` | Nothing; no Conversation tab |
 
@@ -235,7 +237,7 @@ A state is a dict with:
 Adding a CLI means writing that module in its own record format, adding its name to `ADAPTERS`, and setting `transcript = "<name>"` in the preset's `interactive` table. The console redacts API keys, key hashes and email addresses in everything it shows from a transcript or the scrollback.
 ## What depends on the preset
 
-Every theseus feature is driven by profile keys, never by a hard-coded agent. The `claude-code` preset sets them all; `opencode` sets all but `status_command`, `sessions_dir` and `messaging` (see [OpenCode](configuration.md#opencode)); the codex and gemini-cli presets set only `launch`, `compact`, `clear`, `transcript = "pane-history"` and `messaging = false`, and degrade as follows until you add the missing keys to their `[workers.<name>.interactive]`:
+Every theseus feature is driven by profile keys, never by a hard-coded agent. The `claude-code` preset sets them all; `opencode` sets all but `status_command`, `sessions_dir` and `messaging` (see [OpenCode](configuration.md#opencode)); the `antigravity`, `codex` and `gemini-cli` presets leave `busy_pattern`, `gateway_patterns`, `input_pattern` and `prompt_patterns` unset (see [Antigravity](configuration.md#antigravity)) and degrade as follows until you add the missing keys to their `[workers.<name>.interactive]`:
 
 | Feature | Needs | Without it |
 | --- | --- | --- |
