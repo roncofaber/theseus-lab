@@ -1,6 +1,21 @@
 # Agent profiles
 
-theseus never assumes one agent vendor. An agent profile describes how to launch, resume and drive one coding agent CLI, and every worker (headless, persistent or subagent) runs under one. `theseus agents profiles` lists the profiles, which CLIs are installed and the effective settings.
+theseus never assumes one agent vendor. An agent profile describes how to launch, resume and drive one coding agent CLI, and every worker (headless, persistent or subagent) runs under one.
+
+## Managing profiles
+
+```sh
+theseus profiles                         # every profile: preset, model, capability, capacity, file, verified, CLI found
+theseus profiles show NAME [--json]      # every resolved key, with the file or preset it comes from
+theseus profiles add NAME --preset P [--model M] [--label TEXT] [--capability N] [--capacity N] [--pool P] \
+    [--args "--effort high"] [--project] [--edit]
+theseus profiles edit [NAME] [--project] # $VISUAL or $EDITOR at the profile's section
+theseus profiles remove NAME [--project]
+```
+
+A change goes to the host `~/.config/theseus/config.toml`, so every project sees the profile, or with `--project` to the project's Git-ignored `theseus.local.toml`. Outside a project only the presets and the host file count. Every change is checked: add and remove keep the file only when it validates, and edit checks the file after each save and, while it does not validate, asks whether to edit again, revert or keep it (without a terminal it reverts). `edit NAME` opens the file that defines the profile (a project file that only overrides some keys is `--project`); `edit` alone opens the whole file. `theseus agents profiles` remains as a shorter listing.
+
+In the console, the Host tab's PROFILES table lists the host's profiles: Enter shows one with every key and its source, `E` opens it in your editor (a package preset becomes a `my-<preset>` variant first), and Ctrl+P adds a profile from any preset or opens the host config.
 
 ## Presets
 
@@ -85,7 +100,7 @@ A project section with the same name as a host profile overrides only the keys i
 | `session` | `preassign` when the CLI accepts a session ID theseus chooses (`{session}`), `none` otherwise |
 | `session_prefix` | What a preassigned session ID starts with, before a random UUID (OpenCode: `ses_`, the only ids it accepts) |
 | `model`, `model_flag` | The model; the item `{model_args}` expands to `[model_flag, model]` only when a model is set |
-| `context_limit` | The context window in tokens that the console measures an agent's context use against when its model is not in `[models] context` (200000) |
+| `context_limit` | Ignored (accepted, with a warning): the context window comes from the agent CLI's own model setting or `[models] context` (see [Model context windows](configuration.md#model-context-windows)) |
 | `permission_mode` | Substituted for `{permission_mode}` (Claude Code: `auto`, `acceptEdits`, `bypassPermissions`, ...) |
 | `env` | Extra environment for the run; `{model}` is substituted |
 | `model_env` | Environment added to `env` only when a model is set, for a CLI whose interactive mode has no model flag (OpenCode: `OPENCODE_CONFIG_CONTENT = '{"model": "{model}"}'`) |
@@ -236,7 +251,7 @@ A state is a dict with:
 - `total`: how many entries were ever read;
 - `key`: names the record; a new key (a new session, a rewritten file) makes the console start over;
 - `updated`: the epoch of the record's newest write; an agent whose record is being written counts as active, even when it changes no file;
-- `limit` (optional): the context window the CLI itself uses for the model (`opencode-sqlite`: OpenCode's configured `limit.context`), which takes precedence over `[models] context` and `context_limit`.
+- `limit` (optional): the context window the CLI itself uses for the model (`opencode-sqlite`: OpenCode's configured `limit.context`), which takes precedence over `[models] context`; without either the console shows `n/a`.
 
 Adding a CLI means writing that module in its own record format, adding its name to `ADAPTERS`, and setting `transcript = "<name>"` in the preset's `interactive` table. The console redacts API keys, key hashes and email addresses in everything it shows from a transcript or the scrollback.
 ## What depends on the preset

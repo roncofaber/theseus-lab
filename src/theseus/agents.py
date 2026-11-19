@@ -197,25 +197,21 @@ def supervised_pids(ttl=5.0):
 
 
 LIMIT_SOURCES = {"harness": "the agent CLI's own setting for the model", "models": "[models] context for the model",
-                 "profile": "the profile's context_limit (no setting for the model)"}
+                 None: "unknown: the CLI reports none and [models] context has no entry for the model"}
 
 
 def context_use(conf, profile, transcript, hint):
     """{"tokens", "limit", "limitSource", "model", "source"} of the agent's context: the transcript's last answer, else
     the pane's context hint, else None. Both follow the model of the newest answer, so a model switched inside the
     agent's CLI shows at once. The limit is the CLI's own window for that model when its adapter reports one
-    ("harness"), else the model's [models] context ("models"), else the profile's context_limit ("profile")."""
+    ("harness"), else the model's [models] context ("models"), else None: theseus never guesses a window."""
     from . import profiles
     transcript = transcript or {}
     limit, source = transcript.get("limit"), "harness"
     if not limit:
         limit, source = profiles.model_context_limit(conf, transcript.get("model")), "models"
     if not limit:
-        source = "profile"
-        try:
-            limit = int(profiles.resolve(conf, profile).get("context_limit") or profiles.CONTEXT_LIMIT)
-        except (profiles.ProfileError, ValueError, TypeError):
-            limit = profiles.CONTEXT_LIMIT
+        limit, source = None, None
     use = {"limit": limit, "limitSource": source, "model": transcript.get("model")}
     if transcript.get("tokens"):
         return {"tokens": transcript["tokens"], "source": "transcript", **use}

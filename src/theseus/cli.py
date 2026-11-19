@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 from importlib import resources
@@ -207,7 +208,8 @@ def config_check():
                 if label in ("project", "project-local"):
                     for name, section in (data.get("workers") or {}).items():
                         if isinstance(section, dict):
-                            warnings += [f"{file}: [workers.{name}] {problem}" for problem in profiles.problems(name, section)]
+                            warnings += [f"{file}: [workers.{name}] {problem}" for problem in
+                                         profiles.problems(name, section) + profiles.ignored(section)]
         except (cfg.ConfigError, profiles.ProfileError) as error:
             if not (errors and str(error).startswith(str(hostconfig.path()))):
                 errors.append(str(error))
@@ -1318,6 +1320,58 @@ def cmd_projects(args):
         print("no projects registered yet: run any theseus command inside a project")
 
 
+def cmd_profiles(args):
+    from . import profileedit, profiles
+    conf = profileedit.current(host_only=args.host)
+    project = True if args.project else None
+    try:
+        if args.action in ("list", "ls"):
+            found = profileedit.rows(conf)
+            if args.json:
+                print(json.dumps(found, indent=2))
+                return
+            print(f"# {'profiles of ' + conf.name + ' (host and project files)' if conf.root else 'host profiles (outside a project)'}")
+            for row in found:
+                if row.get("error"):
+                    print(f"{row['name']:<24} error: {row['error']}")
+                    continue
+                state = ("verified" if row["verified"] else "unverified") + ("" if row["found"] else f", {row['command']} missing")
+                print(f"{row['name']:<24} {'default' if row['default'] else '':<8} {row['preset']:<16} "
+                      f"{row['model'] or 'CLI default':<28} cap {row['capability']} x{row['capacity']}  "
+                      f"[{row['defined']}] {state}")
+            return
+        name = args.name
+        if args.action == "show":
+            if not name:
+                sys.exit("usage: theseus profiles show NAME")
+            rows = profileedit.detail(conf, name)
+            if args.json:
+                print(json.dumps({key: {"value": value, "source": source} for key, value, source in rows}, indent=2))
+                return
+            print(f"# {name}: defined in {profileedit.defined_in(conf, name)}")
+            for key, value, source in rows:
+                print(f"{key[len('workers.') + len(name) + 1:]} = {json.dumps(value)}    # {source}")
+        elif args.action == "add":
+            if not name or not args.preset:
+                sys.exit("usage: theseus profiles add NAME --preset PRESET [--model M] [--label TEXT] [--capability N] "
+                         "[--capacity N] [--pool P] [--args \"ARGS\"] [--project] [--edit]")
+            values = {"label": args.label, "model": args.model, "capability": args.capability, "capacity": args.capacity,
+                      "pool": args.pool, "extra_args": shlex.split(args.args) if args.args else None}
+            file, line = profileedit.add(conf, name, args.preset, values, project=bool(args.project))
+            print(f"added [workers.{name}] to {file} (line {line})")
+            if args.edit:
+                print(profileedit.edit(file, name))
+        elif args.action == "edit":
+            file = profileedit.file_of(conf, name, project) if name else profileedit.target_file(conf, bool(args.project))
+            print(profileedit.edit(file, name))
+        elif args.action in ("remove", "rm"):
+            if not name:
+                sys.exit("usage: theseus profiles remove NAME [--project]")
+            print(f"removed [workers.{name}] from {profileedit.remove(conf, name, project)}")
+    except (profileedit.ProfileFileError, profiles.ProfileError) as error:
+        sys.exit(f"theseus: {error}")
+
+
 def cmd_close(args):
     from . import closure, coordinator
     conf = load()
@@ -1903,6 +1957,23 @@ def build_parser():
     p.add_argument("--json", action="store_true")
     p.add_argument("--all", action="store_true", help="include closed projects")
     p.set_defaults(func=cmd_projects)
+
+    p = sub.add_parser("profiles", help="agent profiles: list, show NAME, add NAME --preset P, edit [NAME] ($EDITOR), "
+                                        "remove NAME; host config.toml by default, theseus.local.toml with --project")
+    p.add_argument("action", nargs="?", default="list", choices=("list", "ls", "show", "add", "edit", "remove", "rm"))
+    p.add_argument("name", nargs="?")
+    p.add_argument("--preset", help="add: the preset the profile extends (theseus profiles lists them)")
+    p.add_argument("--model", help="add: the model id")
+    p.add_argument("--label", help="add: a one-line description")
+    p.add_argument("--capability", type=int, help="add: capability rank (default 1)")
+    p.add_argument("--capacity", type=int, help="add: agents the profile may run at once")
+    p.add_argument("--pool", help="add: the host pool its agents share")
+    p.add_argument("--args", help="add: extra CLI arguments as one quoted string (extra_args), e.g. --args \"--effort high\"")
+    p.add_argument("--project", action="store_true", help="the project's theseus.local.toml instead of the host config")
+    p.add_argument("--host", action="store_true", help="list, show: host profiles only, even inside a project")
+    p.add_argument("--edit", action="store_true", help="add: then open it in $EDITOR")
+    p.add_argument("--json", action="store_true", help="list, show: JSON")
+    p.set_defaults(func=cmd_profiles)
 
     p = sub.add_parser("close", help="close this project: export its tasks, stop its agents, queue driver and coordinator, "
                                      "and keep them stopped (hidden from the console) until `theseus reopen`")

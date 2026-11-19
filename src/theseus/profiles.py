@@ -136,7 +136,6 @@ PRESETS = {
         "session": "preassign",
         "model_flag": "--model",
         "model": "",
-        "context_limit": 200000,
         "permission_mode": "auto",
         "env": {},
         "retry": True,
@@ -230,7 +229,6 @@ PRESETS = {
         "session": "none",
         "model_flag": "--model",
         "model": "",
-        "context_limit": 1048576,
         "permission_mode": "auto",
         "env": {},
         "retry": False,
@@ -239,7 +237,6 @@ PRESETS = {
     },
 }
 ALIASES = {"claude": "claude-subagent", "agy": "antigravity"}
-CONTEXT_LIMIT = 200000
 
 
 def model_context_limit(conf, model):
@@ -250,9 +247,12 @@ def model_context_limit(conf, model):
     matches = [key for key in table if key.endswith("*") and model.startswith(key[:-1])]
     return int(table[max(matches, key=len)]) if matches else None
 DEFAULT = "claude-code"
+# Keys a profile may still set although theseus ignores them, each with what replaced it.
+IGNORED = {"context_limit": "the context window comes from the agent CLI's own model setting or [models] context, "
+                            "never from the profile; remove it"}
 OVERRIDABLE = set(PRESETS["claude-code"]) | {"preset", "fallback", "pool", "mcp_servers", "mcp_flags", "extra_args",
                                              "capability", "health", "session_prefix", "model_env", "mcp_format",
-                                             "mcp_env"}
+                                             "mcp_env"} | set(IGNORED)
 MCP_FORMATS = ("claude", "opencode")
 CAPABILITY = 1
 INTERACTIVE_KEYS = set(CLAUDE_INTERACTIVE) | {"launch", "resume"}
@@ -261,6 +261,11 @@ THESEUS_MCP = {"command": "theseus", "args": ["mcp"]}
 
 class ProfileError(Exception):
     pass
+
+
+def ignored(section):
+    """Notes for keys of one [workers.<name>] table that theseus accepts but no longer uses."""
+    return [f"{key} is ignored: {why}" for key, why in IGNORED.items() if key in section]
 
 
 def problems(name, section):

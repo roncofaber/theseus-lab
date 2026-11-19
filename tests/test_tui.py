@@ -218,6 +218,27 @@ class ClosedConsoleTests(ConsoleTests):
     test_the_help_screen_opens = None
 
 
+class ProfilesConsoleTests(ConsoleTests):
+    async def test_the_host_tab_lists_profiles_and_offers_to_edit_or_create_them(self):
+        from theseus import profiles
+        from theseus.tui import commands
+        from theseus.tui.popups import Dialog
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            await pilot.press("1")
+            table = self.app.active_view().query_one("#profiles")
+            await self.settle(pilot, lambda: table.row_count == len(profiles.PRESETS))
+            titles = [entry[0] for entry in commands.host_entries(self.app)]
+            self.assertIn("New profile from antigravity ($EDITOR)", titles)
+            self.assertIn("Edit the host config ($EDITOR)", titles)
+            self.app.show_profile("antigravity")
+            await self.settle(pilot, lambda: isinstance(self.app.screen, Dialog))
+
+    test_the_console_shows_every_project_and_its_agents_queue_and_events = None
+    test_the_agent_popup_mirrors_the_pane_and_sends_a_line = None
+    test_the_help_screen_opens = None
+
+
 class TranscriptTests(Sandbox):
     """The Claude Code transcript adapter over temporary session files."""
 

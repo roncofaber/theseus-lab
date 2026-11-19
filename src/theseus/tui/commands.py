@@ -76,6 +76,32 @@ def project_commands(item):
     return commands
 
 
+def unique_name(base, taken):
+    name, number = base, 2
+    while name in taken:
+        name, number = f"{base}-{number}", number + 1
+    return name
+
+
+def host_entries(app):
+    """The Host tab's actions: edit or create agent profiles in $EDITOR (the host config.toml)."""
+    from .. import profiles
+    found = (app.snap or {}).get("profiles") or []
+    taken = {p["name"] for p in found}
+    entries = [("Edit the host config ($EDITOR)", "~/.config/theseus/config.toml, checked on save",
+                partial(app.edit_profiles, ["profiles", "edit", "--host"]))]
+    for profile in found:
+        if profile.get("defined") != "preset":
+            entries.append((f"Edit profile {profile['name']} ($EDITOR)", "its section of the host config, checked on save",
+                            partial(app.edit_profiles, ["profiles", "edit", profile["name"], "--host"])))
+    for preset in sorted(profiles.PRESETS):
+        name = unique_name(f"my-{preset}", taken)
+        entries.append((f"New profile from {preset} ($EDITOR)", f"adds [workers.{name}] to the host config and opens it; "
+                                                                f"rename it there",
+                        partial(app.edit_profiles, ["profiles", "add", name, "--preset", preset, "--edit"])))
+    return entries
+
+
 class ConsoleCommands(Provider):
     """The actions of the active project tab, plus the coordinator popup and handoffs of delivered tasks."""
 
@@ -83,6 +109,8 @@ class ConsoleCommands(Provider):
         app = self.app
         item = app.active_item()
         found = []
+        if item is None and app.snap is not None:
+            return host_entries(app)
         if item and item.get("available"):
             name = item["name"]
             for title, help_text, argv, question in project_commands(item):

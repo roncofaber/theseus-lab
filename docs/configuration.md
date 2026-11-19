@@ -282,8 +282,9 @@ This updates the workflow skills, the Git hook and helper scripts, adds missing 
 The console measures context use against the window of the model that answered last in each session's transcript, for workers and the coordinator alike, so a model switched inside the agent's CLI shows at once (the model column and the coordinator panel follow it too). The window is, in order:
 
 1. the CLI's own setting for that model, when its transcript adapter reports one: OpenCode's `providers.<provider>.models.<model>.limit.context` in the user's global OpenCode configuration;
-2. `[models] context`, which maps model ids to windows; a key ending in `*` matches by prefix and the longest match wins. The defaults cover current Claude models (1M, with 200K for Claude Haiku 4.5 and the 4.5 generation) and `gemini-*` (1,048,576);
-3. the profile's `context_limit`, marked `*` in the console, since it does not know the model.
+2. `[models] context`, which maps model ids to windows; a key ending in `*` matches by prefix and the longest match wins. The defaults cover current Claude models (1M, with 200K for Claude Haiku 4.5 and the 4.5 generation) and `gemini-*` (1,048,576).
+
+Otherwise the window is unknown: the console shows the tokens in use and `n/a`, with no meter, rather than a guess. Claude Code and agy report no window of their own, so their models need an entry here. A profile's old `context_limit` key is accepted but ignored, and `theseus config check` warns about it.
 
 Add gateway models in the host config, for example:
 
@@ -305,7 +306,7 @@ What the preset does:
 - MCP: `mcp_servers` writes `<data>/mcp/<profile>/<agent>.json` in OpenCode's format and names it in `OPENCODE_CONFIG` (`mcp_format = "opencode"`, `mcp_env`). The `theseus` entry carries the agent's `THESEUS_CREDENTIALS` in `environment`; OpenCode passes local servers its whole environment plus that table, with the project root as working directory. OpenCode merges the file over its own configuration and ignores a partial entry, so the file also lists each server of your global OpenCode configuration (`~/.config/opencode/opencode.json`, `opencode.jsonc`, `config.json`) that `mcp_servers` leaves out as a complete entry with `"disabled": true`; `mcp_servers = []` thus starts an agent with no MCP servers at all, as for Claude Code. A server defined in the project's own `opencode.json` still loads.
 - Updates: the preset sets `OPENCODE_DISABLE_AUTOUPDATE=1` in `env`, so agents never replace the binary under each other; update OpenCode yourself (a profile that sets its own `env` replaces this, so keep it there).
 - Screen: busy is `esc interrupt` on the bottom row (also while compacting and while OpenCode retries a gateway error); its permission prompt (`Allow once  Always allow  Reject`) and question dialog (`enter submit  esc dismiss`) count as waiting for a human, and nothing is typed into them; the context hint is the `7.0K (3%)` figure of the bottom row; `/compact`, `/clear` and `/exit` are its commands; `C-u` empties the input box in one press, wrapped or not.
-- Transcript: `opencode-sqlite` reads the agent's session from OpenCode's database for the context meter, the gateway classification and the Conversation tab (see [Transcript adapters](agent-profiles.md#transcript-adapters)). The meter's window is the `limit.context` OpenCode's own configuration sets for the answer's provider and model, so `context_limit` matters only for a model OpenCode does not configure.
+- Transcript: `opencode-sqlite` reads the agent's session from OpenCode's database for the context meter, the gateway classification and the Conversation tab (see [Transcript adapters](agent-profiles.md#transcript-adapters)). The meter's window is the `limit.context` OpenCode's own configuration sets for the answer's provider and model.
 - Gateway errors: OpenCode retries a 429 or 5xx itself, about ten times over a minute and a half, showing `Retrying in 5s · attempt 4 · <message>` while busy; theseus sees a working agent until the turn fails, then the `Error: <message>` row and the transcript's error (status and kind) start the usual recovery.
 
 Skills and instructions: OpenCode reads `AGENTS.md` from the working directory up to the project root (and `~/.config/opencode/AGENTS.md`), and discovers skills in the `.agents/skills`, `.claude/skills` and `.opencode/skills` directories of the project and of your home directory (checked for the project's `.agents/skills`). The skills `theseus scaffold` installs in `.agents/skills` (with the `.claude/skills` link) therefore load as they are; `/skills` in the TUI lists them, once each.
@@ -321,7 +322,6 @@ env_passthrough = ["GATEWAY_API_KEY"]       # supervised agents start with an al
 [workers.opencode-gateway]
 preset = "opencode"
 model = "gateway/coder-model"
-context_limit = 229376
 capacity = 4
 pool = "gateway"
 mcp_servers = ["theseus"]
@@ -330,7 +330,6 @@ mcp_servers = ["theseus"]
 [workers.opencode-coordinator]
 preset = "opencode"
 model = "gateway-openai/large-model"
-context_limit = 200000
 capacity = 1
 ```
 

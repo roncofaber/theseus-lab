@@ -27,6 +27,7 @@ WIDTHS = {
     "events": {"time": 8, "kind": 11, "agent": 16, "task": 0.7, "detail": 1.6},
     "host-events": {"time": 8, "project": 12, "kind": 11, "agent": 24, "task": 0.7, "detail": 1.6},
     "pools": {"pool": 12, "working": 1.0, "holders": 1.5, "claims": 1.0},
+    "profiles": {"profile": 22, "preset": 13, "model": 1.0, "cap": 4, "agents": 6, "pool": 10, "file": 8, "state": 0.8},
     "gateway": {"time": 8, "project": 12, "agent": 24, "task": 0.8, "error": 1.0, "attempt": 8, "outcome": 0.8, "pool": 1.0},
     "projects": {"project": 14, "milestone": 1.0, "coordinator": 13, "watcher": 9, "ready": 6, "working on": 10,
                  "review": 13, "attention": 1.0, "agents": 1.0, "pool": 10, "gateway": 9, "today": 11},
@@ -35,6 +36,7 @@ WAITING_COLUMNS = ("status", "pri", "task", "min cap", "room", "for", "posted", 
 EVENT_COLUMNS = ("time", "kind", "agent", "task", "detail")
 HOST_EVENT_COLUMNS = ("time", "project", "kind", "agent", "task", "detail")
 POOL_COLUMNS = ("pool", "working", "holders", "claims")
+PROFILE_COLUMNS = ("profile", "preset", "model", "cap", "agents", "pool", "file", "state")
 GATEWAY_COLUMNS = ("time", "project", "agent", "task", "error", "attempt", "outcome", "pool")
 MEM_WARN, MEM_ALARM = 0.10, 0.25
 CTX_WARN, CTX_ALARM = 0.5, 0.8
@@ -44,8 +46,8 @@ CPU_HELP = "CPU: the agent's processes in percent of one core; 250% is two and a
 MEM_HELP = (f"RAM: the agent's resident memory; yellow from {MEM_WARN:.0%} of system RAM, red from {MEM_ALARM:.0%} "
             f"(the popup shows the share)")
 CTX_HELP = (f"context: tokens in the agent's context after its last answer (its transcript, else the pane's /clear "
-            f"hint) of the window of the answer's model: the agent CLI's own setting, else [models] context, else the "
-            f"profile's context_limit (marked *); yellow from {CTX_WARN:.0%}, red from {CTX_ALARM:.0%}")
+            f"hint) of the window of the answer's model: the agent CLI's own setting, else [models] context, else n/a "
+            f"(no meter); yellow from {CTX_WARN:.0%}, red from {CTX_ALARM:.0%}")
 
 
 def cell(text, style=""):
@@ -85,13 +87,15 @@ def context(use):
     """Context in use of its limit (`87k/200k`) after a small meter colored by fullness, or '-'."""
     if not use or not use.get("tokens"):
         return cell("-", "dim")
-    limit = use.get("limit") or 0
-    fraction = use["tokens"] / limit if limit else 0
-    style = theme.RED if fraction >= CTX_ALARM else theme.YELLOW if fraction >= CTX_WARN else theme.GREEN
-    shown = charts.meter(fraction, 4, style=style)
-    shown.append(f" {tokens(use['tokens'])}/{tokens(limit) if limit else '?'}")
-    if use.get("limitSource") == "profile":
-        shown.append("*", style="dim")
+    limit = use.get("limit")
+    if limit:
+        fraction = use["tokens"] / limit
+        style = theme.RED if fraction >= CTX_ALARM else theme.YELLOW if fraction >= CTX_WARN else theme.GREEN
+        shown = charts.meter(fraction, 4, style=style)
+        shown.append(f" {tokens(use['tokens'])}/{tokens(limit)}")
+    else:
+        shown = Text(f"{tokens(use['tokens'])}/")
+        shown.append("n/a", style="dim")
     if use.get("source") == "pane hint":
         shown.append(" ~", style="dim")
     return shown
@@ -100,8 +104,8 @@ def context(use):
 def context_detail(use):
     """The context cell plus where its limit comes from, for a popup."""
     shown = context(use)
-    if use and use.get("tokens") and use.get("limitSource"):
-        shown.append(f"  limit: {LIMIT_SOURCES.get(use['limitSource'], use['limitSource'])}", style="dim")
+    if use and use.get("tokens"):
+        shown.append(f"  limit: {LIMIT_SOURCES.get(use.get('limitSource'), use.get('limitSource'))}", style="dim")
     return shown
 
 
@@ -254,6 +258,38 @@ def event_rows(events, project=None, sort=("time", True)):
     column, descending = sort
     order = sorted(enumerate(events), key=lambda pair: (EVENT_SORT[column](pair[1]), pair[0]), reverse=descending)
     return [event_row(record, number if "id" not in record else None, project) for number, record in order]
+
+
+def profile_rows(found):
+    """One row per agent profile of the host: preset, model, capability dots, how many agents it may run, pool, the
+    file that defines it (host, or preset for a package preset) and whether its CLI is verified and found."""
+    rows = []
+    for item in found or []:
+        if item.get("error"):
+            rows.append(row(f"profile:{item['name']}", [cell(item["name"], "bold"), cell("error", theme.RED),
+                                                        cell(item["error"], theme.RED), *["-"] * 5]))
+            continue
+        state, style = ("verified", theme.GREEN) if item["verified"] else ("unverified", theme.YELLOW)
+        if not item["found"]:
+            state, style = f"{item['command']} missing", theme.RED
+        name = Text(item["name"], style="bold")
+        if item.get("default"):
+            name.append(" default", style="dim")
+        rows.append(row(f"profile:{item['name']}", [
+            name, cell(item["preset"], "dim"), cell(item["model"] or "CLI default", "" if item["model"] else "dim"),
+            level_cell(item["capability"]), cell(str(item["capacity"] if item["capacity"] is not None else "-")),
+            cell(item["pool"] or "-", "dim"), cell(item["defined"], "dim" if item["defined"] == "preset" else ""),
+            cell(state, style)], item.get("label") or ""))
+    return rows
+
+
+def profile_text(name, detail, defined):
+    """A profile's popup: every resolved key with the file or preset it comes from."""
+    shown = Detail().section(f"profile {name}")
+    shown.add("defined in", defined, "bold")
+    for key, value, source in detail:
+        shown.add(key.split(".", 2)[2], f"{value!r}  ({source})" if not isinstance(value, str) else f"{value}  ({source})")
+    return shown.render()
 
 
 def pool_rows(state_pools):

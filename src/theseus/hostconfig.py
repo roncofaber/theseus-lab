@@ -207,6 +207,8 @@ def validate(data, file, profile_problems, tool_names=None):
             errors.append(f"{file}: [workers] {name} is not a profile table; the host [workers] holds only [workers.<name>] profiles{hint}")
             continue
         errors += [f"{file}: [workers.{name}] {problem}" for problem in profile_problems(name, value)]
+        from . import profiles
+        warnings += [f"{file}: [workers.{name}] {note}" for note in profiles.ignored(value)]
         fallback = value.get("fallback")
         if isinstance(fallback, str) and fallback and fallback != name and not isinstance((data.get("workers") or {}).get(fallback), dict):
             from . import profiles

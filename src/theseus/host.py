@@ -52,6 +52,16 @@ def project_snapshot(root, sample_host=None):
             "lastEvent": history[-1]["time"] if history else None, "gatewayAttempts": gateway.settings(conf)["attempts"]}
 
 
+def profile_rows():
+    """The host's agent profiles (package presets and the host config.toml), for the Host tab; [] when the host file
+    does not load."""
+    from . import profileedit
+    try:
+        return profileedit.rows(profileedit.HostConfig())
+    except Exception:
+        return []
+
+
 def pool_snapshots():
     try:
         return [pools.status(name) for name in sorted(pools.definitions())]
@@ -125,7 +135,7 @@ def snapshot(roots=None):
         for lease in (pool.get("leases") or {}).values():
             lease["agentLabel"] = agent_label(lease.get("project"), lease.get("agent"), shorts)
     return {"time": datetime.now(timezone.utc).isoformat(), "host": host, "projects": projects,
-            "pools": found_pools, "gateway": top.gateway_health(), "health": top.health_state(), "gatewayErrors": errors,
+            "pools": found_pools, "profiles": profile_rows(), "gateway": top.gateway_health(), "health": top.health_state(), "gatewayErrors": errors,
             "events": events[-300:]}
 
 

@@ -32,7 +32,10 @@ MOUSE_HELP = (("click a row", "highlight it (click elsewhere or Escape clears th
               ("click outside a popup", "close the popup"),
               ("wheel", "scroll the section under the pointer"))
 TABLE_HELP = (("up, down", "highlight a row (the first press shows the highlight)"),
-              ("Enter", "open the highlighted row's details"))
+              ("Enter", "open the highlighted row's details"),
+              ("PROFILES", "Host tab: f highlights it, Enter shows every key of a profile and where it comes from, E opens "
+                           "it in $EDITOR (checked on save; a package preset becomes a my-<preset> variant); Ctrl+P adds a "
+                           "profile from a preset or edits the host config"))
 
 
 def pane_id(root):
@@ -344,6 +347,8 @@ class HostView(VerticalScroll):
             yield BarChart(id="host-chart", classes="chart")
         with Panel("POOLS", id="pools-panel"):
             yield Table(R.POOL_COLUMNS, widths=R.WIDTHS["pools"], id="pools")
+        with Panel("PROFILES", id="profiles-panel"):
+            yield Table(R.PROFILE_COLUMNS, widths=R.WIDTHS["profiles"], optional=("pool", "file", "preset"), id="profiles")
         with Panel("GATEWAY", id="gateway-panel"):
             yield Table(R.GATEWAY_COLUMNS, widths=R.WIDTHS["gateway"], optional=R.OPTIONAL["gateway"], id="gateway")
         with Panel("EVENTS", id="events-panel", classes="grow"):
@@ -367,6 +372,8 @@ class HostView(VerticalScroll):
         self.query_one("#host-chart", BarChart).plot(charts.project_series(snap["projects"]))
         fill(self.query_one("#projects-table", Table), R.matches(R.project_rows(snap["projects"]), text))
         fill(self.query_one("#pools", Table), R.matches(R.pool_rows(snap["pools"]), text))
+        self.query_one("#profiles-panel", Panel).border_subtitle = "Enter details · E edit in $EDITOR · Ctrl+P new"
+        fill(self.query_one("#profiles", Table), R.matches(R.profile_rows(snap.get("profiles")), text))
         self.query_one("#gateway-panel", Panel).border_title = R.gateway_title(snap.get("gateway"))
         errors = snap.get("gatewayErrors") or []
         self.gateway_records = {f"gateway:{error['id']}": error for error in errors}
@@ -501,7 +508,7 @@ class TopApp(App):
     #coordinator-panel { width: 2fr; }
     Screen.-narrow #top-row { layout: vertical; max-height: 65%; }
     Screen.-narrow #top-row > Panel { width: 1fr; }
-    #attention-panel, #pools-panel, #gateway-panel, #projects { max-height: 20%; overflow-y: auto; }
+    #attention-panel, #pools-panel, #gateway-panel, #projects, #profiles-panel { max-height: 20%; overflow-y: auto; }
     #resources { max-height: 30%; overflow-y: auto; }
     DataTable { height: auto; }
     VerticalScroll, DataTable, Panel { scrollbar-size-vertical: 1; }
@@ -534,6 +541,9 @@ class TopApp(App):
         Binding("a", "focus_table('agents')", "Highlight a row in AGENTS", show=False),
         Binding("w", "focus_table('waiting')", "Highlight a row in WAITING", show=False),
         Binding("e", "focus_table('events')", "Highlight a row in EVENTS", show=False),
+        Binding("E", "edit_profile", "Edit profile", key_display="E", show=False,
+                tooltip="Open the highlighted agent profile (Host tab, PROFILES) in $EDITOR"),
+        Binding("f", "focus_table('profiles')", "Highlight a row in PROFILES", show=False),
         Binding("s", "sort_next", "Sort EVENTS by the next column", show=False),
         Binding("S", "sort_reverse", "Reverse the EVENTS sort order", show=False),
         *[Binding(str(n), f"goto({n})", f"Tab {n}", show=False) for n in range(1, 10)],
@@ -867,8 +877,8 @@ class TopApp(App):
                       "  PROJECTS (Host tab): the same figures, one row per project; Enter opens its tab.\n"
                       "  Agents show short names (profile-slot for supervised agents; pane private: theseus's own tmux);\n"
                       "  the Host tab shows them as project/short.\n"
-                      "  A cut cell ends in an ellipsis; its row's popup shows it whole. ~ marks an estimated context, * a\n"
-                      "  context limit from the profile's context_limit rather than the model's own window.\n")
+                      "  A cut cell ends in an ellipsis; its row's popup shows it whole. ~ marks an estimated context; n/a\n"
+                      "  a window neither the agent CLI nor [models] context gives for the model.\n")
         legend.append("\ntmux\n", style="bold underline")
         legend.append("  After a jump to a hand-made pane, the tmux key shown in the status line or `theseus top --back`\n"
                       "  returns here; supervised agents open in a new window of your tmux (o) or in place (Enter).\n")
@@ -889,6 +899,8 @@ class TopApp(App):
             self.open_task(view, key)
         elif name == "events":
             self.open_event(view, key)
+        elif name == "profiles" and key.startswith("profile:"):
+            self.show_profile(key.split(":", 1)[1])
         elif name == "gateway" and isinstance(view, HostView) and key in view.gateway_records:
             error = view.gateway_records[key]
             self.push_screen(popups.Dialog(f"gateway error {error.get('label')}", R.gateway_text(error)))
@@ -901,6 +913,47 @@ class TopApp(App):
             self.opened.add(root)
             self.pending_open = root
             self.call_later(self.apply, self.snap)
+
+    def show_profile(self, name):
+        from .. import profileedit
+        try:
+            conf = profileedit.HostConfig()
+            body = R.profile_text(name, profileedit.detail(conf, name), profileedit.defined_in(conf, name))
+        except Exception as error:
+            body = Text(f"{type(error).__name__}: {error}", style=theme.RED)
+        self.push_screen(popups.Dialog(f"profile {name} (E edits it in $EDITOR)", body))
+
+    def action_edit_profile(self):
+        view = self.active_view()
+        if not isinstance(view, HostView):
+            self.notify("profiles are on the Host tab (1)", severity="warning")
+            return
+        table = view.query_one("#profiles", Table)
+        key = None
+        if table.row_count and table.cursor_row is not None:
+            key = table.coordinate_to_cell_key((table.cursor_row, 0)).row_key.value
+        if not key or not key.startswith("profile:"):
+            self.notify("highlight a profile first (f, then the arrow keys)", severity="warning")
+            return
+        name = key.split(":", 1)[1]
+        defined = next((p["defined"] for p in (self.snap or {}).get("profiles") or [] if p["name"] == name), "preset")
+        if defined == "preset":
+            self.edit_profiles(["profiles", "add", f"my-{name}", "--preset", name, "--edit"],
+                               f"{name} is a package preset: made the variant my-{name} to edit")
+        else:
+            self.edit_profiles(["profiles", "edit", name, "--host"])
+
+    def edit_profiles(self, argv, note=None):
+        """Run a `theseus profiles` command that opens $EDITOR in this terminal, then refresh."""
+        import subprocess
+        import sys
+        with self.suspend():
+            code = subprocess.run([sys.executable, "-m", "theseus", *argv]).returncode
+        if note and code == 0:
+            self.notify(note)
+        self.notify("profile saved" if code == 0 else f"theseus {' '.join(argv[:3])} failed (theseus config check)",
+                    severity="information" if code == 0 else "error")
+        self.refresh_now()
 
     def project_tasks(self, project):
         for item in self.items.values():

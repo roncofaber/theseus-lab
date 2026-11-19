@@ -33,7 +33,7 @@ A state is a dict with:
 - updated: the epoch of the record's newest write, or None; the agent counts as active while it writes, even when
   it changes no file;
 - limit (optional): the context window the CLI itself uses for that model (OpenCode's configured limit.context), or
-  None; it takes precedence over [models] context and the profile's context_limit.
+  None; it takes precedence over [models] context. Without either the window is unknown (n/a), never guessed.
 
 Two names need no module: "pane-history" (no record is read; the console's Conversation tab shows the pane's tmux
 scrollback, for CLIs that print inline) and "none" (no Conversation tab; context and gateway errors come from the

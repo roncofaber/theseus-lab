@@ -273,13 +273,14 @@ class ContextTests(Sandbox):
         from theseus import agents, profiles
         table = {"context": {"claude-*": 1000000, "claude-haiku-4-5*": 200000, "lbl/cborg-coder-ultra": 229376}}
         conf = SimpleNamespace(section=lambda name: table if name == "models" else {}, root=self.tmp)
-        with mock.patch.object(profiles, "resolve", lambda conf, name: {"context_limit": 123}):
+        with mock.patch.object(profiles, "resolve", lambda conf, name: self.fail("the profile is never consulted")):
             self.assertEqual({"tokens": 5, "limit": 200000, "limitSource": "models", "model": "claude-haiku-4-5",
                               "source": "transcript"},
                              agents.context_use(conf, "p", {"tokens": 5, "model": "claude-haiku-4-5"}, 9))
             limit = lambda model: agents.context_use(conf, "p", {"tokens": 5, "model": model}, None)["limit"]
-            self.assertEqual([1000000, 229376, 123], [limit(m) for m in ("claude-opus-5-5", "lbl/cborg-coder-ultra", "other")])
-            self.assertEqual({"tokens": 9, "limit": 123, "limitSource": "profile", "model": None, "source": "pane hint"},
+            self.assertEqual([1000000, 229376, None], [limit(m) for m in ("claude-opus-5-5", "lbl/cborg-coder-ultra", "other")],
+                             "a model with no known window has none")
+            self.assertEqual({"tokens": 9, "limit": None, "limitSource": None, "model": None, "source": "pane hint"},
                              agents.context_use(conf, "p", {"tokens": None}, 9))
             harness = agents.context_use(conf, "p", {"tokens": 5, "model": "claude-opus-5-5", "limit": 922000}, None)
             self.assertEqual((922000, "harness"), (harness["limit"], harness["limitSource"]),
@@ -602,6 +603,8 @@ class ConsoleCellTests(unittest.TestCase):
         self.assertEqual(list(columns), list(rows.WIDTHS["agents"]))
         self.assertEqual(("608M", "1.2G"), (rows.memory(608 * 2**20, 0).plain, rows.memory(int(1.25 * 2**30), 2**34).plain))
         self.assertEqual(["1M", "229k"], [rows.tokens(1048576), rows.tokens(229376)])
+        self.assertEqual("87k/n/a", rows.context({"tokens": 87000, "limit": None}).plain, "an unknown window is not guessed")
+        self.assertIn("44k/229k", rows.context({"tokens": 44000, "limit": 229376}).plain)
         state = {"agents": [{"name": "w", "pane": "%1", "state": "free"}], "workers": [{"name": "h", "kind": "headless",
                  "task": "t"}], "events": []}
         self.assertEqual([len(columns)] * 2, [len(cells) for _, cells, _ in rows.agent_rows(state)])
@@ -621,3 +624,73 @@ class ClosureTests(Sandbox):
         (self.tmp / "data/closed.json").write_text('{"closed": "2026-11-19T12:00:00", "reason": "done"}')
         with self.assertRaisesRegex(closure.ClosedError, "demo is closed .*theseus reopen"):
             closure.refuse_if_closed(conf, "`agents up`")
+
+
+class ProfileFileTests(Sandbox):
+    def setUp(self):
+        super().setUp()
+        self.host = self.tmp / "host-config.toml"
+        os.environ["THESEUS_CONFIG"] = self.env["THESEUS_CONFIG"] = str(self.host)
+        self.addCleanup(os.environ.pop, "THESEUS_CONFIG", None)
+
+    def test_add_show_edit_and_remove_a_host_profile_checked_at_every_step(self):
+        from theseus import profileedit as pe
+        self.host.write_text("# my profiles\n[workers.kept]\npreset = \"claude-code\"\n")
+        file, line = pe.add(pe.HostConfig(), "gemini-argon", "agy", {"model": "gemini-4-argon-high", "capability": 3,
+                                                                     "extra_args": ["--effort", "high"]})
+        self.assertEqual((self.host, 5), (file, line))
+        conf = pe.HostConfig()
+        row = next(r for r in pe.rows(conf) if r["name"] == "gemini-argon")
+        self.assertEqual(("antigravity", "gemini-4-argon-high", 3, "host"),
+                         (row["preset"], row["model"], row["capability"], row["defined"]))
+        shown = {key: source for key, _, source in pe.detail(conf, "gemini-argon")}
+        self.assertEqual("host", shown["workers.gemini-argon.model"])
+        self.assertEqual("package (preset antigravity)", shown["workers.gemini-argon.command"])
+        with self.assertRaisesRegex(pe.ProfileFileError, "already has"):
+            pe.add(conf, "gemini-argon", "agy")
+        with self.assertRaisesRegex(pe.ProfileFileError, "unknown preset"):
+            pe.add(conf, "x", "nope")
+        with self.assertRaisesRegex(pe.ProfileFileError, "not a profile name"):
+            pe.add(conf, "has space", "agy")
+
+        opened = []
+        def run(argv):
+            opened.append(argv[-2:])
+            text = self.host.read_text()
+            self.host.write_text(text.replace("argon-high", "argon-medium") if len(opened) == 1 else text)
+            return 0
+        os.environ["EDITOR"] = "myeditor --wait"
+        self.addCleanup(os.environ.pop, "EDITOR", None)
+        self.assertIn("saved and valid", pe.edit(self.host, "gemini-argon", ask=lambda _: "e", run=run))
+        self.assertEqual([["+5", str(self.host)]], opened, "the editor opens at the profile's section")
+        self.assertIn('model = "gemini-4-argon-medium"', self.host.read_text())
+
+        answers = iter(["e", "r"])
+        broken = lambda argv: self.host.write_text(self.host.read_text().replace("capability", "capabillity")) or 0
+        good = self.host.read_text()
+        self.assertIn("reverted", pe.edit(self.host, "gemini-argon", ask=lambda _: next(answers), run=broken))
+        self.assertEqual(good, self.host.read_text(), "an invalid save is reverted on request")
+
+        self.assertEqual(self.host, pe.remove(pe.HostConfig(), "gemini-argon"))
+        self.assertEqual("# my profiles\n[workers.kept]\npreset = \"claude-code\"\n", self.host.read_text())
+        with self.assertRaisesRegex(pe.ProfileFileError, "package preset"):
+            pe.file_of(pe.HostConfig(), "codex")
+
+    def test_a_context_limit_in_a_profile_is_accepted_but_ignored_with_a_warning(self):
+        self.host.write_text('[workers.old]\npreset = "opencode"\ncontext_limit = 200000\n')
+        checked = self.theseus("config", "check", cwd=self.tmp)
+        self.assertEqual(0, checked.returncode)
+        self.assertIn("[workers.old] context_limit is ignored", checked.stdout)
+
+    def test_the_cli_lists_and_shows_profiles_outside_a_project(self):
+        self.host.write_text('[workers.gemini-neon]\npreset = "antigravity"\nmodel = "gemini-4-neon-high"\n')
+        listed = self.theseus("profiles", cwd=self.tmp).stdout
+        self.assertIn("host profiles (outside a project)", listed)
+        self.assertRegex(listed, r"gemini-neon\s+antigravity\s+gemini-4-neon-high")
+        shown = json.loads(self.theseus("profiles", "show", "gemini-neon", "--json", cwd=self.tmp).stdout)
+        self.assertEqual({"value": "gemini-4-neon-high", "source": "host"}, shown["workers.gemini-neon.model"])
+        added = self.theseus("profiles", "add", "gemini-carbon", "--preset", "agy", "--model", "gemini-4-carbon-high",
+                             "--args=--effort high", cwd=self.tmp)
+        self.assertIn("added [workers.gemini-carbon]", added.stdout)
+        self.assertIn('extra_args = ["--effort", "high"]', self.host.read_text())
+        self.assertEqual(0, self.theseus("config", "check", cwd=self.tmp).returncode)
