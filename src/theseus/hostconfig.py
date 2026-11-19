@@ -177,8 +177,8 @@ def flatten(table, prefix=""):
 
 
 def project_layer(data):
-    """The host file as a layer of project configuration: [defaults] keys theseus knows, [workers.<name>] profiles and
-    [tools.paths]."""
+    """The host file as a layer of project configuration: [defaults] keys theseus knows, [workers.<name>] profiles,
+    [tools.paths] and [models.context]."""
     layer = {}
     for key, value in flatten(data.get("defaults") or {}).items():
         if key in DEFAULT_KEYS:
@@ -190,6 +190,9 @@ def project_layer(data):
     paths = (data.get("tools") or {}).get("paths")
     if isinstance(paths, dict) and paths:
         layer["tools"] = {"paths": copy.deepcopy(paths)}
+    context = (data.get("models") or {}).get("context")
+    if isinstance(context, dict) and context:
+        layer["models"] = {"context": copy.deepcopy(context)}
     return layer
 
 

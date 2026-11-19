@@ -61,6 +61,13 @@ class PrecedenceTests(HostCase):
         self.assertEqual((6, "opencode"), (conf.raw["limits"]["heavy_runs"], profiles.default_name(conf)))
         self.assertEqual(("project-local", self.project / "theseus.local.toml"), cfg.source(conf, "limits.heavy_runs"))
 
+    def test_host_model_context_limits_reach_projects_over_the_package_defaults(self):
+        self.host_file('[models.context]\n"lbl/coder" = 229376\n"claude-opus-5*" = 500000\n')
+        conf = self.conf()
+        self.assertEqual(229376, profiles.model_context_limit(conf, "lbl/coder"))
+        self.assertEqual(500000, profiles.model_context_limit(conf, "claude-opus-5-5"))
+        self.assertEqual(200000, profiles.model_context_limit(conf, "claude-haiku-4-5"), "package entries stay")
+
     def test_unknown_defaults_are_ignored_and_host_only_sections_stay_out_of_projects(self):
         self.host_file("[defaults]\ngit.remote = \"upstream\"\n")
         self.assertEqual("origin", self.conf().raw["git"]["remote"])

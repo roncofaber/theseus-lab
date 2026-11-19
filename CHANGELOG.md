@@ -111,6 +111,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- The host config's `[models.context]` table now reaches projects (it was validated but never merged), so context meters use the configured window instead of the 200000 fallback.
 - While a project's coordinator runs as the supervised session, the task message no longer tells workers to send their done line to the `[instances] coordinator` session name, which could reach a different session that once held that name; the store delivery and the attention push reach the coordinator.
 - `theseus tasks ls` shows a held task as `held`, not `ready`.
 - A worktree name truncated from a long task id no longer ends in a hyphen or dot (a trailing hyphen next to the path separator is suspected of confusing a client's permission path matching).
