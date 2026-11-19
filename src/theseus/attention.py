@@ -144,8 +144,9 @@ def task_items(conf, queue, tasks, events, now):
         questions = []
     for question in questions:
         found.append(entry(conf, f"question:{question['task']}:{question['time']}", "question", "open question",
-                           epoch(question["time"]), f"{question['task']} asks a question",
-                           f"theseus tasks show {question['task']}; answer with theseus tasks note {question['task']} TEXT",
+                           epoch(question["time"]), f"{question['task']} asks: {' '.join(str(question['text']).split())}",
+                           f"answer with theseus tasks note {question['task']} TEXT (theseus tasks show "
+                           f"{question['task']} lists its open questions)",
                            task=question["task"]))
     backoff = float(conf.section("queue").get("assign_backoff_seconds", 300) or 0)
     by_task = {}
@@ -226,9 +227,12 @@ def agent_items(conf, states, events, now):
     return found
 
 
-def gateway_items(conf, states, events, now):
+def gateway_items(conf, states, events, now, tasks=()):
+    """A pause or cap cut on a pool this project's agents use, only while it holds work back here: an agent of that
+    pool holds a task, or a pending task waits for assignment. An idle project sees it in the console, not here."""
     from . import gateway
-    pools = {gateway.pool_key(conf, wq.launched(conf, info)) for info in states}
+    waiting = any(task.get("status") == "pending" and not task.get("hold") for task in tasks)
+    pools = {gateway.pool_key(conf, wq.launched(conf, info)) for info in states if waiting or info.get("task")}
     if not pools:
         return []
     try:
@@ -244,13 +248,17 @@ def gateway_items(conf, states, events, now):
         pool = item["pool"]
         if pool not in pools:
             continue
+        sources = f" from {', '.join(item['sources'])}" if item.get("sources") else ""
         if item.get("pausedUntil"):
-            found.append(entry(conf, f"gateway:{pool}:paused", "gateway", "gateway pause", latest.get("gateway_paused"),
-                               f"gateway pool {pool} is paused ({item.get('reason') or 'errors'}): no new assignments or resends",
+            since = item.get("lastError") or latest.get("gateway_paused")
+            found.append(entry(conf, f"gateway:{pool}:paused", "gateway", "gateway pause", since,
+                               f"gateway pool {pool} is paused ({item.get('reason') or 'errors'}; errors{sources}): no new "
+                               f"assignments or resends",
                                "theseus pool; the pause lifts by itself (theseus console shows when)", pool=pool))
         if item.get("capCut"):
-            found.append(entry(conf, f"gateway:{pool}:cap", "gateway", "gateway cap cut", latest.get("gateway_capped"),
-                               f"gateway pool {pool} works with its cap cut after errors",
+            since = item.get("lastError") or latest.get("gateway_capped")
+            found.append(entry(conf, f"gateway:{pool}:cap", "gateway", "gateway cap cut", since,
+                               f"gateway pool {pool} works with its cap cut after errors{sources}",
                                "theseus pool; the cap steps back up by itself", pool=pool))
     return found
 
@@ -315,7 +323,7 @@ def items(conf, now=None, states=None, driver=True, book=None):
     states = ag.states(conf) if states is None else states
     events = history(conf, now)
     found = task_items(conf, queue, tasks, events, now) + agent_items(conf, states, events, now)
-    found += gateway_items(conf, states, events, now)
+    found += gateway_items(conf, states, events, now, tasks)
     if driver and states:
         found += driver_item(conf, now)
     found += export_items(conf, queue) + debt_items(conf)

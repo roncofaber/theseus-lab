@@ -144,6 +144,25 @@ def rewrite(text, old_path, new_path, moves, root):
     return ABSOLUTE.sub(absolute, LINK_TARGET.sub(link, text))
 
 
+def owned_by_open_tasks(conf, root, moves):
+    """A report an open task still owns cannot move: the host store would keep the old path and the next
+    `theseus tasks export` would write it back. One line per such report, or []."""
+    from .. import tasks as t
+    try:
+        open_tasks = t.Queue(conf).load()["tasks"]
+    except Exception:
+        return []
+    found = []
+    for source in sorted(moves):
+        relative = str(source.relative_to(root))
+        owners = [task["id"] for task in open_tasks
+                  if any(t.patterns_intersect(relative, pattern) for pattern in task.get("ownedPaths") or [])]
+        if owners:
+            found.append(f"{relative} is owned by open task(s) {', '.join(owners)}; complete them, or move the report "
+                         f"out of their ownedPaths (theseus tasks edit ID --owned ...), before folding it")
+    return found
+
+
 def apply(conf, topics=(), dry_run=False, verify=True, root=None):
     root = Path(root or conf.root)
     rows = index.read_fold_map(root)
@@ -154,6 +173,9 @@ def apply(conf, topics=(), dry_run=False, verify=True, root=None):
         source = report_path(root, entry["stem"], SOURCES)
         if source is not None:
             moves[source] = root / cfg.FOLDED / source.name
+    held = owned_by_open_tasks(conf, root, moves)
+    if held:
+        return False, held
     if verify:
         citations = cit.of(conf)
         names = sorted({e["topic"] for e in rows if (not topics or e["topic"] in topics) and e["class"] not in index.NO_TOPIC

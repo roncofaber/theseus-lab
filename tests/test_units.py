@@ -274,12 +274,16 @@ class ContextTests(Sandbox):
         table = {"context": {"claude-*": 1000000, "claude-haiku-4-5*": 200000, "lbl/cborg-coder-ultra": 229376}}
         conf = SimpleNamespace(section=lambda name: table if name == "models" else {}, root=self.tmp)
         with mock.patch.object(profiles, "resolve", lambda conf, name: {"context_limit": 123}):
-            self.assertEqual({"tokens": 5, "limit": 200000, "model": "claude-haiku-4-5", "source": "transcript"},
+            self.assertEqual({"tokens": 5, "limit": 200000, "limitSource": "models", "model": "claude-haiku-4-5",
+                              "source": "transcript"},
                              agents.context_use(conf, "p", {"tokens": 5, "model": "claude-haiku-4-5"}, 9))
             limit = lambda model: agents.context_use(conf, "p", {"tokens": 5, "model": model}, None)["limit"]
             self.assertEqual([1000000, 229376, 123], [limit(m) for m in ("claude-opus-5-5", "lbl/cborg-coder-ultra", "other")])
-            self.assertEqual({"tokens": 9, "limit": 123, "model": None, "source": "pane hint"},
+            self.assertEqual({"tokens": 9, "limit": 123, "limitSource": "profile", "model": None, "source": "pane hint"},
                              agents.context_use(conf, "p", {"tokens": None}, 9))
+            harness = agents.context_use(conf, "p", {"tokens": 5, "model": "claude-opus-5-5", "limit": 922000}, None)
+            self.assertEqual((922000, "harness"), (harness["limit"], harness["limitSource"]),
+                             "the CLI's own window for the model wins over [models] context and the profile")
             self.assertIsNone(agents.context_use(conf, "p", None, None))
 
 
@@ -468,3 +472,114 @@ class GitLockRetryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoordinatorFrictionTests(Sandbox):
+    def test_the_manifest_reads_a_deletion_written_either_way_round(self):
+        worktree = self.tmp / "wt"
+        self.write(".theseus/changed.sha256", f"docs/old report.md  DELETED\nDELETED  tools/x.sh\n{'a' * 64}  src/y.c\n"
+                   f"src/z.c {'b' * 64}\nD  gone.txt\n", root=worktree)
+        self.assertEqual([("DELETED", "docs/old report.md"), ("DELETED", "tools/x.sh"), ("a" * 64, "src/y.c"),
+                          ("b" * 64, "src/z.c"), ("DELETED", "gone.txt")], t.manifest_entries(worktree))
+        self.assertEqual(["src/y.c", "src/z.c"], t.manifest_mismatches(worktree), "deleted files are absent, as listed")
+
+    def test_archiving_a_worker_log_keeps_dangling_symlinks_as_links(self):
+        worktree = self.tmp / "wt"
+        self.write(".theseus/handoff.md", "Result: delivered\n", root=worktree)
+        (worktree / ".theseus/build").mkdir()
+        os.symlink("/proc/999999999/fd/3", worktree / ".theseus/build/stale")
+        self.assertIsNone(t.archive_worker_log(worktree, self.tmp / "archive"))
+        self.assertTrue((self.tmp / "archive/.theseus/handoff.md").is_file())
+        self.assertEqual("/proc/999999999/fd/3", os.readlink(self.tmp / "archive/.theseus/build/stale"))
+
+    def test_an_administrative_completion_without_a_worker_needs_no_owner(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from theseus import taskservice
+        base = {"status": "completed", "objective": "o", "ownedPaths": ["docs/investigations/a.md"], "acceptance": ["a"],
+                "result": {"summary": "closed"}, "owner": None}
+        archived = [{**base, "id": "never-assigned"}, {**base, "id": "worked", "execution": {"logDir": "/x"}}]
+        live = mock.Mock(return_value=({"tasks": []}, archived))
+        conf = SimpleNamespace(section=lambda name: {}, root=self.tmp)
+        with mock.patch.object(taskservice, "open", lambda conf: SimpleNamespace(live=live)):
+            problems = [p for p in rules.task_record_problems(conf) if "owner" in p]
+        self.assertEqual(["worked: completed without owner or result"], problems)
+
+    def test_dispatch_is_stopped_only_by_its_own_or_global_rule_problems(self):
+        from types import SimpleNamespace
+        from theseus import dispatch
+        queue = SimpleNamespace(index=lambda: {"mine": {}, "legacy": {}, "old-done": {}})
+        problems = ["legacy: more than 6 acceptance items", "old-done: completed without owner or result",
+                    "mine: empty acceptance", "dependency cycle: a -> b -> a"]
+        self.assertEqual(["mine: empty acceptance", "dependency cycle: a -> b -> a"],
+                         dispatch.scoped_problems(problems, "mine", queue))
+
+    def test_a_dirty_prefix_is_a_file_name_glob_everywhere(self):
+        from types import SimpleNamespace
+        from theseus import rooms
+        conf = SimpleNamespace(section=lambda name: {"dirty_paths": ["docs/investigations/re-", "docs/re/", "a/b.md"]})
+        self.assertEqual(["docs/investigations/re-*", "docs/re/", "a/b.md"], rooms.dirty_globs(conf))
+        self.assertEqual(["/*", "!/docs/investigations/re-*", "!/docs/re/", "!/a/b.md"], rooms.sparse_patterns(conf))
+        self.assertFalse(t.patterns_intersect("docs/investigations/research-notes.md", "docs/investigations/re-*"))
+        self.assertTrue(t.patterns_intersect("docs/investigations/re-camera.md", "docs/investigations/re-*"))
+
+    def test_a_gateway_pause_needs_the_coordinator_only_while_it_holds_work_back(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from theseus import attention, gateway
+        conf = SimpleNamespace(name="idle-port")
+        health = [{"pool": "cborg", "pausedUntil": 2e9, "reason": "3 errors", "capCut": 0, "lastError": 1000.0,
+                   "sources": ["other-port/worker-1"]}]
+        idle = [{"name": "w1", "task": None}]
+        with mock.patch.object(gateway, "health", lambda now: health), \
+                mock.patch.object(gateway, "pool_key", lambda conf, profile: "cborg"), \
+                mock.patch.object(attention.wq, "launched", lambda conf, info: "p"):
+            self.assertEqual([], attention.gateway_items(conf, idle, [], 2000.0, tasks=[]))
+            self.assertEqual([], attention.gateway_items(conf, idle, [], 2000.0, tasks=[{"status": "pending", "hold": 1}]))
+            [paused] = attention.gateway_items(conf, idle, [{"kind": "gateway_paused", "epoch": 1.0}], 2000.0,
+                                               tasks=[{"status": "pending"}])
+            self.assertEqual(1000.0, paused["since"], "its age is the pool's latest error, not an old pause of this project")
+            self.assertIn("errors from other-port/worker-1", paused["summary"])
+            working = [{"name": "w1", "task": "t1"}]
+            self.assertEqual(1, len(attention.gateway_items(conf, working, [], 2000.0, tasks=[])))
+
+    def test_completing_from_a_verify_log_needs_a_commit_that_holds_the_merge(self):
+        from types import SimpleNamespace
+        from theseus import verify
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        run = lambda *args: __import__("subprocess").run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                                                         text=True).stdout.strip()
+        run("init", "-q")
+        run("commit", "-q", "--allow-empty", "-m", "parent")
+        parent = run("rev-parse", "HEAD")
+        run("commit", "-q", "--allow-empty", "-m", "merge")
+        merged = run("rev-parse", "HEAD")
+        log = self.write("verify.log", f"{verify.LOG_HEADER}{parent}\nfinal status 0\n")
+        queue = SimpleNamespace(root=repo, get=lambda task_id: {"status": "merged", "merge": {"commit": merged[:12]}})
+        with self.assertRaisesRegex(t.TaskError, "does not contain"):
+            t.complete(queue, "a-task", "done", from_log=log)
+
+    def test_a_command_that_returns_a_failure_status_exits_with_it(self):
+        import argparse
+        from unittest import mock
+        from theseus import cli
+        parser = argparse.ArgumentParser()
+        parser.set_defaults(func=lambda args: 3, command="x")
+        with mock.patch.object(cli, "build_parser", lambda: parser), self.assertRaises(SystemExit) as raised:
+            cli.main([])
+        self.assertEqual(3, raised.exception.code)
+        parser.set_defaults(func=lambda args: None)
+        with mock.patch.object(cli, "build_parser", lambda: parser):
+            self.assertIsNone(cli.main([]))
+
+    def test_folding_refuses_a_report_an_open_task_owns(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from theseus.docs import fold
+        root = self.tmp / "proj"
+        moves = {root / "docs/investigations/owned.md": root / "x", root / "docs/investigations/free.md": root / "y"}
+        queue = SimpleNamespace(load=lambda: {"tasks": [{"id": "open-task", "ownedPaths": ["docs/investigations/owned.md"]}]})
+        with mock.patch.object(t, "Queue", lambda conf: queue):
+            [problem] = fold.owned_by_open_tasks(None, root, moves)
+        self.assertIn("docs/investigations/owned.md is owned by open task(s) open-task", problem)

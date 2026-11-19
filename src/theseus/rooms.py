@@ -99,13 +99,20 @@ def record_assignment(conf, task, instance):
         cfg.write_atomic(ledger_path(conf), json.dumps(data, indent=2) + "\n")
 
 
-def sparse_patterns(conf):
-    """Sparse-checkout patterns that keep every dirty path out of a clean-room worktree."""
-    patterns = ["/*"]
+def dirty_globs(conf):
+    """The dirty_paths as the globs every rule applies: a directory (trailing /) or a file name stays as written,
+    anything else is a file-name prefix, so `docs/investigations/re-` is `docs/investigations/re-*` (never
+    `research-*`)."""
+    globs = []
     for path in section(conf).get("dirty_paths") or []:
         stem = path.rstrip("*")
-        patterns.append("!/" + stem + ("" if stem.endswith("/") or "." in stem.rsplit("/", 1)[-1] else "*"))
-    return patterns
+        globs.append(stem + ("" if stem.endswith("/") or "." in stem.rsplit("/", 1)[-1] else "*"))
+    return globs
+
+
+def sparse_patterns(conf):
+    """Sparse-checkout patterns that keep every dirty path out of a clean-room worktree."""
+    return ["/*"] + ["!/" + glob for glob in dirty_globs(conf)]
 
 
 def exclude_dirty(conf, task, worktree):
@@ -123,7 +130,7 @@ def message(conf, task):
     if not enabled(conf) or task.get("room") not in ROOMS:
         return ""
     rooms = section(conf)
-    dirty = ", ".join(rooms.get("dirty_paths") or []) or "none listed"
+    dirty = ", ".join(dirty_globs(conf)) or "none listed"
     data = ", ".join(f"{conf.data}/{d}" for d in rooms.get("dirty_data") or []) or "none listed"
     spec = ", ".join(rooms.get("spec_paths") or []) or "the specification"
     if task["room"] == "clean":
@@ -141,7 +148,7 @@ def rule_problems(conf):
     """Supervisor rule: with rooms enabled every open task has a room, and clean tasks own nothing dirty."""
     if not enabled(conf):
         return []
-    dirty = section(conf).get("dirty_paths") or []
+    dirty = dirty_globs(conf)
     problems = []
     for task in t.Queue(conf).load()["tasks"]:
         room = task.get("room")

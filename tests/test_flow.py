@@ -462,7 +462,12 @@ class TaskFlowTests(Sandbox):
         run("task", "note", TASK, "Which header version first?", "--question")
         self.assertIn("question parse-capture-header: Which header version first?",
                       self.theseus("queue", "status").stdout)
+        [asked] = [i for i in json.loads(self.theseus("attention", "--json").stdout)["items"] if i["kind"] == "question"]
+        self.assertEqual(f"{TASK} asks: Which header version first?", asked["summary"])
+        self.assertEqual(["Which header version first?"],
+                         [q["text"] for q in json.loads(self.theseus("tasks", "show", TASK).stdout)["openQuestions"]])
         self.theseus("tasks", "note", TASK, "Version 2 first.")
+        self.assertNotIn("openQuestions", json.loads(self.theseus("tasks", "show", TASK).stdout))
         self.assertNotIn("question", self.theseus("queue", "status").stdout)
 
         self.deliver(worktree)
@@ -476,6 +481,21 @@ class TaskFlowTests(Sandbox):
         self.assertEqual(("command", 1), (delivered["detail"]["source"], len([e for e in history if e["kind"] == "delivered"])))
         self.assertEqual("unauthenticated", json.loads(run("task", "show", TASK, "--json").stdout)["error"]["code"],
                          "a dispatch-style credential ends with its attempt")
+
+    def test_list_options_accumulate_a_task_can_start_held_and_a_note_grows(self):
+        self.theseus("tasks", "add", TASK, "--role", "implementation", "--owned", "src/capture/header.py",
+                     "--owned", f"docs/investigations/{TASK}.md", "--objective", "Parse the header.",
+                     "--contract", "Every variant.", "--accept", "One.", "--accept", "Two.", "Three.", "--hold")
+        record = self.record()
+        self.assertEqual(["One.", "Two.", "Three."], record["acceptance"], "a repeated option keeps every item")
+        self.assertEqual(["src/capture/header.py", f"docs/investigations/{TASK}.md"], record["ownedPaths"])
+        self.assertTrue(record.get("hold"), "created held, so the queue cannot take it first")
+        self.assertIn("held", self.theseus("tasks", "ls").stdout)
+        self.theseus("tasks", "note", TASK, "Start from version 2.")
+        self.theseus("tasks", "edit", TASK, "--append-note", "Keep unknown fields.")
+        note = self.record()["assignmentNote"].splitlines()
+        self.assertEqual("Start from version 2.", note[0])
+        self.assertRegex(note[1], r"^\[\d{4}-\d\d-\d\dT\d\d:\d\d\] Keep unknown fields\.$")
 
     def test_reassigning_to_the_same_agent_moves_the_previous_worktree_aside(self):
         self.add_task()

@@ -23,9 +23,12 @@ Both take `theseus instance send NAME "text"` (or `--file PATH`): it waits for a
 
 A task whose handoff arrived is in `verification` and its agent is free; the queue may already have given that agent a new task.
 
-1. Move the old handoff aside first: `mv LOGDIR/handoff.md LOGDIR/handoff-1.md` (LOGDIR is `execution.logDir` in `theseus tasks show ID`, normally `WORKTREE/.theseus`). A reopened task whose `handoff.md` still states a Result is delivered again at the next queue tick.
-2. If the agent holds no other task (`theseus agents ls`): `theseus tasks reopen ID --reason "..."`, then `theseus instance send NAME "ID: <exactly what is missing or wrong>. Fix it in WORKTREE, rerun <check>, rewrite the handoff."`
-3. If it moved on: `theseus tasks release ID --reason "..."` (release accepts `in_progress` and delivered tasks) and `theseus tasks note ID "<what the next worker must do; the earlier attempt is in WORKTREE>"`. The queue assigns it again; the earlier worktree is kept and recorded in `previousAttempts`.
+Run these from the main checkout (the coordinator's commands refuse to run in a worker worktree).
+
+1. `theseus tasks reopen ID --reason "..."`. It moves the delivered handoff aside itself (`handoff.attemptN.md`), so the next queue tick does not take it for a new delivery.
+2. If reopen says the task went back to pending (its agent already works on another task), send nothing to that agent: it would redirect it from its current task. Put the correction where the next assignment carries it: `theseus tasks edit ID --append-note "<what is missing or wrong; the earlier attempt is in WORKTREE>"`.
+3. Otherwise the task is back in progress with its agent: `theseus instance send NAME "ID: <exactly what is missing or wrong>. Fix it in WORKTREE, rerun <check>, rewrite the handoff."`
+4. To give it to another worker instead: `theseus tasks release ID --reason "..."` (release accepts `in_progress` and delivered tasks) and `theseus tasks note ID "<what the next worker must do; the earlier attempt is in WORKTREE>"`. The queue assigns it again; the earlier worktree is kept and recorded in `previousAttempts`.
 
 ## partial
 

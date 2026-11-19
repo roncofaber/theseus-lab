@@ -29,7 +29,7 @@ from . import tasks as t
 NOTE_LIMIT = 4096
 EXPORTS_KEPT = 8
 EDITABLE = {"role", "objective", "contract", "accept", "owned", "add_owned", "touches", "depends", "milestone", "room",
-            "profile", "priority", "min_capability", "note", "externalBlocker", "researchRequired"}
+            "profile", "priority", "min_capability", "note", "append_note", "externalBlocker", "researchRequired"}
 WORKER_COMMANDS = "`theseus task show|note|done|blocked TASK`"
 
 
@@ -323,7 +323,7 @@ class TaskService:
                 "contract": values["contract"], "acceptance": values["accept"], "milestone": milestone or None,
                 "priority": values["priority"] or None, "room": values["room"], "profile": values["profile"],
                 "min_capability": values["min_capability"] or None, "seq": repo.next_seq(project["id"]),
-                "created": now()})
+                "created": now(), "hold": int(bool(spec.get("hold")))})
             repo.set_deps(pk, values["depends"])
             repo.set_paths(pk, "owned", values["owned"])
             repo.set_paths(pk, "touches", values["touches"])
@@ -332,7 +332,7 @@ class TaskService:
             size = t.record_size(record)
             if size > t.TASK_RECORD_LIMIT:
                 raise TaskError("invalid", f"record is {size} bytes; the limit is {t.TASK_RECORD_LIMIT}")
-            self.event(repo, p, task, "added")
+            self.event(repo, p, task, "added", {"held": True} if spec.get("hold") else None)
             return {"task": record, "size": size, "warnings": self.overlaps(repo, project, task)}
 
     def validated(self, repo, project, task_id, values, changed):
@@ -466,6 +466,10 @@ class TaskService:
                 touched |= {"externalBlocker", "researchRequired"}
             if "note" in changes:
                 fields["note"], touched = changes["note"] or None, touched | {"assignmentNote"}
+            if changes.get("append_note"):
+                base = fields["note"] if "note" in changes else task["note"]
+                fields["note"] = "\n".join(filter(None, [base, f"[{now()[:16]}] {changes['append_note']}"]))
+                touched.add("assignmentNote")
             for key, record_key in (("owned", "ownedPaths"), ("depends", "dependencies"), ("touches", "touches")):
                 if values[key] != current[key] or key in changes or (key == "owned" and "add_owned" in changes):
                     touched.add(record_key)

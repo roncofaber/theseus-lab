@@ -2,6 +2,8 @@
 transcript adapter."""
 import json
 import os
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -34,7 +36,7 @@ class AntigravityProfileTests(Sandbox):
         self.assertEqual("antigravity", alias["preset"])
         self.assertFalse(plain["verified"])
         self.assertEqual("none", plain["session"])
-        self.assertEqual(1000000, profiles.model_context_limit(self.conf, "gemini-4-neon-medium"))
+        self.assertEqual(1048576, profiles.model_context_limit(self.conf, "gemini-4-neon-medium"))
         self.assertEqual(["agy", "-p", "do it", "--output-format", "json", "--mode", "auto"],
                          profiles.launch_argv(plain, "do it", "", "", self.conf))
         self.assertEqual(["agy", "-p", "more", "--continue", "--output-format", "json", "--mode", "auto"],
@@ -171,6 +173,58 @@ class AntigravityTranscriptTests(Sandbox):
         agent = {"name": "agy-1", "managed": True, "session_id": self.conv}
         self.assertEqual(13100, antigravity.session_state(None, agent, interactive)["tokens"])
         self.assertIsNone(antigravity.session_state(None, {**agent, "managed": False}, interactive))
+
+    def test_live_session_is_the_presence_lock_the_process_holds(self):
+        presence = self.brain.parent / "presence"
+        presence.mkdir(parents=True)
+        conv = "0123abcd-4567-89ab-cdef-0123456789ab"
+        (presence / "ffffffff-0000-0000-0000-000000000000.lock").touch()
+        child = subprocess.Popen([sys.executable, "-c", "import sys, time; h = open(sys.argv[1], 'a'); print('ok', "
+                                  "flush=True); time.sleep(30)", str(presence / f"{conv}.lock")],
+                                 stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual("ok", child.stdout.readline().strip())
+            interactive = {"sessions_dir": str(self.brain)}
+            self.assertEqual(conv, antigravity.live_session(interactive, {os.getpid(), child.pid}))
+            self.assertIsNone(antigravity.live_session(interactive, {os.getpid()}))
+            self.assertIsNone(antigravity.live_session({"sessions_dir": str(self.tmp / "elsewhere/brain")}, {child.pid}),
+                              "a lock outside the profile's app data directory is not the agent's")
+        finally:
+            child.kill()
+            child.wait()
+            child.stdout.close()
+
+    def test_state_records_when_the_transcript_was_written(self):
+        state = antigravity.read(self.path)
+        self.assertAlmostEqual(self.path.stat().st_mtime, state["updated"])
+
+
+class SessionDiscoveryTests(Sandbox):
+    def test_the_supervisor_learns_the_conversation_from_the_adapter_without_a_status_command(self):
+        from unittest import mock
+        from theseus import workqueue
+        self.scaffold()
+        conf = cfg.load(root=self.project)
+        rec = {"name": "agy-1", "target": "demo--agy-1", "profile": "antigravity", "server": None}
+        found = []
+        with mock.patch.object(supervisor, "pane_info", lambda srv, target: {"pane_pid": "4242"}), \
+                mock.patch.object(supervisor, "server_of", lambda rec: None), \
+                mock.patch.object(supervisor, "status_of", lambda conf, profile, pid: None), \
+                mock.patch.object(workqueue, "launched", lambda conf, rec: "antigravity"), \
+                mock.patch.object(antigravity, "live_session",
+                                  lambda interactive, pids: found.append(pids) or "conv-from-lock"):
+            self.assertEqual("conv-from-lock", supervisor.live_session(conf, rec))
+        self.assertIn(4242, found[0])
+
+
+class BusyPatternTests(Sandbox):
+    def test_a_profile_busy_pattern_wins_over_a_project_wide_one(self):
+        self.scaffold()
+        self.replace_config("[instances]", '[instances]\nbusy_pattern = "esc to interrupt"')
+        conf = cfg.load(root=self.project)
+        self.assertEqual("esc to cancel", profiles.instance_env(conf, "antigravity")["THESEUS_BUSY_PATTERN"])
+        self.assertEqual("esc to interrupt", profiles.instance_env(conf, "codex")["THESEUS_BUSY_PATTERN"],
+                         "a profile without its own marker falls back to [instances]")
 
 
 if __name__ == "__main__":

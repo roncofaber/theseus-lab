@@ -33,6 +33,13 @@ def script(name):
     return str(resources.files("theseus") / "scripts" / name)
 
 
+def scoped_problems(problems, task_id, queue):
+    """The rule problems that stop dispatching task_id: its own and those naming no task (a cycle, the milestone).
+    Another record's problem is the coordinator's to fix, but does not make this one unsafe to start."""
+    others = set(queue.index()) - {task_id}
+    return [p for p in problems if not any(p.startswith(f"{other}:") for other in others)]
+
+
 def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False, resume_paused=False, commit=True):
     from . import profiles
     try:
@@ -50,7 +57,7 @@ def dispatch(conf, task_id, name=None, provider=None, model=None, dry_run=False,
         index = queue.index()
         reasons = t.blocking(task, index, queue.milestone(), t.merge_reach(conf), queue.holds()) or [task["status"]]
         raise integrate.IntegrationError(f"{task_id} is not ready: {', '.join(reasons)}")
-    problems = rules.task_record_problems(conf)
+    problems = scoped_problems(rules.task_record_problems(conf), task_id, queue)
     if problems:
         raise integrate.IntegrationError("task records break the Supervisor rules; fix them before dispatching:\n" + "\n".join(problems))
     base = integrate.base_commit(conf)

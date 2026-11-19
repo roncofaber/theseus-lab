@@ -248,6 +248,10 @@ def doctor(conf):
                      f"{default['label']}; {command or 'no command'}: {found or 'not on PATH; install it or choose another workers.default'}"))
     except profiles.ProfileError as error:
         rows.append(("FAIL", "profile", str(error)))
+    for kind in ("build", "smoke", "verify"):
+        if not conf.commands(kind):
+            rows.append(("WARN", f"commands.{kind}", f"empty in theseus.toml: `theseus {kind}` runs nothing (exit 4), so "
+                                                     f"the integration step it stands for is skipped at every merge"))
     detected = [f"{cmd} ({name})" for name, cmd, path in profiles.detected() if path]
     rows.append(("ok" if detected else "WARN", "agent CLIs", ", ".join(detected) or "none of claude, codex, opencode, gemini, agy on PATH"))
     for status, name, value, source, purpose in tools.table(conf):

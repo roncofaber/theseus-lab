@@ -226,18 +226,22 @@ An adapter is one module in `src/theseus/adapters/`, registered in `ADAPTERS` in
 - `session_file(conf, interactive, session, cwd)`: the record of a known session id started in `cwd` (the coordinator), or None;
 - `read(path)`: the state of that record, read incrementally and safe to call from several threads.
 
+Optionally, `live_session(interactive, pids)` returns the session id one of the pane's processes holds open, for a CLI with no preassigned id and no status command (`antigravity-jsonl` reads agy's `presence/<id>.lock`); theseus calls it when the agent is ready and on every queue tick.
+
 A state is a dict with:
 - `tokens` and `model`: the context in use after the last answer and its model, or None;
 - `errors`: the newest API errors as `{"time", "error", "text"}`, where `error` is the CLI's own error kind or None;
 - `last`: `answer`, `error` or None, for the newest assistant entry;
 - `entries`: the newest conversation entries as `{"kind", "text", "time", "n"}`, with `kind` one of `user`, `assistant`, `tool` (plus `name`) and `result` (plus `error`), and `n` numbering the entries of the record from 1 so the console asks only for new ones; optionally `"format": "markdown"` for text the console renders as Markdown and `summary`, the one line a folded entry shows (a tool call's key argument, shown as `Tool: argument`; a result's first line) while `text` is what unfolds; thinking and system or meta entries are left out; the list is replaced, never changed in place;
 - `total`: how many entries were ever read;
-- `key`: names the record; a new key (a new session, a rewritten file) makes the console start over.
+- `key`: names the record; a new key (a new session, a rewritten file) makes the console start over;
+- `updated`: the epoch of the record's newest write; an agent whose record is being written counts as active, even when it changes no file;
+- `limit` (optional): the context window the CLI itself uses for the model (`opencode-sqlite`: OpenCode's configured `limit.context`), which takes precedence over `[models] context` and `context_limit`.
 
 Adding a CLI means writing that module in its own record format, adding its name to `ADAPTERS`, and setting `transcript = "<name>"` in the preset's `interactive` table. The console redacts API keys, key hashes and email addresses in everything it shows from a transcript or the scrollback.
 ## What depends on the preset
 
-Every theseus feature is driven by profile keys, never by a hard-coded agent. The `claude-code` preset sets them all; `opencode` sets all but `status_command`, `sessions_dir` and `messaging` (see [OpenCode](configuration.md#opencode)); the `antigravity`, `codex` and `gemini-cli` presets leave `busy_pattern`, `gateway_patterns`, `input_pattern` and `prompt_patterns` unset (see [Antigravity](configuration.md#antigravity)) and degrade as follows until you add the missing keys to their `[workers.<name>.interactive]`:
+Every theseus feature is driven by profile keys, never by a hard-coded agent. The `claude-code` preset sets them all; `opencode` sets all but `status_command`, `sessions_dir` and `messaging` (see [OpenCode](configuration.md#opencode)); the `antigravity` preset leaves `gateway_patterns`, `input_pattern` and `prompt_patterns` unset (see [Antigravity](configuration.md#antigravity)), and the `codex` and `gemini-cli` presets also `busy_pattern`; they degrade as follows until you add the missing keys to their `[workers.<name>.interactive]`:
 
 | Feature | Needs | Without it |
 | --- | --- | --- |

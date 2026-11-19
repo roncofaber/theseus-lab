@@ -51,8 +51,11 @@ A plan or a running check is not a handoff. Stop every process you started; past
 ## Deliver
 
 ```bash
-git status --porcelain --untracked-files=all | awk '{print $NF}' | grep -v '^\.theseus/' | xargs -r sha256sum > .theseus/changed.sha256
+git status --porcelain --untracked-files=all | awk '{print $NF}' | grep -v '^\.theseus/' |
+  while read -r f; do if [ -e "$f" ]; then sha256sum "$f"; else echo "DELETED  $f"; fi; done > .theseus/changed.sha256
 ```
+
+A removed file is listed as `DELETED  <path>`.
 
 Write `.theseus/handoff.md` once, at the very end:
 
@@ -73,7 +76,7 @@ Processes left running: none
 ## Blocked, denied or interrupted
 
 - **Missing information** (a spec gap, an unknown, a decision): do not guess or look where you may not. Finish what you can, then deliver `partial` or `blocked` naming the gap.
-- **A permission prompt was rejected or a command denied:** do not retry it in another form. Use an allowed alternative, or record what you needed under Coordinator actions (`blocked` if it stops the task).
+- **A permission prompt was rejected or a command denied:** do not retry it in another form. Use an allowed alternative, or record the exact denied command under Coordinator actions and Checks (`<command> -> skipped: denied`), then go on with every acceptance item that does not need it and deliver `partial`. Deliver `blocked` only when nothing else can be done without it; a first denial is rarely that.
 - **Conflict markers after the coordinator rebased your worktree:** `Updated upstream` is main, `Stashed changes` is yours. Keep both intents, remove the markers, rerun the checks, rewrite the handoff.
 - **Context cleared (a restart prompt):** resume from your report, notes, `git status` and `git diff`; do not start over.
 

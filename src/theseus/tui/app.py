@@ -833,7 +833,8 @@ class TopApp(App):
                       "  PROJECTS (Host tab): the same figures, one row per project; Enter opens its tab.\n"
                       "  Agents show short names (profile-slot for supervised agents; pane private: theseus's own tmux);\n"
                       "  the Host tab shows them as project/short.\n"
-                      "  A cut cell ends in an ellipsis; its row's popup shows it whole. ~ marks an estimated context.\n")
+                      "  A cut cell ends in an ellipsis; its row's popup shows it whole. ~ marks an estimated context, * a\n"
+                      "  context limit from the profile's context_limit rather than the model's own window.\n")
         legend.append("\ntmux\n", style="bold underline")
         legend.append("  After a jump to a hand-made pane, the tmux key shown in the status line or `theseus top --back`\n"
                       "  returns here; supervised agents open in a new window of your tmux (o) or in place (Enter).\n")
@@ -1026,23 +1027,32 @@ def run_theseus(root, argv):
     return result.returncode == 0, lines[-1] if lines else f"theseus {' '.join(argv)}: done"
 
 
+def run_attach(argv, stream=None):
+    """Run an attach command in this terminal. A tmux client that attached prints `[detached (from session X)]` on
+    the normal screen as it exits, where it would pile up under the console and show on quit; that line is erased."""
+    import subprocess
+    import sys
+    stream = sys.stdout if stream is None else stream
+    result = subprocess.run(argv)
+    if result.returncode == 0 and "attach-session" in argv and stream.isatty():
+        stream.write("\x1b[1A\x1b[2K\r")
+        stream.flush()
+    return result.returncode
+
+
 def attach_supervised(root, name):
     """Attach this terminal to a supervised agent's pane until C-q (runs while the app is suspended)."""
-    import subprocess
     from .. import supervisor
     rec = supervisor.record(cfg.load(root=root), name)
     if not rec or not rec.get("managed"):
         return f"{name} is not a supervised agent"
-    result = subprocess.run(supervisor.attach_argv(rec))
-    return "" if result.returncode == 0 else f"attach to {name} failed"
+    return "" if run_attach(supervisor.attach_argv(rec)) == 0 else f"attach to {name} failed"
 
 
 def attach_coordinator(root):
     """Attach this terminal to the supervised coordinator session (runs while the app is suspended)."""
-    import subprocess
     from .. import coordinator
-    result = subprocess.run(coordinator.attach_argv(cfg.load(root=root)))
-    return "" if result.returncode == 0 else "attach to the coordinator failed"
+    return "" if run_attach(coordinator.attach_argv(cfg.load(root=root))) == 0 else "attach to the coordinator failed"
 
 
 def supervised_fitter(root, name):

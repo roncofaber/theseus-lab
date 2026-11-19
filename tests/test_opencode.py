@@ -142,6 +142,24 @@ class OpenCodeTranscriptTests(Sandbox):
         self.assertEqual("The user dismissed this question", interrupted["entries"][-1]["text"])
         self.assertTrue(interrupted["entries"][-1]["error"])
 
+    def test_the_limit_is_the_one_opencode_configures_for_the_answer_model(self):
+        root = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "opencode.jsonc").write_text('{\n  // the gateway\n  "providers": {"cborg": {"models": {\n'
+                                             '    "lbl/cborg-coder-ultra": {"limit": {"context": 262144, "output": 32768}},\n'
+                                             '  }}},\n}\n')
+        opencode.CONFIG.clear()
+        opencode.READS.clear()
+        try:
+            state = opencode.read(opencode.session_path(self.db, self.sid("answer")))
+            self.assertEqual((262144, "cborg"), (state["limit"], state["provider"]))
+            self.assertEqual(262144, ag.context_use(None, None, state, None)["limit"])
+            self.assertIsNone(opencode.model_limit("cborg", "another-model"))
+            self.assertGreater(state["updated"], 0)
+        finally:
+            (root / "opencode.jsonc").unlink()
+            opencode.CONFIG.clear()
+
     def test_a_failed_turn_is_an_error_gateway_can_classify(self):
         state = opencode.read(self.db, self.sid("failed"))
         self.assertEqual("error", state["last"])

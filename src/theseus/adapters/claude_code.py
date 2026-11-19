@@ -234,6 +234,7 @@ def read_locked(path):
         start = max(0, info.st_size - TAIL_BYTES)
         state = {"inode": info.st_ino, "offset": start, "partial": start > 0, "tokens": None, "model": None,
                  "errors": [], "last": None, "entries": [], "total": 0, "key": f"{path}:{info.st_ino}"}
+    state["updated"] = info.st_mtime
     if info.st_size > state["offset"]:
         try:
             with open(path, "rb") as handle:
@@ -263,7 +264,7 @@ def pane_transcript(directory, address, pids=None, exclude=()):
 
 
 def sessions_dir(conf, interactive):
-    return conf.section("instances").get("sessions_dir") or (interactive or {}).get("sessions_dir") or ""
+    return (interactive or {}).get("sessions_dir") or conf.section("instances").get("sessions_dir") or ""
 
 
 def session_file(conf, interactive, session, cwd):

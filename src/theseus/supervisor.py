@@ -615,7 +615,8 @@ def observe(conf, rec, info=None, srv=None):
             and (not ready_pattern or re.search(ready_pattern, screen)) \
             and time.time() - started >= float(os.environ.get("THESEUS_READY_SETTLE") or 3) \
             and entries is None:
-        return "ready", ""
+        from . import adapters
+        return "ready", adapters.live_session(conf, run_profile, info.get("pane_pid")) or ""
     return "starting", ""
 
 
@@ -1186,7 +1187,9 @@ def retire(conf, srv, rec, dry_run):
     if task:
         if not dry_run and (rec.get("enabled") or rec.get("desired") != "retire"):
             update(conf, name, enabled=False, desired="retire")
-        return "deferred", f"task {task['id']} in progress; stopping it once free"
+        return "deferred", (f"still running: it finishes task {task['id']} and stops once it delivers (disabled, so it "
+                            f"takes no new task); `theseus agents down {name} --force` stops it now, the task staying "
+                            f"assigned")
     if dry_run:
         return "would stop", "no longer configured"
     if rec.get("target") and srv.has_session(rec["target"]):
@@ -1377,13 +1380,17 @@ def restart(conf, name, fresh=False, intent="restart", profile=None, wait=True, 
 
 
 def live_session(conf, rec):
-    """The agent's current conversation id from its status entry (it changes on /clear), or None."""
-    from . import workqueue
+    """The agent's current conversation id (it changes on /clear) from its status entry, else from the session its
+    process holds open (theseus.adapters live_session), or None."""
+    from . import adapters, workqueue
     info = pane_info(server_of(rec), rec["target"]) if rec.get("target") else None
     if not info:
         return None
-    entry = status_of(conf, workqueue.launched(conf, rec), info.get("pane_pid"))
-    return entry.get("sessionId") if entry else None
+    profile = workqueue.launched(conf, rec)
+    entry = status_of(conf, profile, info.get("pane_pid"))
+    if entry:
+        return entry.get("sessionId")
+    return adapters.live_session(conf, profile, info.get("pane_pid"))
 
 
 def refresh_sessions(conf):

@@ -104,7 +104,7 @@ ANTIGRAVITY_INTERACTIVE = {
     "launch": "{command} --mode {permission_mode} --model {model}",
     "resume": "{launch} --conversation {session}",
     "resume_missing": "",
-    "busy_pattern": "",
+    "busy_pattern": "esc to cancel",
     "stall_patterns": [],
     "gateway_patterns": [],
     "gateway_ready": "",
@@ -230,7 +230,7 @@ PRESETS = {
         "session": "none",
         "model_flag": "--model",
         "model": "",
-        "context_limit": 1000000,
+        "context_limit": 1048576,
         "permission_mode": "auto",
         "env": {},
         "retry": False,
@@ -443,19 +443,34 @@ JSONC_COMMENT = re.compile(r'("(?:\\.|[^"\\])*")|//[^\n]*|/\*.*?\*/', re.S)
 JSONC_COMMA = re.compile(r'("(?:\\.|[^"\\])*")|,(?=\s*[}\]])')
 
 
+def jsonc(text):
+    """A JSON document that may hold // and /* */ comments and trailing commas (OpenCode's opencode.jsonc)."""
+    text = JSONC_COMMENT.sub(lambda m: m.group(1) or "", text)
+    return json.loads(JSONC_COMMA.sub(lambda m: m.group(1) or "", text))
+
+
+def opencode_configs(variables=None):
+    """The user's global OpenCode configuration files that parse, as dicts, in the order OpenCode merges them."""
+    variables = os.environ if variables is None else variables
+    root = Path(variables.get("OPENCODE_CONFIG_DIR") or
+                Path(variables.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")) / "opencode")
+    found = []
+    for file in ("config.json", "opencode.json", "opencode.jsonc"):
+        try:
+            data = jsonc((root / file).read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            found.append(data)
+    return found
+
+
 def opencode_servers():
     """Names of the MCP servers in the user's global OpenCode configuration. OpenCode merges a profile's MCP file over
     it and ignores a partial entry, so the file disables each server it leaves out with a complete one."""
-    root = Path(os.environ.get("OPENCODE_CONFIG_DIR") or
-                Path(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")) / "opencode")
     names = set()
-    for file in ("config.json", "opencode.json", "opencode.jsonc"):
-        try:
-            text = JSONC_COMMENT.sub(lambda m: m.group(1) or "", (root / file).read_text())
-            data = json.loads(JSONC_COMMA.sub(lambda m: m.group(1) or "", text))
-        except (OSError, ValueError):
-            continue
-        servers = ((data.get("mcp") or {}) if isinstance(data, dict) else {}).get("servers")
+    for data in opencode_configs():
+        servers = (data.get("mcp") or {}).get("servers")
         names |= set(servers) if isinstance(servers, dict) else set()
     return sorted(names)
 
@@ -606,13 +621,13 @@ def instance_env(conf, profile_name=None, agent=None):
     interactive = profile.get("interactive") or {}
     instances = conf.section("instances")
     return {
-        "THESEUS_BUSY_PATTERN": instances.get("busy_pattern") or interactive.get("busy_pattern") or "",
+        "THESEUS_BUSY_PATTERN": interactive.get("busy_pattern") or instances.get("busy_pattern") or "",
         "THESEUS_COMPACT_TEMPLATE": interactive.get("compact") or "",
         "THESEUS_CLEAR_COMMAND": interactive.get("clear") or "",
         "THESEUS_AGENT_LAUNCH": interactive_launch(conf, profile, agent),
         "THESEUS_RESUME_TEMPLATE": interactive.get("resume") or "",
         "THESEUS_RESUME_MISSING": interactive.get("resume_missing") or "",
-        "THESEUS_AGENT_SESSIONS": os.path.expanduser(instances.get("sessions_dir") or interactive.get("sessions_dir") or ""),
+        "THESEUS_AGENT_SESSIONS": os.path.expanduser(interactive.get("sessions_dir") or instances.get("sessions_dir") or ""),
         "THESEUS_MESSAGING": "1" if interactive.get("messaging") else "0",
         "THESEUS_EXIT_COMMAND": interactive.get("exit") or "",
     }

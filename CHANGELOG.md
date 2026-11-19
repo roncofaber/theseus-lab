@@ -4,7 +4,28 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Fixed
+
+- Antigravity agents show their context and model: a supervised agy agent or coordinator now records its conversation id, read from the `presence/<id>.lock` its process holds open (transcript adapters may implement `live_session`), so its transcript is read and a restart resumes it. The preset's busy marker is `esc to cancel`, so a long thinking turn is no longer taken for a stall and nudged.
+- A profile's own `busy_pattern` and `sessions_dir` now take precedence over the project-wide `[instances]` values, which apply only to a profile that sets none; a Claude-specific `[instances] busy_pattern` no longer makes every other CLI look idle.
+- An agent whose transcript is being written counts as active even when it changes no file, so a slow model is not nudged as stalled.
+- The context meter follows the model of the newest answer for workers and the coordinator, and takes the window from the CLI's own setting when the adapter reports one (OpenCode's configured `limit.context`), else `[models] context`, else the profile's `context_limit` (marked `*`; popups name the source). The coordinator meter used the default profile's limit, and its model came only from the profile. `gemini-*` defaults to 1,048,576.
+- Commands that report failure through their return status now exit with it (`theseus agents up|restart|scale|...` exited 0 on failure).
+- Worker-log archiving in `merge`, `tasks retire` and `cleanup` copies symlinks as links (build trees leave dangling `/proc` links) and skips unreadable files with a warning; after a merge commit, an archive problem is a warning that says the merge succeeded.
+- The changed-files manifest accepts a deletion written either way round (`DELETED  path` or `path  DELETED`), and the worker skill's manifest command records deletions.
+- Repeated list options (`tasks add|edit --accept A --accept B`, `--owned`, `--touches`, `--depends`) keep every value instead of the last.
+- Attention shows an open question's text and `tasks show` lists the task's open questions.
+- A gateway pause or cap cut needs a project's coordinator only while it holds work back there (an agent of that pool holds a task, or a task waits for assignment); its age is the pool's latest error and it names the agents whose errors caused it.
+- Room `dirty_paths` written as a file-name prefix (`docs/investigations/re-`) mean the same glob (`re-*`) in the sparse checkout, the task message and the ownership rule.
+- `tasks complete --from-log` refuses a verify log of a commit that does not contain the task's merge, and names `--check/--log` for non-verify evidence; `theseus verify` prints the commit it verifies.
+- Manual `dispatch` is stopped only by the candidate's own or project-wide rule problems, not by an unrelated record's. A completed task without an owner is valid when no worker ever ran it (an administrative completion).
+- `docs fold-apply` refuses to move a report an open task still owns, which the next `tasks export` would write back.
+- Leaving an agent opened in place from the console (C-q) no longer leaves tmux's `[detached (from session X)]` line on the terminal, where the lines piled up and showed when the console quit.
+
 ### Added
+
+- `tasks add --hold` creates a task held in the same transaction; `tasks edit --append-note TEXT` adds a dated line to the coordinator note (both also in the MCP tools).
+- `theseus doctor` warns when `commands.build`, `smoke` or `verify` is empty.
 
 - Antigravity CLI (`agy`) support: new `antigravity` preset (alias `agy`) for headless (`agy -p ... --output-format json --mode auto`), worktree `--continue` follow-ups and interactive tmux launches (`agy --mode auto`, `/compact`, `/clear`, `/exit`, `--conversation` resume); new `antigravity-jsonl` transcript adapter reading `<sessions_dir>/<conversation-id>/.system_generated/logs/transcript.jsonl`; `theseus setup skill --client antigravity` and `[re] clients` skill resolution for `~/.gemini/config/skills`; `gemini-*` 1M context window default; and supervised agent/coordinator handling for profiles with `session = "none"` so they start fresh without preassigning or resuming a fabricated session id. See [Antigravity](docs/configuration.md#antigravity).
 - Coordinator session: `theseus coordinator up|down|restart [--fresh]|attach [--read-only]|status` runs the project's coordinator as the supervised session `PROJECT--coordinator` on the private tmux server, in the project root, from `[coordinator] profile` (project, or the host's `[defaults] coordinator.profile`; no built-in default, a missing one is an error naming the key). It runs with the coordinator's own MCP config (`theseus mcp --role coordinator`) and never a worker's credentials or `THESEUS_AGENT*` variables; each run is an `agent_runs` row under the reserved name `coordinator` and a `coordinator_sessions` row (no schema change). The pane-died hook, and the queue driver after each tick, restart a crashed or lost coordinator with the `[supervisor.restart]` backoff, resuming its conversation. Every start registers it for the attention push; a new conversation gets one start prompt from the project-owned template `.agents/skills/theseus-coordinating/session-prompt.md` (`[coordinator] prompt`). `attach` nests correctly inside your own tmux (TMUX unset) and switches the client inside the private server. `[coordinator] autostart = true` makes `theseus agents up` bring it up. The console lists it first in AGENTS with the role coordinator, and `A` attaches to it. The names `coordinator` and `queue` are reserved for agents.

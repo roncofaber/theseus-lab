@@ -243,14 +243,14 @@ def record_size(record):
 
 
 def add(queue, task_id, role, owned, objective, contract, accept, depends=(), milestone=None, room=None, priority=0,
-        profile=None, min_capability=0, touches=()):
+        profile=None, min_capability=0, touches=(), hold=False):
     if int(min_capability or 0) < 0:
         raise TaskError("--min-capability must be 0 or more")
     added = queue.service.add(acting_principal(None), {
         "id": task_id, "role": role, "owned": list(owned), "objective": objective, "contract": contract,
         "accept": list(accept), "depends": list(depends), "milestone": milestone, "room": room, "priority": priority,
-        "profile": profile, "min_capability": min_capability, "touches": list(touches)})
-    lines = [f"{task_id} added as pending ({len(accept)} acceptance items, {added['size']} bytes)"]
+        "profile": profile, "min_capability": min_capability, "touches": list(touches), "hold": hold})
+    lines = [f"{task_id} added as pending{' and held' if hold else ''} ({len(accept)} acceptance items, {added['size']} bytes)"]
     return "\n".join(lines + [f"warning: {warning}" for warning in added["warnings"]])
 
 
@@ -364,7 +364,8 @@ def busy_suffix(task, changed, message):
     if not changed.get("busy_with"):
         return message
     return (f"{message}; {agent_of(task)} already works on {changed['busy_with']}, so {task['id']} went back to pending "
-            f"for the next free agent (its worktree moves aside on assignment)")
+            f"for the next free agent (its worktree moves aside on assignment). Send {agent_of(task)} nothing about "
+            f"{task['id']}; put the correction in the note: theseus tasks edit {task['id']} --append-note TEXT")
 
 
 def patch_targets(worktree):
@@ -424,14 +425,21 @@ def verify_log_evidence(path):
     text = Path(path).read_text(errors="replace")
     commit = verify.parse_log_commit(text)
     if commit is None:
-        raise TaskError(f"{path} is not a theseus verify log")
+        raise TaskError(f"{path} is not a theseus verify log; for other evidence (a documentation check) pass "
+                        f"--check 'COMMAND -> OUTCOME' --log {path} instead")
     if not verify.log_passed(text):
         raise TaskError(f"{path} does not record a passing full verification; refusing to complete")
     digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
     return commit, f"theseus verify {commit[:12]} -> exit 0", f"{path} {digest}"
 
 
+DELETION_MARKERS = ("D", "DELETED")
+SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
 def manifest_entries(worktree):
+    """(digest, path) per line of the worker's changed.sha256: `sha256sum` lines, `DELETED  path` for a removed file
+    (digest "DELETED"), and the same two with the path first, which workers also write."""
     manifest = Path(worktree) / cfg.WORKER_LOG / "changed.sha256"
     if not manifest.exists():
         return None
@@ -443,7 +451,12 @@ def manifest_entries(worktree):
         if len(fields) != 2:
             entries.append(("MALFORMED", line.strip()))
             continue
-        entries.append((fields[0], fields[1].strip().lstrip("*")))
+        digest, name = fields[0], fields[1].strip().lstrip("*")
+        if not (SHA256.fullmatch(digest) or digest in DELETION_MARKERS):
+            head, _, tail = line.strip().rpartition(" ")
+            if head.strip() and (SHA256.fullmatch(tail) or tail in DELETION_MARKERS):
+                digest, name = tail, head.strip()
+        entries.append(("DELETED" if digest in DELETION_MARKERS else digest, name))
     return entries
 
 
@@ -454,7 +467,7 @@ def unintegrated_files(worktree, root, ref="HEAD"):
     for digest, name in manifest_entries(worktree) or []:
         if digest == "MALFORMED" or name.startswith((cfg.WORKER_LOG, "/")) or name.endswith(".patch"):
             continue
-        if digest in ("D", "DELETED"):
+        if digest == "DELETED":
             gone = subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{ref}:{name}"], capture_output=True)
             if gone.returncode == 0:
                 missing.append(name)
@@ -495,6 +508,11 @@ def complete(queue, task_id, summary, commit=None, checks=(), log=None, limits=(
     checks = list(checks)
     if from_log:
         verified, check, log = verify_log_evidence(from_log)
+        merged = (task.get("merge") or {}).get("commit")
+        if merged and not force and subprocess.run(["git", "-C", str(queue.root), "merge-base", "--is-ancestor", merged,
+                                                    verified], capture_output=True).returncode != 0:
+            raise TaskError(f"{from_log} verified {verified[:12]}, which does not contain {task_id}'s merge {merged}; "
+                            f"verify a commit that holds the merge (theseus verify {merged}) or pass --force")
         checks.append(check)
         commit = commit or verified[:12]
     commit = commit or (task.get("merge") or {}).get("commit")
@@ -653,6 +671,22 @@ def outside_consumers(queue, task):
     return names, consumers
 
 
+def archive_worker_log(worktree, target):
+    """Copy a worktree's worker log into target. Symlinks are copied as links (build trees leave dangling ones, such as
+    /proc/<pid>/fd targets) and files that cannot be copied are skipped. Returns a warning line, or None."""
+    source = Path(worktree) / cfg.WORKER_LOG
+    if not source.is_dir():
+        return None
+    try:
+        shutil.copytree(source, Path(target) / cfg.WORKER_LOG, symlinks=True, dirs_exist_ok=True)
+    except shutil.Error as error:
+        skipped = error.args[0] if error.args and isinstance(error.args[0], list) else []
+        return f"warning: {len(skipped) or 'some'} file(s) of {source} were not archived"
+    except OSError as error:
+        return f"warning: {source} was not archived: {error}"
+    return None
+
+
 def retire(queue, task_id, force=False):
     task = queue.get(task_id)
     worktree = task.get("worktree")
@@ -670,8 +704,9 @@ def retire(queue, task_id, force=False):
         raise TaskError(f"refusing to remove {worktree}: main never committed {', '.join(missing)}; integrate them or pass --force")
     target = queue.conf.workers_dir / Path(worktree).name
     target.mkdir(parents=True, exist_ok=True)
-    if (Path(worktree) / cfg.WORKER_LOG).is_dir():
-        shutil.copytree(Path(worktree) / cfg.WORKER_LOG, target / cfg.WORKER_LOG, dirs_exist_ok=True)
+    warning = archive_worker_log(worktree, target)
+    if warning:
+        print(warning, file=sys.stderr)
     branch = g.out(worktree, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
     g.git(queue.root, "worktree", "remove", "--force", str(worktree))
     note = ""

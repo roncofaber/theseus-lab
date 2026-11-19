@@ -535,6 +535,7 @@ def health(now=None, window=24 * 3600):
                       "labels": [e.get("label") or (str(e["code"]) if e["code"] else "unknown (resend marker)")
                                  for e in mine[-8:]],
                       "lastError": mine[-1]["epoch"] if mine else None, "lastSuccess": row.get("last_success"),
+                      "sources": sorted({f"{e.get('project') or '?'}/{e.get('agent') or '?'}" for e in mine[-8:]}),
                       "pausedUntil": until if until and until > now else None, "reason": row.get("reason"),
                       "capCut": cut or 0, "capUntil": cut_until if cut else None})
     return [entry for entry in found if entry["errors"] or entry["pausedUntil"] or entry["capCut"]]

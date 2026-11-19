@@ -40,7 +40,9 @@ def budget_rows(root, file_budgets, default_skill_budget, read_sets):
 
 
 def budget_problems(rows):
-    return [f"{name} is {value} bytes, over its {budget}-byte budget by more than {TOLERANCE:.0%}; prune before adding"
+    return [f"{name} is {value} bytes, over its {budget}-byte budget by more than {TOLERANCE:.0%} (fails above "
+            f"{hard(budget)}); prune before adding: replace stale facts rather than append, and move long-lived detail "
+            f"(recorded decisions, history) to a document the file links to, such as docs/project/decisions.md"
             for name, value, budget in rows if value > hard(budget)]
 
 
@@ -97,7 +99,8 @@ def task_record_problems(conf):
                 problems.append(f"{task_id}: empty {field}")
         if len(task.get("acceptance") or []) > t.TASK_ACCEPTANCE_LIMIT:
             problems.append(f"{task_id}: more than {t.TASK_ACCEPTANCE_LIMIT} acceptance items")
-        if status == "completed" and (task.get("owner") is None or task.get("result") is None):
+        worked = task.get("execution") or task.get("worktree") or task.get("previousAttempts")
+        if status == "completed" and (task.get("result") is None or task.get("owner") is None and worked):
             problems.append(f"{task_id}: completed without owner or result")
         if status in ("in_progress", "verification", "merged") and task.get("owner") is None:
             problems.append(f"{task_id}: {status} without owner")

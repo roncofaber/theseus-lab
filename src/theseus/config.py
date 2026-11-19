@@ -89,7 +89,7 @@ DEFAULTS = {
     "docs": {"index_command": [], "check_command": [], "generated": []},
     "upgrade": {"keep": []},
     "models": {"context": {"claude-*": 1000000, "claude-haiku-4-5*": 200000, "claude-sonnet-4-5*": 200000,
-                           "claude-opus-4-5*": 200000, "gemini-*": 1000000}},
+                           "claude-opus-4-5*": 200000, "gemini-*": 1048576}},
     "re": {"targets": [], "evidence": r"ev_[0-9a-f]{64}", "citations": DEFAULT_CITATIONS,
            "address_low": 0, "address_high": 0, "clients": ["claude_code"]},
     "tools": {"need": [], "paths": {}},

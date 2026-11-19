@@ -196,22 +196,31 @@ def supervised_pids(ttl=5.0):
     return found
 
 
+LIMIT_SOURCES = {"harness": "the agent CLI's own setting for the model", "models": "[models] context for the model",
+                 "profile": "the profile's context_limit (no setting for the model)"}
+
+
 def context_use(conf, profile, transcript, hint):
-    """{"tokens", "limit", "model", "source"} of the agent's context: the transcript's last answer, else the pane's
-    context hint, else None. The limit is the transcript model's window from [models] context, else the profile's
-    context_limit."""
+    """{"tokens", "limit", "limitSource", "model", "source"} of the agent's context: the transcript's last answer, else
+    the pane's context hint, else None. Both follow the model of the newest answer, so a model switched inside the
+    agent's CLI shows at once. The limit is the CLI's own window for that model when its adapter reports one
+    ("harness"), else the model's [models] context ("models"), else the profile's context_limit ("profile")."""
     from . import profiles
-    try:
-        limit = int(profiles.resolve(conf, profile).get("context_limit") or profiles.CONTEXT_LIMIT)
-    except (profiles.ProfileError, ValueError, TypeError):
-        limit = profiles.CONTEXT_LIMIT
-    model_limit = profiles.model_context_limit(conf, (transcript or {}).get("model"))
-    if model_limit:
-        limit = model_limit
-    if transcript and transcript.get("tokens"):
-        return {"tokens": transcript["tokens"], "limit": limit, "model": transcript.get("model"), "source": "transcript"}
+    transcript = transcript or {}
+    limit, source = transcript.get("limit"), "harness"
+    if not limit:
+        limit, source = profiles.model_context_limit(conf, transcript.get("model")), "models"
+    if not limit:
+        source = "profile"
+        try:
+            limit = int(profiles.resolve(conf, profile).get("context_limit") or profiles.CONTEXT_LIMIT)
+        except (profiles.ProfileError, ValueError, TypeError):
+            limit = profiles.CONTEXT_LIMIT
+    use = {"limit": limit, "limitSource": source, "model": transcript.get("model")}
+    if transcript.get("tokens"):
+        return {"tokens": transcript["tokens"], "source": "transcript", **use}
     if hint:
-        return {"tokens": hint, "limit": limit, "model": None, "source": "pane hint"}
+        return {"tokens": hint, "source": "pane hint", **use}
     return None
 
 
@@ -684,6 +693,8 @@ def state(conf, agent):
         handoff = handoff_path(task)
         worktree = task.get("worktree")
         newest = newest_change([p for p in (worktree, handoff.parent if handoff else None) if p])
+        if transcript and transcript.get("updated"):
+            newest = max(newest or 0, transcript["updated"])
         info["idleMinutes"] = int((time.time() - newest) / 60) if newest else None
         info["lastChange"] = newest
         if handoff and handoff.exists() and not busy and handoff_final(conf, handoff):

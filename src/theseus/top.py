@@ -494,7 +494,8 @@ def supervised_coordinator(conf):
             found["lastActivity"] = path.stat().st_mtime
         except OSError:
             state = None
-        found["context"] = ag.context_use(conf, None, state, None)
+        found["context"] = ag.context_use(conf, st.get("profile"), state, None)
+        found["model"] = (state or {}).get("model") or found["model"]
     return found
 
 
@@ -539,6 +540,7 @@ def coordinator_state(conf):
         except OSError:
             state = None
         info["context"] = ag.context_use(conf, None, state, None)
+        info["model"] = (state or {}).get("model")
     return info
 
 

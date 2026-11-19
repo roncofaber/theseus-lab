@@ -136,14 +136,16 @@ def coordinator_tools(queue):
 
     def tasks_add(task: str, role: str, owned: list[str], objective: str, contract: str, accept: list[str],
                   depends: list[str] | None = None, milestone: str | None = None, room: str | None = None,
-                  priority: int = 0, touches: list[str] | None = None) -> dict:
-        """Add a pending task (owned must include docs/investigations/TASK.md; at most six acceptance items)."""
+                  priority: int = 0, touches: list[str] | None = None, hold: bool = False) -> dict:
+        """Add a pending task (owned must include docs/investigations/TASK.md; at most six acceptance items); hold
+        creates it held."""
         return t.add(queue, task, role, owned, objective, contract, accept, depends or (), milestone, room, priority,
-                     touches=touches or ())
+                     touches=touches or (), hold=hold)
 
     def tasks_edit(task: str, changes: dict, force: bool = False) -> dict:
         """Change a pending task (an in-progress one with force): keys role, objective, contract, accept, owned,
-        add_owned, touches, depends, milestone, room, profile, priority, min_capability, note."""
+        add_owned, touches, depends, milestone, room, profile, priority, min_capability, note, append_note (adds a
+        dated line to the note)."""
         return t.edit(queue, task, changes, force)
 
     def tasks_hold(task: str, on: bool = True) -> dict:

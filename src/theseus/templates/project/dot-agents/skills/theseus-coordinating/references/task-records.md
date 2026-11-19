@@ -3,8 +3,10 @@
 ```sh
 theseus tasks add ID --role ROLE --owned PATHS... --objective "..." --contract "..." --accept ITEMS... \
   [--depends IDS] [--milestone M] [--room clean|dirty] [--priority N] [--profile P] [--min-capability N] \
-  [--touches FILES]
+  [--touches FILES] [--hold]
 ```
+
+A list option takes several values (`--accept A B C`) or repeats (`--accept A --accept B`); both keep every item. `--hold` creates the record held, so the queue cannot assign it before `theseus tasks release-hold ID`. Write values with Markdown backticks as separate argv items, never inside a double-quoted shell string, where the shell runs them.
 
 `--owned` must include the task's report, `docs/investigations/<name>.md`. The record goes into the host store as `pending`; there is nothing to commit before it is assigned (workers read it with `theseus task show`). A passing `theseus verify` and `tasks complete` write the export under `docs/project/`, which you commit; `theseus tasks export` writes it any time. Never edit those files by hand: theseus ignores the edit, and `theseus doctor` reports it.
 
@@ -30,12 +32,12 @@ With `[rooms]` enabled every record gets `--room dirty` (reads the original's co
 
 | Change | Command |
 | --- | --- |
-| Note carried in the task message | `theseus tasks note ID "text"` |
+| Note carried in the task message | `theseus tasks note ID "text"` (replaces it); `theseus tasks edit ID --append-note "text"` adds a dated line |
 | Priority / hold | `theseus tasks priority ID N`, `theseus tasks hold ID`, `theseus tasks release-hold ID` |
 | Profile / capability | `theseus tasks profile ID NAME`, `theseus tasks capability ID N` |
 | Current milestone | `theseus tasks milestone M` |
 | Back to pending (assigned or delivered) | `theseus tasks release ID --reason "..."` |
-| Delivered too early, back to the worker | `theseus tasks reopen ID --reason "..."` (move the handoff aside first; events.md) |
+| Delivered too early, back to the worker | `theseus tasks reopen ID --reason "..."` (from the main checkout; events.md) |
 | Merged but wrong | `theseus tasks unmerge ID --reason "..."` |
 | Merge committed by hand | `theseus tasks merged ID --commit SHA` |
 

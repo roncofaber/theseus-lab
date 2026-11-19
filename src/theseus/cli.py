@@ -52,6 +52,9 @@ def emit(lines):
             print(line)
 
 
+JSON_ENVELOPE = 'print one JSON object: {"ok": true, "data": <the output>} or {"ok": false, "error": {code, message}}'
+
+
 def guarded(function):
     from . import gitutil, integrate, profiles, tasks
     def wrapper(args):
@@ -370,7 +373,7 @@ def tasks_action(conf, queue, args):
     action = args.task_action
     if action == "add":
         emit(t.add(queue, args.id, args.role, args.owned, args.objective, args.contract, args.accept, args.depends, args.milestone,
-                   args.room, args.priority, args.profile, args.min_capability, args.touches))
+                   args.room, args.priority, args.profile, args.min_capability, args.touches, args.hold))
     elif action in ("list", "ls"):
         emit(t.list_tasks(queue, args.status, args.all, args.evidence))
     elif action == "edit":
@@ -378,7 +381,8 @@ def tasks_action(conf, queue, args):
             ("role", args.role), ("objective", args.objective), ("contract", args.contract), ("accept", args.accept),
             ("owned", args.owned), ("add_owned", args.add_owned), ("touches", args.touches), ("depends", args.depends),
             ("milestone", args.milestone), ("room", args.room), ("profile", args.profile), ("priority", args.priority),
-            ("min_capability", args.min_capability), ("note", args.note)) if value is not None}
+            ("min_capability", args.min_capability), ("note", args.note), ("append_note", args.append_note))
+            if value is not None}
         if args.clear_blockers:
             changes.update(externalBlocker=None, researchRequired=None)
         for flag, key in ((args.external_blocker, "externalBlocker"), (args.research_required, "researchRequired")):
@@ -406,6 +410,10 @@ def tasks_action(conf, queue, args):
                              ensure_ascii=False))
             return
         task = queue.get(args.id)
+        if not args.field:
+            questions = queue.service.questions(t.acting_principal(None), args.id)
+            if questions:
+                task = {**task, "openQuestions": [{k: q[k] for k in ("text", "author", "time")} for q in questions]}
         print(json.dumps(task.get(args.field) if args.field else task, indent=2, ensure_ascii=False))
     elif action == "prompt":
         print(t.render_prompt(queue, args.id, args.base, args.worktree, args.log_dir), end="")
@@ -682,7 +690,7 @@ def cmd_docs(args):
         ok, problems = fold.apply(conf, args.topic, args.dry_run, not args.no_verify)
         emit(problems)
         if not ok:
-            sys.exit("refusing to move reports: topic check failed")
+            sys.exit("refusing to move reports (see above)")
         if not args.dry_run:
             emit([f"wrote {p}" for p in docs.regenerate(conf)])
         return
@@ -1457,11 +1465,11 @@ def build_parser():
     p = ts.add_parser("add", help="write a new pending task record")
     p.add_argument("id", help="kebab-case ID, unique across the queue and the archive")
     p.add_argument("--role", required=True, help="tooling, implementation, research, fix, verification, docs ...")
-    p.add_argument("--owned", nargs="+", required=True, metavar="PATH", help="owned paths; must include docs/investigations/NAME.md")
+    p.add_argument("--owned", nargs="+", action="extend", required=True, metavar="PATH", help="owned paths; must include docs/investigations/NAME.md")
     p.add_argument("--objective", required=True, help="one sentence stating what the task achieves")
     p.add_argument("--contract", required=True, help="generalContract: the general behavior and its representative variations")
-    p.add_argument("--accept", nargs="+", required=True, metavar="TEXT", help="acceptance items, at most six")
-    p.add_argument("--depends", nargs="+", default=[], metavar="ID")
+    p.add_argument("--accept", nargs="+", action="extend", required=True, metavar="TEXT", help="acceptance items, at most six; repeatable")
+    p.add_argument("--depends", nargs="+", action="extend", default=[], metavar="ID")
     p.add_argument("--milestone", help="milestone (default: the current one)")
     p.add_argument("--room", choices=("clean", "dirty"), help="clean-room separation (see [rooms] in theseus.toml)")
     p.add_argument("--priority", type=int, default=0, help="1 (last) to 5 (first), default 3; an old task gains a level "
@@ -1469,9 +1477,10 @@ def build_parser():
     p.add_argument("--profile", help="agent profile the task needs (default: any); see theseus tasks profile")
     p.add_argument("--min-capability", type=int, default=0, metavar="N",
                    help="lowest profile capability that may take the task (default 0: any); see theseus tasks capability")
-    p.add_argument("--touches", nargs="+", default=[], metavar="PATH",
+    p.add_argument("--touches", nargs="+", action="extend", default=[], metavar="PATH",
                    help="shared files outside ownedPaths the task will patch; a running task that owns or touches them "
                         "holds this one, and this one holds them while it runs")
+    p.add_argument("--hold", action="store_true", help="create the task held (theseus tasks release-hold ID lets it run)")
     for name in ("list", "ls"):
         p = ts.add_parser(name, help="one line per task with readiness or blocking reasons")
         p.add_argument("--status", choices=("pending", "in_progress", "verification", "merged", "completed"))
@@ -1483,17 +1492,18 @@ def build_parser():
     p.add_argument("--role")
     p.add_argument("--objective")
     p.add_argument("--contract")
-    p.add_argument("--accept", nargs="+", metavar="TEXT", help="replaces the acceptance items")
-    p.add_argument("--owned", nargs="+", metavar="PATH", help="replaces the owned paths")
-    p.add_argument("--add-owned", nargs="+", metavar="PATH", help="adds owned paths")
-    p.add_argument("--touches", nargs="+", metavar="PATH", help="replaces the shared files the task will patch")
-    p.add_argument("--depends", nargs="*", metavar="ID", help="replaces the dependencies (none: clear them)")
+    p.add_argument("--accept", nargs="+", action="extend", metavar="TEXT", help="replaces the acceptance items; repeatable")
+    p.add_argument("--owned", nargs="+", action="extend", metavar="PATH", help="replaces the owned paths")
+    p.add_argument("--add-owned", nargs="+", action="extend", metavar="PATH", help="adds owned paths")
+    p.add_argument("--touches", nargs="+", action="extend", metavar="PATH", help="replaces the shared files the task will patch")
+    p.add_argument("--depends", nargs="*", action="extend", metavar="ID", help="replaces the dependencies (none: clear them)")
     p.add_argument("--milestone")
     p.add_argument("--room", choices=("clean", "dirty", ""))
     p.add_argument("--profile")
     p.add_argument("--priority", type=int)
     p.add_argument("--min-capability", type=int, metavar="N")
-    p.add_argument("--note", help="the coordinator note carried in the task message")
+    p.add_argument("--note", help="the coordinator note carried in the task message (replaces it)")
+    p.add_argument("--append-note", metavar="TEXT", help="add a dated line to the coordinator note")
     p.add_argument("--external-blocker", metavar="EVIDENCE", help="an input the team cannot obtain itself (with --unblock)")
     p.add_argument("--research-required", metavar="EVIDENCE",
                    help="unrecovered behavior that needs a bounded research task first (with --unblock)")
@@ -1594,7 +1604,7 @@ def build_parser():
     p.add_argument("value", nargs="?")
     tasks.set_defaults(func=guarded(json_reply(cmd_tasks)))
     for subparser in ts.choices.values():
-        subparser.add_argument("--json", action="store_true", help="print one JSON object")
+        subparser.add_argument("--json", action="store_true", help=JSON_ENVELOPE)
     task = sub.add_parser("task", help="a worker's own task (name it from your assignment): show, note, done, blocked")
     tk = task.add_subparsers(dest="task_command", required=True)
     p = tk.add_parser("show", help="your task: the record, notes and worktree")
@@ -1612,7 +1622,7 @@ def build_parser():
     p.add_argument("reason")
     p.add_argument("--handoff")
     for subparser in tk.choices.values():
-        subparser.add_argument("--json", action="store_true", help="print one JSON object")
+        subparser.add_argument("--json", action="store_true", help=JSON_ENVELOPE)
     task.set_defaults(func=guarded(json_reply(cmd_task)))
     p = sub.add_parser("mcp", help="the task tools as an MCP server over stdio (needs theseus-lab[mcp]): a worker's "
                                    "tools from THESEUS_CREDENTIALS, or the coordinator's with --role coordinator")
@@ -1902,7 +1912,9 @@ def main(argv=None):
     from . import store, upgrade
     while True:
         try:
-            args.func(args)
+            code = args.func(args)
+            if isinstance(code, int) and not isinstance(code, bool) and code:
+                sys.exit(code)
             return
         except store.SchemaTooNew as error:
             if not (args.command == "queue" and args.action in ("run", "wait")):

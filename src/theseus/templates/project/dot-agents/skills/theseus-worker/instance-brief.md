@@ -27,4 +27,4 @@ A later message may be the coordinator correcting you (do what it says, then rew
 
 ## Permission prompts
 
-If your agent CLI asks for approval, the coordinator cannot answer it for you; prefer commands that stay inside your worktree and need none. If an action is rejected, do not retry it in another form: continue without it or deliver `blocked` naming what you needed.
+If your agent CLI asks for approval, the coordinator cannot answer it for you; prefer commands that stay inside your worktree and need none. If an action is rejected, do not retry it in another form: continue with the rest of the task, list the denied command as skipped, and deliver `partial` (`blocked` only when nothing else can be done).

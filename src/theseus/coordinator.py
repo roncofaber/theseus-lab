@@ -397,13 +397,15 @@ def restart(conf, fresh=False, profile=None, wait=True):
 
 def live_session(conf, srv):
     """The conversation id the coordinator's CLI reports now (it changes on /clear), or None."""
-    from . import supervisor
+    from . import adapters, supervisor
     st = state(conf)
     info = pane(srv, conf)
     if not info or not st.get("profile"):
         return None
     entry = supervisor.status_of(conf, st["profile"], info.get("pane_pid"))
-    return entry.get("sessionId") if entry else None
+    if entry:
+        return entry.get("sessionId")
+    return adapters.live_session(conf, st["profile"], info.get("pane_pid"))
 
 
 # exits, the hook and the driver's check

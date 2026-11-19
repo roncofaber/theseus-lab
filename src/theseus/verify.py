@@ -120,6 +120,7 @@ def full(conf, revision="HEAD"):
     conf.logs.mkdir(parents=True, exist_ok=True)
     log = conf.logs / f"verify-{sha[:12]}-{time.strftime('%Y%m%dT%H%M%S')}.log"
     log.write_text(f"{LOG_HEADER}{sha}\n")
+    print(f"verify: {sha[:12]} {g.out(conf.root, 'log', '-1', '--format=%s', sha)} ({revision})")
     conf.scratch.mkdir(parents=True, exist_ok=True)
     tree = Path(tempfile.mkdtemp(prefix="verify-", dir=conf.scratch)) / "tree"
     g.git(conf.root, "worktree", "add", "--detach", "--quiet", str(tree), sha)

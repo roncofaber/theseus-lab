@@ -3,7 +3,10 @@
 Each conversation lives at <sessions_dir>/<conversation-id>/.system_generated/logs/transcript.jsonl, where
 <sessions_dir> defaults to ~/.gemini/antigravity-cli/brain (or $AGY_APP_DATA_DIR/brain). Each line is a JSON step
 with type USER_INPUT, PLANNER_RESPONSE, GENERIC (tool result) or SYSTEM_MESSAGE. Reads start at most TAIL_BYTES
-before the end of the file and continue incrementally from the previous byte offset."""
+before the end of the file and continue incrementally from the previous byte offset.
+
+agy takes no preassigned conversation id and has no status command, but a running agy holds
+<app data>/presence/<conversation-id>.lock open, so live_session reads the id from the pane's processes."""
 import json
 import os
 import re
@@ -22,15 +25,15 @@ KEY_ARGUMENTS = ("Path", "CommandLine", "Query", "Url", "Target", "Prompt", "fil
 USER_REQUEST = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
 META_TAGS = re.compile(r"<(?:ADDITIONAL_METADATA|USER_SETTINGS_CHANGE)>.*?</(?:ADDITIONAL_METADATA|USER_SETTINGS_CHANGE)>", re.S)
 HEADER_PREFIXES = ("Created At:", "Completed At:")
+PRESENCE_LOCK = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.lock")
 
 
 def brain_dir(conf=None, interactive=None):
-    """The Antigravity brain directory holding per-conversation transcripts."""
-    if conf is not None:
-        configured = conf.section("instances").get("sessions_dir")
-        if configured:
-            return Path(os.path.expanduser(str(configured)))
+    """The Antigravity brain directory holding per-conversation transcripts: the profile's sessions_dir, else
+    [instances] sessions_dir, else $AGY_APP_DATA_DIR/brain, else ~/.gemini/antigravity-cli/brain."""
     configured = (interactive or {}).get("sessions_dir")
+    if not configured and conf is not None:
+        configured = conf.section("instances").get("sessions_dir")
     if configured:
         return Path(os.path.expanduser(str(configured)))
     variables = {**os.environ, **((interactive or {}).get("env") or {})}
@@ -163,6 +166,7 @@ def read_locked(path):
         start = max(0, info.st_size - TAIL_BYTES)
         state = {"inode": info.st_ino, "offset": start, "partial": start > 0, "tokens": None, "model": None,
                  "errors": [], "last": None, "entries": [], "total": 0, "key": f"{path}:{info.st_ino}"}
+    state["updated"] = info.st_mtime
     if info.st_size > state["offset"]:
         try:
             with open(path, "rb") as handle:
@@ -199,3 +203,22 @@ def session_state(conf, agent, interactive):
         return None
     path = transcript_path(brain_dir(conf, interactive), agent["session_id"])
     return read(path) if path.is_file() else None
+
+
+def live_session(interactive, pids):
+    """The conversation id whose presence lock one of pids holds open, or None."""
+    presence = brain_dir(None, interactive).parent / "presence"
+    for pid in sorted(pids):
+        try:
+            entries = list(os.scandir(f"/proc/{pid}/fd"))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                target = Path(os.readlink(entry))
+            except OSError:
+                continue
+            match = PRESENCE_LOCK.fullmatch(target.name)
+            if match and target.parent == presence:
+                return match.group(1)
+    return None

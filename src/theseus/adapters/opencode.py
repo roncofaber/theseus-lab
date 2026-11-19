@@ -7,11 +7,15 @@ its outcome and error).
 The database names no process or tmux pane, so only a supervised agent's session is found, by the id theseus
 preassigned. The database is opened read-only, and each read asks only for the rows after the last one consumed. An
 assistant or compaction row is rewritten while it streams, so reading stops before the first unfinished one until it
-completes or a later idle row shows the turn ended."""
+completes or a later idle row shows the turn ended.
+
+The context limit is the one OpenCode itself uses for the answer's model: providers.<provider>.models.<model>.limit.context
+(provider in OpenCode 1) in the user's global configuration, so the meter follows a model switch made inside OpenCode."""
 import json
 import os
 import sqlite3
 import threading
+import time
 import urllib.parse
 from contextlib import closing
 from datetime import datetime, timezone
@@ -24,6 +28,8 @@ KEEP_ERRORS = 20
 KEEP_ENTRIES = 500
 READS = {}
 LOCK = threading.Lock()
+CONFIG_SECONDS = 10
+CONFIG = {}
 ERROR_KINDS = {"provider.rate-limit": "rate_limit", "provider.internal": "server_error",
                "provider.timeout": "server_error", "provider.transport": "connection_lost"}
 
@@ -69,6 +75,25 @@ def context_tokens(tokens):
     cache = tokens.get("cache") or {}
     return sum(int(value or 0) for value in (tokens.get("input"), tokens.get("output"), tokens.get("reasoning"),
                                              cache.get("read"), cache.get("write")))
+
+
+def model_limit(provider, model):
+    """The context limit OpenCode's global configuration sets for a provider's model, or None."""
+    if not provider or not model:
+        return None
+    cached = CONFIG.get("configs")
+    if not cached or time.monotonic() - cached[0] > CONFIG_SECONDS:
+        from .. import profiles
+        cached = (time.monotonic(), profiles.opencode_configs())
+        CONFIG["configs"] = cached
+    found = None
+    for data in cached[1]:
+        for key in ("providers", "provider"):
+            entry = (((data.get(key) or {}).get(provider) or {}).get("models") or {}).get(model) or {}
+            limit = (entry.get("limit") or {}).get("context") if isinstance(entry, dict) else None
+            if isinstance(limit, (int, float)) and limit > 0:
+                found = int(limit)
+    return found
 
 
 def error_text(error):
@@ -135,9 +160,13 @@ def consume(state, kind, data, time):
             entry["n"] = number
         state["entries"] = (state["entries"] + found)[-KEEP_ENTRIES:]
         state["total"] += len(found)
+    if time:
+        state["updated"] = max(state.get("updated") or 0, created_epoch(time))
     if kind == "assistant" and context_tokens(data.get("tokens")):
         state["tokens"] = context_tokens(data["tokens"])
-        state["model"] = (data.get("model") or {}).get("id") or state["model"]
+        model = data.get("model") or {}
+        if model.get("id"):
+            state["model"], state["provider"] = model["id"], model.get("providerID")
         if not data.get("error"):
             state["last"] = "answer"
     elif kind == "compaction" and data.get("status") == "completed":
@@ -147,6 +176,13 @@ def consume(state, kind, data, time):
         state["errors"] = (state["errors"] + [{"time": time, "error": ERROR_KINDS.get(str(error.get("type"))),
                                                "text": error_text(error)}])[-KEEP_ERRORS:]
         state["last"] = "error"
+
+
+def created_epoch(stamp_text):
+    try:
+        return datetime.fromisoformat(stamp_text.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return 0
 
 
 def connect(path):
@@ -176,8 +212,8 @@ def read_locked(path, session):
         key = f"{path}:{session}:{row[0]}"
         state = READS.get(key)
         if state is None:
-            state = {"seq": None, "tokens": None, "model": None, "errors": [], "last": None, "entries": [], "total": 0,
-                     "key": key, "cwd": row[1]}
+            state = {"seq": None, "tokens": None, "model": None, "provider": None, "limit": None, "updated": None,
+                     "errors": [], "last": None, "entries": [], "total": 0, "key": key, "cwd": row[1]}
             rows = conn.execute("SELECT seq, type, time_created, data FROM session_message WHERE session_id = ? "
                                 "ORDER BY seq DESC LIMIT ?", (session, FIRST_ROWS)).fetchall()[::-1]
         else:
@@ -198,6 +234,7 @@ def read_locked(path, session):
         state["seq"] = seq
     if state["seq"] is None:
         state["seq"] = 0 if not rows else rows[0][0] - 1
+    state["limit"] = model_limit(state.get("provider"), state.get("model"))
     READS[key] = state
     return state
 

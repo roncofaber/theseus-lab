@@ -792,9 +792,10 @@ def merge(conf, task_id, subject=None, accept=(), skip_patches=(), commit=True, 
     report.append(t.mark_merged(queue, task_id, sha))
     archive = conf.workers_dir / worktree.name
     archive.mkdir(parents=True, exist_ok=True)
-    if (worktree / cfg.WORKER_LOG).is_dir():
-        shutil.copytree(worktree / cfg.WORKER_LOG, archive / cfg.WORKER_LOG, dirs_exist_ok=True)
     report.append(f"committed {sha}")
+    warning = t.archive_worker_log(worktree, archive)
+    if warning:
+        report.append(f"{warning}; the merge itself succeeded")
     return sha, report
 
 

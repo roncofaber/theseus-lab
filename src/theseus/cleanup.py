@@ -113,6 +113,7 @@ def scratch(conf, apply, cutoff, referenced, lines):
 
 
 def worktrees(conf, apply, cutoff, referenced, lines):
+    from . import tasks as t
     listing = subprocess.run(["git", "-C", str(conf.root), "worktree", "list", "--porcelain"], capture_output=True, text=True, check=True).stdout
     paths, locked = [], set()
     for line in listing.splitlines():
@@ -142,8 +143,9 @@ def worktrees(conf, apply, cutoff, referenced, lines):
         lines.append(f"{'remove' if apply else 'would rm'} worktree {path.name} ({human(size)}; {'dirty: ' + str(len(changed)) + ' file(s) saved' if changed else 'clean'})")
         if apply:
             save = conf.data / "archive/worktrees" / path.name
-            if (path / cfg.WORKER_LOG).is_dir():
-                shutil.copytree(path / cfg.WORKER_LOG, save / cfg.WORKER_LOG, dirs_exist_ok=True)
+            warning = t.archive_worker_log(path, save)
+            if warning:
+                lines.append(f"         {warning}")
             if changed:
                 save.mkdir(parents=True, exist_ok=True)
                 head = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"], capture_output=True, text=True).stdout

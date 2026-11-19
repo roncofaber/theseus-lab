@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from rich.text import Text
 
 from .. import top
+from ..agents import LIMIT_SOURCES
 from . import charts, theme
 
 AGENT_COLUMNS = ("agent", "state", "cap", "task", "CPU (core %)", "MEM (RAM)", "context", "room", "on task", "quiet",
@@ -38,8 +39,9 @@ MEM_WARN, MEM_ALARM = 0.10, 0.25
 CTX_WARN, CTX_ALARM = 0.5, 0.8
 CPU_HELP = "CPU (core %): the agent's processes in percent of one core; 250% is two and a half cores busy"
 MEM_HELP = (f"MEM (RAM): resident memory and its share of system RAM; yellow from {MEM_WARN:.0%}, red from {MEM_ALARM:.0%}")
-CTX_HELP = (f"context: tokens in the agent's context after its last answer (Claude Code transcript, else the pane's "
-            f"/clear hint) of the profile's context_limit; yellow from {CTX_WARN:.0%}, red from {CTX_ALARM:.0%}")
+CTX_HELP = (f"context: tokens in the agent's context after its last answer (its transcript, else the pane's /clear "
+            f"hint) of the window of the answer's model: the agent CLI's own setting, else [models] context, else the "
+            f"profile's context_limit (marked *); yellow from {CTX_WARN:.0%}, red from {CTX_ALARM:.0%}")
 
 
 def cell(text, style=""):
@@ -79,8 +81,18 @@ def context(use):
     style = theme.RED if fraction >= CTX_ALARM else theme.YELLOW if fraction >= CTX_WARN else theme.GREEN
     shown = charts.meter(fraction, 4, style=style)
     shown.append(f" {tokens(use['tokens'])}/{tokens(limit) if limit else '?'}")
+    if use.get("limitSource") == "profile":
+        shown.append("*", style="dim")
     if use.get("source") == "pane hint":
         shown.append(" ~", style="dim")
+    return shown
+
+
+def context_detail(use):
+    """The context cell plus where its limit comes from, for a popup."""
+    shown = context(use)
+    if use and use.get("tokens") and use.get("limitSource"):
+        shown.append(f"  limit: {LIMIT_SOURCES.get(use['limitSource'], use['limitSource'])}", style="dim")
     return shown
 
 
@@ -552,8 +564,10 @@ def coordinator_text(coordinator):
     detail.add("state", coordinator["state"] + (f" ({coordinator['waiting']})" if coordinator.get("waiting") else ""), "bold")
     detail.add("pane", coordinator.get("pane") or "-")
     detail.add("session", coordinator.get("session") or "-")
+    detail.add("profile", coordinator.get("profile") or "-")
+    detail.add("model", coordinator.get("model") or "-")
     detail.add("active", ago(coordinator.get("lastActivity")))
-    detail.add("context", context(coordinator.get("context")))
+    detail.add("context", context_detail(coordinator.get("context")))
     return detail.render()
 
 
@@ -723,7 +737,7 @@ def agent_text(agent, task=None, total=0):
     detail.add("CPU", "-" if agent.get("cpu") is None else f"{agent['cpu']:.0f}% of one core")
     rss = agent.get("rss")
     detail.add("memory", "-" if rss is None else top.size(rss) + (f"  ({rss / total:.1%} of RAM)" if total else ""))
-    detail.add("context", context(agent.get("context")))
+    detail.add("context", context_detail(agent.get("context")))
     detail.add("worktree", agent.get("worktree") or "-")
     detail.add("room", "dirty" if agent.get("tainted") else "clean", theme.RED if agent.get("tainted") else theme.GREEN)
     if agent.get("task"):

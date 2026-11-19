@@ -11,6 +11,11 @@ An adapter is a module of this package, registered in ADAPTERS under the name a 
   the session id.
 - read(path): the state of that record, or None. Reads are incremental and safe from several threads.
 
+One function is optional:
+- live_session(interactive, pids): the session id that one of the processes pids (an agent's pane process and its
+  descendants) holds open, or None; for a CLI that takes no preassigned id and names no session in a status command
+  (Antigravity), so theseus learns the id after launch and after a /clear.
+
 A state is a dict with:
 - tokens: the context in use after the last answer, or None;
 - model: the model id of that answer, or None;
@@ -24,7 +29,11 @@ A state is a dict with:
   a result's first line), "text" then being what unfolds (the call's input, the whole result). Thinking and system
   or meta entries are never included. The list is replaced, never changed in place;
 - total: how many entries were ever read;
-- key: names the record (a new key means a new session or a rewritten file, so a reader starts over).
+- key: names the record (a new key means a new session or a rewritten file, so a reader starts over);
+- updated: the epoch of the record's newest write, or None; the agent counts as active while it writes, even when
+  it changes no file;
+- limit (optional): the context window the CLI itself uses for that model (OpenCode's configured limit.context), or
+  None; it takes precedence over [models] context and the profile's context_limit.
 
 Two names need no module: "pane-history" (no record is read; the console's Conversation tab shows the pane's tmux
 scrollback, for CLIs that print inline) and "none" (no Conversation tab; context and gateway errors come from the
@@ -56,3 +65,18 @@ def resolve(conf, profile):
         return NONE, None, {}
     name = name_of(interactive)
     return name, load(name), interactive or {}
+
+
+def live_session(conf, profile, pane_pid):
+    """The session id the agent process in a pane holds open, from its profile's adapter (see live_session above), or
+    None when the adapter cannot tell."""
+    from .. import top
+    _, adapter, interactive = resolve(conf, profile)
+    finder = getattr(adapter, "live_session", None)
+    if finder is None or not str(pane_pid or "").isdigit():
+        return None
+    pid = int(pane_pid)
+    try:
+        return finder(interactive, set(top.descendants(top.process_table(), pid)) | {pid})
+    except OSError:
+        return None

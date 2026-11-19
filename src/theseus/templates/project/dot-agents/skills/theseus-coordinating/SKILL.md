@@ -54,8 +54,8 @@ An item stays listed until its cause is resolved. `theseus queue log` shows the 
 4. `theseus build` and `theseus smoke`.
 5. `theseus verify`. FAIL: `theseus tasks unmerge ID --reason "..."` (events.md, failed verification); never complete it.
 6. `theseus tasks observe ID --how "..."` only after you saw it work in the running application; `--user` only after the user tested it.
-7. `theseus tasks complete ID --from-log VERIFY_LOG --summary "..."` (or `--check "cmd -> outcome" --log PATH`), `theseus tasks retire ID`.
-8. Rewrite the affected STATE.md rows (replace, never append), then commit `docs/project/` (verify and complete write the export).
+7. `theseus tasks complete ID --from-log VERIFY_LOG --summary "..."`, `theseus tasks retire ID`. `--from-log` takes only a passing `theseus verify` log of a commit that holds the merge; a documentation-only or other static check uses `--check "cmd -> outcome" --log PATH`.
+8. Rewrite the affected STATE.md rows (replace, never append), then commit `docs/project/` (verify and complete write the export) before the next `theseus merge`, which refuses a checkout with uncommitted tracked files.
 
 ## Safety rules
 
