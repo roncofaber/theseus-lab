@@ -275,14 +275,21 @@ def settle(conf, srv, phase, detail):
         spawn(conf, st.get("profile"), "fresh", None, srv)
 
 
+UNTYPED = ("not typed", "tmux send-keys failed")
+
+
 def send_prompt(conf):
-    """Type the start prompt into a ready coordinator once, through the checked send."""
+    """Type the start prompt into a ready coordinator once, through the checked send. Only a send that typed nothing
+    stays owed: a prompt submitted without the busy marker being seen (a fast answer) or left in the input line is
+    never typed again, since retyping it every tick floods the session."""
     from . import agents
     st = state(conf)
     ok, detail = agents.send_verified(conf, agent_entry(conf, st), prompt_text(conf), record=False,
                                       profile=st.get("profile"))
-    if ok:
+    if ok or not detail.startswith(UNTYPED):
         save(conf, prompt_owed=False)
+    if not ok and not detail.startswith(UNTYPED):
+        event(conf, "send_failed", f"start prompt typed but not confirmed ({detail}); not retyped")
     return ok, detail
 
 

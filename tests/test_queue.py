@@ -213,6 +213,19 @@ class QueueTests(Sandbox):
             coordinator.save(conf, desired="up")
             self.assertNotIn("old-session", wq.task_message(conf, "t", "/wt", "rec"))
 
+    def test_a_typed_start_prompt_is_never_retyped_even_unconfirmed(self):
+        from theseus import agents, config as cfg, coordinator
+        conf = cfg.load(root=self.project)
+        cases = [((True, "sent"), False), ((False, "not busy after Enter and the text is not in the input line (5s each)"), False),
+                 ((False, "the input line still holds the text after a second Enter (5s each)"), False),
+                 ((False, "not typed: the pane shows a prompt that needs a human (Allow once)"), True),
+                 ((False, "tmux send-keys failed: no server"), True)]
+        for result, owed in cases:
+            coordinator.save(conf, prompt_owed=True)
+            with mock.patch.object(agents, "send_verified", return_value=result):
+                coordinator.send_prompt(conf)
+            self.assertEqual(owed, bool(coordinator.state(conf).get("prompt_owed")), result[1])
+
     def test_a_running_task_s_patches_hold_a_task_that_owns_their_target(self):
         self.add("first-task")
         self.theseus("queue", "tick")

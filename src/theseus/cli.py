@@ -1194,7 +1194,7 @@ def cmd_tmux(args):
                 except OSError:
                     print("{}")
             elif args.left or args.right:
-                print(tmuxconf.render(path, "left" if args.left else "right", args.agent))
+                print(tmuxconf.render(path, "left" if args.left else "right", args.agent, kind=args.kind))
             else:
                 print(tmuxconf.describe(path))
         elif args.action == "apply":
@@ -1799,6 +1799,7 @@ def build_parser():
     p.add_argument("--left", action="store_true", help="status: the left part (the agent's task)")
     p.add_argument("--right", action="store_true", help="status: the right part (attention, working/max, gateway)")
     p.add_argument("--agent", help="status --left: the agent")
+    p.add_argument("--kind", help="status --right: the session's kind (coordinator, agent, queue)")
     p.add_argument("--json", action="store_true", help="status: the cache as JSON")
     p.add_argument("--print", dest="print_text", action="store_true", help="conf: print the file instead of its path")
     p.add_argument("--socket", help=argparse.SUPPRESS)
@@ -1858,7 +1859,8 @@ def main(argv=None):
         # The status line runs this every few seconds: skip the parser and the imports it needs.
         from . import tmuxconf
         value = dict(zip(argv, argv[1:]))
-        print(tmuxconf.render(value.get("--file"), "left" if "--left" in argv else "right", value.get("--agent")))
+        print(tmuxconf.render(value.get("--file"), "left" if "--left" in argv else "right", value.get("--agent"),
+                              kind=value.get("--kind")))
         return
     if argv == ["--schema-version"]:
         from . import store

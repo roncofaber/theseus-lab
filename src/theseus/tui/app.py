@@ -377,17 +377,24 @@ class HostView(VerticalScroll):
 
 
 class Overview(Static):
-    """The first panel of a project tab, laid out for its width; a double-click opens the coordinator's popup."""
+    """The PROJECT half of a project tab's top row, laid out for its width."""
 
     state = None
+    render_fn = staticmethod(R.overview)
 
     def show(self, state):
         self.state = state
-        self.update(R.overview(state, self.size.width or 200))
+        self.update(self.render_fn(state, self.size.width or 120))
 
     def on_resize(self, event):
         if self.state is not None:
-            self.update(R.overview(self.state, event.size.width))
+            self.update(self.render_fn(self.state, event.size.width))
+
+
+class CoordinatorOverview(Overview):
+    """The COORDINATOR half: the coordinator and its to-do list; a double-click opens its mirror."""
+
+    render_fn = staticmethod(R.coordinator_panel)
 
     def on_click(self, event):
         if event.chain >= 2:
@@ -409,8 +416,11 @@ class ProjectView(VerticalScroll):
 
     def compose(self) -> ComposeResult:
         accent = self.accent
-        with Panel("PROJECT", id="status-panel", accent=accent):
-            yield Overview(id="status")
+        with Horizontal(id="top-row"):
+            with Panel("PROJECT", id="status-panel", accent=accent):
+                yield Overview(id="status")
+            with Panel("COORDINATOR", id="coordinator-panel", accent=accent):
+                yield CoordinatorOverview(id="coordinator")
         with Panel("AGENTS", id="agents-panel", accent=accent, classes="grow"):
             yield Table(R.AGENT_COLUMNS, widths=R.WIDTHS["agents"], optional=R.OPTIONAL["agents"], id="agents")
         with Panel("WAITING", id="waiting-panel", accent=accent, classes="grow"):
@@ -434,6 +444,7 @@ class ProjectView(VerticalScroll):
         status_panel.border_title = Content.styled(item["name"], "bold")
         if not item["available"]:
             status.update(Text(f"unavailable: {item['error']}", style=theme.RED))
+            self.query_one("#coordinator", CoordinatorOverview).update("")
             for widget in (agents, waiting, events):
                 fill(widget, [])
             return
@@ -441,6 +452,10 @@ class ProjectView(VerticalScroll):
         found = top.issues(state)
         status_panel.border_subtitle = Content.styled(f"ACTION NEEDED {len(found)}", "bold") if found else ""
         status.show(state)
+        self.query_one("#coordinator", CoordinatorOverview).show(state)
+        coordinator_panel = self.query_one("#coordinator-panel", Panel)
+        count = len((state.get("attention") or {}).get("items") or [])
+        coordinator_panel.border_subtitle = (Content.styled(f"{count} NEED IT", "bold") if count else "C mirror · A attach")
         queue = state["queue"]
         self.query_one("#waiting-panel", Panel).border_title = (
             f"WAITING review {len(queue['review'])} · merged {len(queue['merged'])} · ready {len(queue['ready'])}"
@@ -466,7 +481,12 @@ class TopApp(App):
             border-subtitle-color: $text-muted; height: auto; padding: 0 1; }
     Panel.grow { height: 1fr; min-height: 3; }
     Panel.grow > DataTable, Panel.grow > .chart { height: 1fr; max-height: 100%; }
-    #status-panel { max-height: 25%; overflow-y: auto; }
+    #top-row { height: auto; max-height: 40%; }
+    #top-row > Panel { width: 1fr; max-height: 100%; overflow-y: auto; }
+    #status-panel { width: 3fr; }
+    #coordinator-panel { width: 2fr; }
+    Screen.-narrow #top-row { layout: vertical; max-height: 65%; }
+    Screen.-narrow #top-row > Panel { width: 1fr; }
     #attention-panel, #pools-panel, #gateway-panel, #projects { max-height: 20%; overflow-y: auto; }
     #resources { max-height: 30%; overflow-y: auto; }
     DataTable { height: auto; }
@@ -521,6 +541,7 @@ class TopApp(App):
         self.cli_fn = cli_fn or run_theseus
         self.attach_fn = attach_fn or attach_supervised
         self.coordinator_attach_fn = attach_coordinator
+        self.coordinator_fit_fn = coordinator_fitter
         self.fit_fn = fit_fn or supervised_fitter
         self.conversation_fn = conversation_fn or conversation_reader
         self.diff_fn = diff_fn or task_diff
@@ -939,6 +960,7 @@ class TopApp(App):
             type=lambda *keys: self.keys_fn(pane, *keys),
             jump=(lambda: self.jump_fn(pane)) if self.tmux_ok or coordinator.get("supervised") else None,
             attach=(lambda: self.coordinator_attach_fn(root)) if coordinator.get("supervised") else None,
+            fit=self.coordinator_fit_fn(root) if coordinator.get("supervised") else None,
             events=lambda: R.agent_events(item["snapshot"]["events"], None))
         self.push_screen(popups.AgentScreen(f"coordinator {coordinator['name']}", R.coordinator_text(coordinator), pane,
                                             actions, poll=self.mirror_seconds))
@@ -1032,6 +1054,15 @@ def supervised_fitter(root, name):
         if "rec" not in found:
             found["rec"] = supervisor.record(cfg.load(root=root), name)
         return supervisor.fit(found["rec"], columns, rows)
+    return fit
+
+
+def coordinator_fitter(root):
+    """fit(columns, rows) for the supervised coordinator's window, like supervised_fitter for an agent."""
+    from .. import coordinator, supervisor
+
+    def fit(columns=None, rows=None):
+        return supervisor.fit(coordinator.agent_entry(cfg.load(root=root)), columns, rows)
     return fit
 
 

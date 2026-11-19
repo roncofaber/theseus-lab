@@ -84,31 +84,12 @@ def context(use):
     return shown
 
 
-COORDINATOR_STATE = {"busy": "GREEN", "idle": "YELLOW", "waiting": "RED", "offline": "RED", "failed": "RED"}
-
-
-def coordinator_row(state):
-    """The supervised coordinator's row of AGENTS, with its own role and key."""
-    coordinator = state.get("coordinator")
-    if not coordinator or not coordinator.get("supervised"):
-        return None
-    color = getattr(theme, COORDINATOR_STATE[coordinator["state"]]) if coordinator["state"] in COORDINATOR_STATE else ""
-    shown = coordinator["state"] + (f" ({coordinator['waiting']})" if coordinator.get("waiting") else "")
-    return row(f"coordinator:{coordinator['name']}", [
-        marked("coordinator", theme.MAGENTA, f"bold {theme.MAGENTA}", marker="◆"), cell(shown, color), "",
-        cell("-", "dim"), "-", "-", context(coordinator.get("context")), "-", "-",
-        cell(top.duration(time.time() - coordinator["lastActivity"]) if coordinator.get("lastActivity") else "-", "dim"),
-        "-", "-", cell((coordinator.get("session") or "-")[:8], "dim"), cell(coordinator.get("profile") or "-", "dim"),
-        "-", cell("role coordinator", "dim")], "coordinator")
 
 
 def agent_rows(state):
     times = state.get("times", {})
     total = (state.get("host") or {}).get("memTotal") or 0
     rows = []
-    found = coordinator_row(state)
-    if found:
-        rows.append(found)
     for agent in state["agents"]:
         color = theme.STATE.get(agent["state"], "")
         note = "dirty" if agent.get("tainted") else ""
@@ -305,24 +286,84 @@ def ago(epoch):
     return "-" if not epoch else top.duration(time.time() - epoch) + " ago"
 
 
-def coordinator_lines(state):
-    coordinator = state.get("coordinator")
+def driver_line(state):
     watcher = state.get("watcher")
-    if coordinator:
-        style = {"busy": theme.GREEN, "idle": theme.YELLOW, "waiting": theme.RED, "offline": theme.RED}.get(
-            coordinator["state"], "")
-        shown = coordinator["state"] + (f" ({coordinator['waiting']})" if coordinator.get("waiting") else "")
-        lines = [("coordinator", Text.assemble((f"{coordinator['name']} ", "bold"), (shown, f"bold {style}")), ""),
-                 ("active", ago(coordinator.get("lastActivity")), ""), ("context", context(coordinator.get("context")), "")]
-    else:
-        lines = [("coordinator", "-", "dim")]
     if watcher and watcher.get("alive"):
         wake = max(0, (watcher.get("next") or 0) - time.time())
-        lines.append(("watcher", f"queue {watcher.get('command')} · tick {ago(watcher.get('tick'))} · next {int(wake)}s",
-                      theme.GREEN))
+        return ("driver", f"queue {watcher.get('command')} · tick {ago(watcher.get('tick'))} · next {int(wake)}s",
+                theme.GREEN)
+    return ("driver", "none: nothing assigns tasks (theseus agents up)", f"bold {theme.YELLOW}")
+
+
+COORDINATOR_STYLE = {"busy": theme.GREEN, "idle": theme.YELLOW, "waiting": theme.RED, "offline": theme.RED,
+                     "failed": theme.RED, "starting": theme.YELLOW}
+
+
+def push_line(attention):
+    """The attention push as the coordinator panel shows it: off, or on with the last line's age and result."""
+    if (attention or {}).get("notify") != "pane":
+        return "off", "dim"
+    problem = attention.get("coordinator")
+    if problem:
+        return f"on · pane {problem}", f"bold {theme.RED}"
+    push = attention.get("push") or {}
+    if push.get("owed"):
+        return f"on · owed {top.duration(time.time() - push['owed'])}", theme.YELLOW
+    if push.get("at"):
+        return f"on · last {ago(push['at'])}", theme.GREEN
+    return "on · nothing pushed yet", ""
+
+
+def coordinator_panel(state, width=80, limit=6):
+    """The coordinator half of a project's top panel: who it is and how it is doing, then what needs it (the
+    attention list, which is its to-do list)."""
+    from rich.console import Group
+    from rich.table import Table as Grid
+    from .. import attention as att
+    coordinator = state.get("coordinator")
+    attention = state.get("attention") or {}
+    if not coordinator:
+        head = labeled([("coordinator", "none", theme.YELLOW),
+                        ("start", "theseus coordinator up", "dim")])
     else:
-        lines.append(("watcher", "none", theme.YELLOW))
-    return lines
+        shown = Text(coordinator["state"], style=f"bold {COORDINATOR_STYLE.get(coordinator['state'], '')}")
+        if coordinator.get("waiting"):
+            shown.append(f" ({coordinator['waiting']})", style=theme.RED)
+        who = coordinator.get("profile") or "-"
+        if coordinator.get("model"):
+            who += f" · {coordinator['model']}"
+        lines = [("state", shown, ""), ("profile", who, "")]
+        if coordinator.get("supervised"):
+            crashes = coordinator.get("crashes") or 0
+            lines.append(("session", f"{(coordinator.get('session') or '-')[:8]}"
+                          + (f" · {crashes} crash{'es' if crashes != 1 else ''}" if crashes else ""),
+                          theme.RED if crashes else "dim"))
+        lines += [("active", ago(coordinator.get("lastActivity")), ""),
+                  ("context", context(coordinator.get("context")), ""),
+                  ("push", *push_line(attention))]
+        head = labeled(lines)
+    items = attention.get("items") or []
+    late = {item["key"] for item in attention.get("escalated") or []}
+    todo = Grid.grid(padding=(0, 1), expand=True)
+    todo.add_column(no_wrap=True)
+    todo.add_column(no_wrap=True, justify="right")
+    todo.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
+    if not items:
+        todo.add_row(Text("●", style=theme.GREEN), "", Text("nothing needs the coordinator", style="dim"))
+    for item in items[:limit]:
+        since = att.epoch(item.get("since")) if item.get("since") else None
+        age = top.duration(time.time() - since) if since else "-"
+        style = f"bold {theme.RED}" if item["key"] in late else theme.MAGENTA if item["kind"] == "delivery" else ""
+        todo.add_row(Text(item["kind"], style=style), Text(age, style="dim"), Text(item.get("summary") or "", style=style))
+    if len(items) > limit:
+        todo.add_row("", "", Text(f"and {len(items) - limit} more: theseus attention", style="dim"))
+    if width >= 90:
+        grid = Grid.grid(padding=(0, 2), expand=True)
+        grid.add_column(no_wrap=True, overflow="ellipsis", ratio=2)
+        grid.add_column(ratio=3)
+        grid.add_row(head, todo)
+        return grid
+    return Group(head, Text(""), todo)
 
 
 def oldest_review(state):
@@ -382,7 +423,8 @@ def overview(state, width=200):
                 {"current": theme.GREEN, "stale": theme.YELLOW, "unexported": theme.YELLOW,
                  "edited": f"bold {theme.RED}"}.get(
                     (state.get("export") or {}).get("state"), "dim")),
-               ("queue", "PAUSED" if state.get("paused") else "running", f"bold {theme.YELLOW}" if state.get("paused") else "")]
+               ("queue", "PAUSED" if state.get("paused") else "running", f"bold {theme.YELLOW}" if state.get("paused") else ""),
+               driver_line(state)]
     review = oldest_review(state)
     issues = top.issues(state)
     work = [("ready", f"{len(queue['ready'])} · held {len(queue['held'])} · blocked {len(queue['blocked'])}", ""),
@@ -405,8 +447,8 @@ def overview(state, width=200):
     outcomes = [("merged", str(today.get("merged", 0)), "bold"), ("completed", str(today.get("completed", 0)), "bold"),
                 ("delivered", str(today.get("delivered", 0)), "bold"),
                 ("last merge", "-" if last_merge is None else top.duration(last_merge) + " ago", "")]
-    groups = [labeled(lines) for lines in (project, coordinator_lines(state), work, agents, outcomes)]
-    per_row = 5 if width >= 150 else 3 if width >= 96 else 2
+    groups = [labeled(lines) for lines in (project, work, agents, outcomes)]
+    per_row = 4 if width >= 120 else 2
     grid = Grid.grid(padding=(0, 2), expand=True)
     for _ in range(per_row):
         grid.add_column(ratio=1, no_wrap=True, overflow="ellipsis")

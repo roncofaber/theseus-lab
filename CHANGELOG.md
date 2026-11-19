@@ -111,6 +111,9 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- The coordinator's start prompt is typed at most once per conversation: a send that typed the prompt but saw no busy marker (a fast answer, as with OpenCode) used to stay owed, and every queue tick typed the whole prompt again.
+- An attached terminal now resizes a session's window on the private server as the terminal resizes: the attach hook ran `resize-window -A`, which sized the window once and left it at a manual size; it now sets `window-size latest` until detach pins the agent size again.
+- The coordinator's mirror in the console sizes the coordinator's window to the mirror, as an agent's mirror does.
 - The host config's `[models.context]` table now reaches projects (it was validated but never merged), so context meters use the configured window instead of the 200000 fallback.
 - While a project's coordinator runs as the supervised session, the task message no longer tells workers to send their done line to the `[instances] coordinator` session name, which could reach a different session that once held that name; the store delivery and the attention push reach the coordinator.
 - `theseus tasks ls` shows a held task as `held`, not `ready`.

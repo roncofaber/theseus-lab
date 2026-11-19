@@ -69,6 +69,78 @@ class StatusTests(Sandbox):
         self.assertTrue(stale.startswith("0 attention"))
         self.assertIn("driver stale", stale)
         self.assertIn("no queue driver", tmuxconf.render(self.tmp / "missing.json", "right"))
+        path.write_text(json.dumps({**old, "time": time.time(), "attention": 3, "ready": 4,
+                                    "kinds": {"delivery": 2, "question": 1}}))
+        coordinator = tmuxconf.render(path, "right", kind="coordinator")
+        self.assertIn("needs you: 2 deliveries, 1 question", coordinator)
+        self.assertIn("ready 4", coordinator)
+        self.assertIn("needs you", self.theseus("tmux", "status", "--file", path, "--right", "--kind", "coordinator").stdout)
+
+
+@unittest.skipUnless(shutil.which("tmux"), "needs tmux")
+class AttachSizeTests(Sandbox):
+    """A window pinned to the agent size follows an attached terminal, resizes included, and is pinned again on
+    detach: run against the generated configuration on a throwaway server with a real terminal client."""
+
+    def setUp(self):
+        super().setUp()
+        refuse_bare_tmux(self, self.env)
+
+    def test_an_attached_window_follows_the_terminal_and_is_pinned_again_on_detach(self):
+        import fcntl
+        import pty
+        import select
+        import signal
+        import struct
+        import subprocess
+        import termios
+        from theseus import supervisor, tmuxconf
+        text, _ = tmuxconf.conf_text()
+        conf_file = self.tmp / "tmux.conf"
+        conf_file.write_text(text)
+        socket = self.tmp / "sock"
+        width, height = supervisor.size()
+
+        def tmux(*args):
+            return subprocess.run(["tmux", "-S", str(socket), *args], capture_output=True, text=True)
+
+        self.addCleanup(tmux, "kill-server")
+        tmux("-f", str(conf_file), "new-session", "-d", "-s", "demo--coordinator", "sleep 600")
+        tmux("resize-window", "-t", "demo--coordinator", "-x", str(width), "-y", str(height))
+
+        def size():
+            return tmux("display", "-p", "-t", "demo--coordinator", "#{window_width}x#{window_height}").stdout.strip()
+
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.environ.pop("TMUX", None)
+            os.environ["TERM"] = "xterm-256color"
+            os.execvp("tmux", ["tmux", "-S", str(socket), "attach-session", "-t", "demo--coordinator"])
+
+        def terminal(columns, rows, expect):
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+            os.kill(pid, signal.SIGWINCH)
+            deadline = time.time() + 5
+            while time.time() < deadline and size() != expect:
+                if select.select([fd], [], [], 0.1)[0]:
+                    try:
+                        os.read(fd, 65536)
+                    except OSError:
+                        break
+            return size()
+
+        try:
+            self.assertEqual("120x39", terminal(120, 40, "120x39"), "the window takes the terminal's size")
+            self.assertEqual("160x44", terminal(160, 45, "160x44"), "and follows it when it is resized")
+        finally:
+            tmux("detach-client", "-a")
+            tmux("detach-client")
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        deadline = time.time() + 5
+        while time.time() < deadline and size() != f"{width}x{height}":
+            time.sleep(0.1)
+        self.assertEqual(f"{width}x{height}", size(), "detach pins the agent size again")
 
 
 if __name__ == "__main__":

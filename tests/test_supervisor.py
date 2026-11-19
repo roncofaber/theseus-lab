@@ -363,8 +363,14 @@ class SupervisorTests(Sandbox):
         self.assertTrue(snapshot["coordinator"]["supervised"])
         from theseus.tui import rows, theme
         theme.apply()
-        key, cells, _ = rows.agent_rows(snapshot)[0]
-        self.assertEqual(("coordinator:coordinator", 16), (key, len(cells)))
+        self.assertFalse([key for key, _, _ in rows.agent_rows(snapshot) if key.startswith("coordinator")],
+                         "the coordinator has its own panel, not a row of AGENTS")
+        from rich.console import Console
+        console = Console(width=140, record=True, color_system=None)
+        console.print(rows.coordinator_panel(snapshot, 140))
+        panel = console.export_text()
+        self.assertRegex(panel, r"profile\s+fake")
+        self.assertRegex(panel, r"push\s+on")
         self.tmux("kill-session", "-t", "=demo--coordinator")
         from theseus import workqueue
         workqueue.notify(self.conf())

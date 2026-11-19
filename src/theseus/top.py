@@ -467,7 +467,12 @@ def supervised_coordinator(conf):
         return None
     found = {"name": coordinator.NAME, "state": "offline", "pane": coordinator.address(conf) if info else None,
              "session": st.get("session_id"), "pid": None, "context": None, "lastActivity": None, "waiting": None,
-             "supervised": True, "profile": st.get("profile"), "phase": st.get("phase")}
+             "supervised": True, "profile": st.get("profile"), "phase": st.get("phase"), "model": None,
+             "crashes": supervisor.crash_history(conf, coordinator.NAME)[0]}
+    try:
+        found["model"] = profiles.resolve(conf, st.get("profile")).get("model") or None
+    except Exception:
+        pass
     if not alive:
         found["state"] = "failed" if st.get("phase") == "failed" else "offline"
         return found

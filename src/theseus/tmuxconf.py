@@ -190,7 +190,7 @@ def conf_text():
         "set -g status-right-length 90",
         "set -g status-left \"#[bold] #{?@theseus_project,#{@theseus_project},theseus} #[nobold]| #{@theseus_role} "
         f"#{{?@theseus_agent,#({status} --left --agent '#{{@theseus_agent}}'),}}\"",
-        f"set -g status-right \"#({status} --right)| %H:%M \"",
+        f"set -g status-right \"#({status} --right --kind '#{{@theseus_kind}}')| %H:%M \"",
         "set -g window-status-format ''",
         "set -g window-status-current-format ''",
         "set -g message-style 'bg=#d7af5f,fg=#000000'",
@@ -199,7 +199,9 @@ def conf_text():
         "set -g set-titles on",
         "set -g set-titles-string 'theseus #{@theseus_project} #{@theseus_role}#{?@theseus_task, #{@theseus_task},}'",
         f"set-hook -g pane-died \"run-shell -b '{hook} #{{socket_path}} #{{session_name}} #{{pane_pid}} s#{{pane_dead_status}} g#{{pane_dead_signal}}'\"",
-        'set-hook -g client-attached "resize-window -A"',
+        # resize-window leaves the window at a manual size that no later client resize changes; window-size latest
+        # makes it follow the attached terminal until detach pins it again.
+        'set-hook -g client-attached "setw window-size latest"',
         f'set-hook -g client-detached "resize-window -x {width} -y {height}"',
     ]
     extra = extra_path(host.get("extra_conf"))
@@ -263,6 +265,13 @@ def status_path(project):
 
 
 def role_label(conf, kind, agent=None):
+    if kind == "coordinator":
+        from . import coordinator
+        try:
+            profile = coordinator.state(conf).get("profile")
+        except Exception:
+            profile = None
+        return f"coordinator · {profile}" if profile else "coordinator"
     if kind == "agent" and agent:
         for prefix in (f"{conf.name}-", f"{conf.prefix}-"):
             if agent.startswith(prefix) and len(agent) > len(prefix):
@@ -352,8 +361,17 @@ def write_status(conf, found, states, now=None):
     for item in found:
         if item.get("kind") == "gateway":
             gateway = "paused" if item["key"].endswith(":paused") else (gateway or "cut")
-    data = {"project": conf.name, "time": now, "attention": len(found), "working": working, "max": slots,
-            "pools": names, "gateway": gateway, "paused": workqueue.paused(conf), "tasks": tasks}
+    kinds = {}
+    for item in found:
+        kinds[item.get("kind") or "other"] = kinds.get(item.get("kind") or "other", 0) + 1
+    try:
+        from . import taskservice
+        ready = len(taskservice.open(conf).ready(taskservice.QUEUE))
+    except Exception:
+        ready = None
+    data = {"project": conf.name, "time": now, "attention": len(found), "kinds": kinds, "ready": ready,
+            "working": working, "max": slots, "pools": names, "gateway": gateway, "paused": workqueue.paused(conf),
+            "tasks": tasks}
     from . import config as cfg
     cfg.write_atomic(path, json.dumps(data, sort_keys=True) + "\n")
     changed = [info for info in states if info.get("managed") and tasks.get(info["name"]) != before.get(info["name"])]
@@ -367,9 +385,17 @@ def write_status(conf, found, states, now=None):
     return data
 
 
-def render(path, part="right", agent=None, now=None):
+PLURAL = {"delivery": "deliveries", "query": "queries"}
+
+
+def counted(count, word):
+    return f"{count} {word if count == 1 else PLURAL.get(word, word + 's')}"
+
+
+def render(path, part="right", agent=None, now=None, kind=None):
     """One part of the status line from the cache file: left is the agent's task, right the attention count (red
-    when nonzero), working/max, the gateway state and a stale-driver mark."""
+    when nonzero), working/max, the gateway state and a stale-driver mark. The coordinator's right part names what
+    needs it by kind and the tasks ready to assign instead of a bare count."""
     try:
         data = json.loads(Path(path).read_text()) if path else None
     except (OSError, ValueError):
@@ -381,7 +407,15 @@ def render(path, part="right", agent=None, now=None):
         return "#[dim]no queue driver #[default]"
     now = time.time() if now is None else now
     count = int(data.get("attention") or 0)
-    parts = [f"#[bg=#d70000,fg=#ffffff,bold] {count} attention #[default]" if count else "0 attention"]
+    if kind == "coordinator":
+        kinds = data.get("kinds") or {}
+        named = ", ".join(counted(n, k) for k, n in sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0])))
+        parts = [f"#[bg=#d70000,fg=#ffffff,bold] needs you: {named or counted(count, 'item')} #[default]" if count
+                 else "nothing needs you"]
+        if data.get("ready") is not None:
+            parts.append(f"ready {data['ready']}")
+    else:
+        parts = [f"#[bg=#d70000,fg=#ffffff,bold] {count} attention #[default]" if count else "0 attention"]
     slots = data.get("max")
     parts.append(f"working {data.get('working') or 0}/{slots if slots is not None else '-'}")
     if data.get("gateway"):

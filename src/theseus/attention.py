@@ -586,7 +586,8 @@ def console(conf, states):
     s = settings(conf)
     found = items(conf, now=now, states=states, book=book)
     return {"items": found, "escalated": overdue(found, now, s),
-            "coordinator": coordinator_problem(conf, book, now, s), "notify": s["notify"]}
+            "coordinator": coordinator_problem(conf, book, now, s), "notify": s["notify"],
+            "push": {"at": book.get("pushed_at"), "last": book.get("last"), "owed": book.get("owed")}}
 
 
 # output
