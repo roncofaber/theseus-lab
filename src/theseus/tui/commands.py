@@ -8,10 +8,17 @@ from .. import tasks as t
 
 
 def project_commands(item):
-    """(title, help, argv, confirm question or None) for the project of a console tab, from its snapshot alone."""
+    """(title, help, argv, confirm question or None) for the project of a console tab, from its snapshot alone. A
+    closed project offers only Reopen, an active one also Close."""
     state = item["snapshot"]
+    if item.get("closed"):
+        return [("Reopen project", "theseus reopen: bring back its agents, queue driver and coordinator", ["reopen"],
+                 f"Reopen {item['name']}?")]
     commands = [("Queue tick", "run one queue tick now", ["queue", "tick"], None),
-                ("Agents up", "reconcile the supervised agents toward [agents.counts]", ["agents", "up"], None)]
+                ("Agents up", "reconcile the supervised agents toward [agents.counts]", ["agents", "up"], None),
+                ("Close project", "theseus close --commit: export and commit the tasks, stop its agents, queue driver "
+                                  "and coordinator until Reopen (refused while an agent holds a task)",
+                 ["close", "--commit"], f"Close {item['name']}? Everything it runs stops until Reopen.")]
     for profile, count in sorted((state.get("agentCounts") or {}).items()):
         commands.append((f"Add a {profile} agent ({count} to {count + 1})", "theseus agents scale, in theseus.local.toml",
                          ["agents", "scale", profile, str(count + 1)], f"Add a {profile} agent ({count} to {count + 1})?"))
@@ -80,6 +87,9 @@ class ConsoleCommands(Provider):
             name = item["name"]
             for title, help_text, argv, question in project_commands(item):
                 found.append((f"{name}: {title}", help_text, partial(app.run_cli, item["root"], argv, question)))
+            if item.get("closed"):
+                return found + [(f"{name}: Open the handoff of {task}", "the delivered task's handoff.md",
+                                 partial(app.open_handoff, item, task)) for task in item["snapshot"]["queue"].get("review", [])]
             found.append((f"{name}: Coordinator", "the coordinator's mirror and send line", app.action_coordinator))
             if (item["snapshot"].get("coordinator") or {}).get("supervised"):
                 found.append((f"{name}: Attach the coordinator", "the coordinator session here; prefix d detaches",

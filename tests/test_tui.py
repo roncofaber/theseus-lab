@@ -85,6 +85,23 @@ class HostSnapshotTests(HostCase):
         self.assertFalse(by_name["nowhere"]["available"])
 
 
+class ClosedProjectSnapshotTests(HostCase):
+    def test_a_closed_project_comes_last_read_once_and_stays_out_of_host_wide_views(self):
+        self.event("beta", "delivered", 1, "t2")
+        out = self.theseus("close", "--reason", "milestone done", cwd=self.second).stdout
+        self.assertIn("closed; `theseus reopen` brings it back", out)
+        first = host.snapshot()
+        self.assertEqual(["alpha", "beta"], [p["name"] for p in first["projects"]])
+        beta = first["projects"][1]
+        self.assertEqual("milestone done", beta["closed"]["reason"])
+        self.assertEqual(([], None), (beta["snapshot"]["agents"], beta["snapshot"]["coordinator"]))
+        self.assertNotIn("beta", {e["project"] for e in first["events"]}, "host-wide events leave a closed project out")
+        self.assertIs(beta["snapshot"], host.snapshot()["projects"][1]["snapshot"], "read once, not on every refresh")
+        self.assertIn("beta", host.render_host(first).split("POOLS")[0])
+        self.theseus("reopen", cwd=self.second)
+        self.assertIsNone(host.snapshot()["projects"][1].get("closed"))
+
+
 class ProjectSnapshotTests(HostCase):
     def test_the_snapshot_says_why_each_waiting_task_has_not_started(self):
         from theseus import config, top
@@ -175,6 +192,30 @@ class ConsoleTests(HostCase, unittest.IsolatedAsyncioTestCase):
             await self.start(pilot)
             await pilot.press("question_mark")
             await self.settle(pilot, lambda: isinstance(self.app.screen, HelpScreen))
+
+
+class ClosedConsoleTests(ConsoleTests):
+    async def test_a_closed_project_has_a_tab_only_when_explored_and_offers_only_reopen(self):
+        from textual.widgets import TabbedContent, TabPane
+        from theseus.tui import commands
+        self.theseus("close", "--reason", "milestone done", cwd=self.second)
+        tabs = lambda: [str(p._title) for p in self.app.base.query_one(TabbedContent).query(TabPane)]
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.settle(pilot, lambda: "updated" in self.app.title and tabs() == ["Host", "alpha"])
+            self.app.open_project(str(self.second))
+            await self.settle(pilot, lambda: tabs() == ["Host", "alpha", "beta (closed)"])
+            await self.settle(pilot, lambda: (self.app.active_item() or {}).get("name") == "beta")
+            view = self.app.active_view()
+            self.assertIn("CLOSED", str(view.query_one("#status").content))
+            self.assertIn("milestone done", str(view.query_one("#status").content))
+            self.assertEqual(0, view.query_one("#agents").row_count)
+            self.assertEqual(["Reopen project"], [c[0] for c in commands.project_commands(self.app.active_item())])
+            self.assertIn("Close project", [c[0] for c in commands.project_commands(self.app.items[
+                next(i for i, item in self.app.items.items() if item["name"] == "alpha")])])
+
+    test_the_console_shows_every_project_and_its_agents_queue_and_events = None
+    test_the_agent_popup_mirrors_the_pane_and_sends_a_line = None
+    test_the_help_screen_opens = None
 
 
 class TranscriptTests(Sandbox):

@@ -1,5 +1,6 @@
 """Host-wide view for `theseus top`: one snapshot per registered project, the shared pools and the merged events, plus
 a plain text summary. A project that cannot be loaded is reported as unavailable instead of failing the whole view."""
+import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -70,30 +71,53 @@ def agent_label(project, agent, shorts):
     return f"{project}/{short}"
 
 
+CLOSED = {}
+
+
+def closed_snapshot(root, record, sample_host=None):
+    """A closed project's item (theseus.closure), read once and kept until its close record changes: its tasks,
+    waiting table, events and activity as they were, with no agents, coordinator, queue driver or attention, since
+    nothing of it runs."""
+    key = (str(root), json.dumps(record, sort_keys=True))
+    if key not in CLOSED:
+        item = project_snapshot(root, sample_host)
+        if item["available"]:
+            item["snapshot"].update(agents=[], workers=[], coordinator=None, watcher=None,
+                                    attention={"items": [], "escalated": [], "summary": "closed"})
+        CLOSED[key] = item
+    return {**CLOSED[key], "closed": record}
+
+
+def live(item):
+    return item["available"] and not item.get("closed")
+
+
 def snapshot(roots=None):
-    """roots: extra project roots to include besides the registry (for example the current project)."""
-    found = {entry["root"]: entry for entry in registry.entries()}
+    """Every registered project, active ones first, then closed ones (item["closed"] holds the close record; see
+    closed_snapshot). roots: extra project roots to include besides the registry (for example the current project)."""
+    found = {entry["root"]: entry for entry in registry.entries(include_closed=True)}
     for root in roots or ():
         found.setdefault(str(root), {"root": str(root)})
     host = top.host_state()
     projects = []
     for root in found:
-        item = project_snapshot(root, host)
+        record = found[root].get("closed")
+        item = closed_snapshot(root, record, host) if record else project_snapshot(root, host)
         item["coordinator"] = found[root].get("coordinator") or ""
         if not item["available"] and found[root].get("name"):
             item["name"] = found[root]["name"]
         projects.append(item)
-    projects.sort(key=lambda item: (item["name"], item["root"]))
+    projects.sort(key=lambda item: (bool(item.get("closed")), item["name"], item["root"]))
     events = []
     shorts = {item["name"]: {a["name"]: a.get("display") or a["name"] for a in item["snapshot"].get("agents") or []}
-              for item in projects if item["available"]}
+              for item in projects if live(item)}
     for item in projects:
-        if item["available"]:
+        if live(item):
             events.extend({**record, "project": item["name"],
                            "agentLabel": agent_label(item["name"], record.get("agent"), shorts)}
                           for record in item["snapshot"]["events"])
     events.sort(key=lambda record: record.get("time") or "")
-    errors = top.gateway_recent({item["name"]: item.get("gatewayAttempts") for item in projects})
+    errors = top.gateway_recent({item["name"]: item.get("gatewayAttempts") for item in projects if live(item)})
     for error in errors or []:
         error["agentLabel"] = agent_label(error.get("project"), error.get("agent"), shorts)
     found_pools = pool_snapshots()
@@ -103,6 +127,11 @@ def snapshot(roots=None):
     return {"time": datetime.now(timezone.utc).isoformat(), "host": host, "projects": projects,
             "pools": found_pools, "gateway": top.gateway_health(), "health": top.health_state(), "gatewayErrors": errors,
             "events": events[-300:]}
+
+
+def closed_label(record):
+    """`2026-11-19 · reason` for a close record."""
+    return " · ".join(filter(None, [str(record.get("closed") or "")[:10], record.get("reason") or ""]))
 
 
 def summary_counts(item):
@@ -121,6 +150,9 @@ def render_host(state):
     for item in state["projects"]:
         if not item["available"]:
             lines.append(f"{top.cut(item['name'], 22):<22} unavailable: {top.cut(item['error'] or '', 60)}")
+            continue
+        if item.get("closed"):
+            lines.append(f"{top.cut(item['name'], 22):<22} closed {closed_label(item['closed'])}")
             continue
         counts = summary_counts(item)
         progress = counts["progress"]

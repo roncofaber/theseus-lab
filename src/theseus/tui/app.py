@@ -409,6 +409,7 @@ class ProjectView(VerticalScroll):
         self.panes = {}
         self.records = {}
         self.item = None
+        self.closed = False
 
     @property
     def accent(self):
@@ -449,13 +450,26 @@ class ProjectView(VerticalScroll):
                 fill(widget, [])
             return
         state = item["snapshot"]
-        found = top.issues(state)
-        status_panel.border_subtitle = Content.styled(f"ACTION NEEDED {len(found)}", "bold") if found else ""
-        status.show(state)
-        self.query_one("#coordinator", CoordinatorOverview).show(state)
         coordinator_panel = self.query_one("#coordinator-panel", Panel)
-        count = len((state.get("attention") or {}).get("items") or [])
-        coordinator_panel.border_subtitle = (Content.styled(f"{count} NEED IT", "bold") if count else "C mirror · A attach")
+        agents_panel = self.query_one("#agents-panel", Panel)
+        if item.get("closed"):
+            status_panel.border_subtitle = Content.styled("CLOSED", "bold")
+            status.state = None
+            status.update(R.closed_overview(item))
+            coordinator = self.query_one("#coordinator", CoordinatorOverview)
+            coordinator.state = None
+            coordinator.update(Text("not running: the project is closed", style="dim"))
+            coordinator_panel.border_subtitle = "Ctrl+P Reopen"
+            agents_panel.border_title = "AGENTS · none run while closed"
+        else:
+            found = top.issues(state)
+            status_panel.border_subtitle = Content.styled(f"ACTION NEEDED {len(found)}", "bold") if found else ""
+            status.show(state)
+            self.query_one("#coordinator", CoordinatorOverview).show(state)
+            count = len((state.get("attention") or {}).get("items") or [])
+            coordinator_panel.border_subtitle = (Content.styled(f"{count} NEED IT", "bold") if count
+                                                 else "C mirror · A attach")
+            agents_panel.border_title = "AGENTS"
         queue = state["queue"]
         self.query_one("#waiting-panel", Panel).border_title = (
             f"WAITING review {len(queue['review'])} · merged {len(queue['merged'])} · ready {len(queue['ready'])}"
@@ -554,6 +568,7 @@ class TopApp(App):
         self.filter_text = ""
         self.busy = False
         self.pending_open = self.current
+        self.opened = {self.current} if self.current else set()
         self.greet = True
         self.views = {}
         self.items = {}
@@ -634,15 +649,25 @@ class TopApp(App):
         theme.COLORS.update({item["name"]: item["color"] for item in snap["projects"] if item.get("color")})
         tabs = self.base.query_one(TabbedContent)
         self.items = {pane_id(item["root"]): item for item in snap["projects"]}
-        for identifier in [i for i in self.views if i not in self.items]:
+        for item in snap["projects"]:
+            if item.get("closed") and pane_id(item["root"]) in self.views:
+                self.opened.add(item["root"])
+        shown = {identifier for identifier, item in self.items.items()
+                 if not item.get("closed") or item["root"] in self.opened}
+        for identifier in [i for i in self.views if i not in shown]:
             await tabs.remove_pane(identifier)
             del self.views[identifier]
         for item in snap["projects"]:
             identifier = pane_id(item["root"])
+            if identifier not in shown:
+                continue
+            label = tab_label(item)
             if identifier not in self.views:
                 self.views[identifier] = ProjectView(item["root"], item["name"])
-                label = Content.styled(item["name"], f"bold {theme.css(theme.project_color(item['name']))}")
                 await tabs.add_pane(Pane(label, self.views[identifier], id=identifier))
+            elif self.views[identifier].closed != bool(item.get("closed")):
+                tabs.get_tab(identifier).label = label
+            self.views[identifier].closed = bool(item.get("closed"))
         if self.pending_open and pane_id(self.pending_open) in self.views:
             tabs.active = pane_id(self.pending_open)
         self.pending_open = None
@@ -770,10 +795,19 @@ class TopApp(App):
             table.focus()
             table.reveal()
 
+    def closed_notice(self, item):
+        """Notify and return True when item is a closed project, whose agents, queue and coordinator do not run."""
+        if item and item.get("closed"):
+            self.notify(f"{item['name']} is closed: Ctrl+P Reopen (or `theseus reopen`) brings it back", severity="warning")
+            return True
+        return False
+
     def action_pause(self):
         item = self.active_item()
         if item is None or not item["available"]:
             self.notify("select a project tab to pause or resume its queue")
+            return
+        if self.closed_notice(item):
             return
         self.run_worker(lambda: self.toggle_pause(item), thread=True, group="pause")
 
@@ -848,7 +882,7 @@ class TopApp(App):
         view = self.active_view()
         name = event.data_table.id
         if name == "projects-table" and key.startswith("project:"):
-            self.base.query_one(TabbedContent).active = pane_id(key.split(":", 1)[1])
+            self.open_project(key.split(":", 1)[1])
         elif name == "agents" and isinstance(view, ProjectView):
             self.open_agent(view, key)
         elif name == "waiting" and isinstance(view, ProjectView):
@@ -858,6 +892,15 @@ class TopApp(App):
         elif name == "gateway" and isinstance(view, HostView) and key in view.gateway_records:
             error = view.gateway_records[key]
             self.push_screen(popups.Dialog(f"gateway error {error.get('label')}", R.gateway_text(error)))
+
+    def open_project(self, root):
+        """Show a project's tab, adding it for a closed project, which has none until it is explored."""
+        if pane_id(root) in self.views:
+            self.base.query_one(TabbedContent).active = pane_id(root)
+        elif self.snap is not None:
+            self.opened.add(root)
+            self.pending_open = root
+            self.call_later(self.apply, self.snap)
 
     def project_tasks(self, project):
         for item in self.items.values():
@@ -944,6 +987,8 @@ class TopApp(App):
         if not isinstance(view, ProjectView) or not item or not item.get("available"):
             self.notify("no project tab", severity="warning")
             return
+        if self.closed_notice(item):
+            return
         coordinator = item["snapshot"].get("coordinator")
         if not coordinator:
             self.notify("no coordinator", severity="warning")
@@ -970,6 +1015,8 @@ class TopApp(App):
         view, item = self.active_view(), self.active_item()
         if not isinstance(view, ProjectView) or not item or not item.get("available"):
             self.notify("no project tab", severity="warning")
+            return
+        if self.closed_notice(item):
             return
         coordinator = item["snapshot"].get("coordinator") or {}
         if not coordinator.get("supervised") or not coordinator.get("pane"):
@@ -1013,6 +1060,14 @@ class TopApp(App):
                 text = Text(f"failed: {problem}")
             self.call_from_thread(self.push_screen, popups.Dialog(f"handoff {task_id}", text))
         self.run_worker(work, thread=True, group="handoff", exit_on_error=False)
+
+
+def tab_label(item):
+    """A project tab's label in its color; a closed project's dim, with a closed mark."""
+    color = theme.css(theme.project_color(item["name"]))
+    if item.get("closed"):
+        return Content.styled(f"{item['name']} (closed)", f"dim {color}")
+    return Content.styled(item["name"], f"bold {color}")
 
 
 def run_theseus(root, argv):

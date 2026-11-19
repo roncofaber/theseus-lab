@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from rich.text import Text
 
+from .. import host
 from .. import tasks as t
 from .. import top
 from ..agents import LIMIT_SOURCES
@@ -528,6 +529,30 @@ def overview(state, width=200):
     return Group(grid, *shown)
 
 
+def closed_overview(item):
+    """The PROJECT panel of a closed project's tab: when and why it closed, where its work stood, how to reopen."""
+    record, state = item["closed"], item["snapshot"]
+    queue = state["queue"]
+    shown = Text.assemble(("CLOSED ", f"bold {theme.YELLOW}"), (str(record.get("closed") or "?")[:16].replace("T", " "), "bold"))
+    if record.get("reason"):
+        shown.append(f" · {record['reason']}")
+    milestone = Text(f"\nmilestone {state.get('milestone') or '-'}", style="bold")
+    done = state.get("progress")
+    if done and done[1]:
+        milestone.append(" ")
+        milestone.append_text(progress(*done, width=10))
+    shown.append_text(milestone)
+    counts = " · ".join(f"{name.replace('_', ' ')} {len(queue.get(name) or [])}"
+                        for name in ("ready", "in_progress", "review", "merged", "blocked", "held"))
+    shown.append(f"\ntasks: {counts}")
+    held = record.get("held") or []
+    if held:
+        shown.append("\nheld at close: " + ", ".join(f"{h.get('agent')} ({h.get('task')})" for h in held), style=theme.YELLOW)
+    shown.append("\nnothing runs; tasks, events and handoffs stay readable here. Ctrl+P Reopen (theseus reopen) "
+                 "brings it back", style="dim")
+    return shown
+
+
 def project_rows(projects):
     """One row per project for the Host tab: the key figures of its overview."""
     rows = []
@@ -545,6 +570,15 @@ def project_rows(projects):
         if done and done[1]:
             milestone.append(" ")
             milestone.append_text(progress(*done, width=6))
+        if item.get("closed"):
+            milestone.stylize("dim")
+            rows.append(row(f"project:{item['root']}", [
+                cell(name, f"dim {theme.project_color(name)}"), milestone, cell("closed", "dim"), cell("-", "dim"),
+                cell(str(len(queue["ready"])), "dim"), cell(str(len(queue["in_progress"])), "dim"),
+                cell(str(len(queue["review"])), "dim"),
+                cell(f"closed {host.closed_label(item['closed'])}; Enter to explore", "dim"),
+                *[cell("-", "dim")] * 3, cell("-", "dim")], "closed"))
+            continue
         coordinator = state.get("coordinator")
         coord = (cell(coordinator["state"], {"busy": theme.GREEN, "idle": theme.YELLOW}.get(coordinator["state"], theme.RED))
                  if coordinator else cell("-", "dim"))

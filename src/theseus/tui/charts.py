@@ -23,7 +23,7 @@ def project_series(projects):
     """[(project, accent, counts)]: every available project's grouped events per bin, one series per project."""
     series = []
     for item in projects:
-        if not item.get("available") or not item.get("activity"):
+        if not item.get("available") or not item.get("activity") or item.get("closed"):
             continue
         groups = [item["activity"].get(name) or [0] * host.BINS for name, _ in host.ACTIVITY_GROUPS]
         series.append((item["name"], theme.project_color(item["name"]), [sum(column) for column in zip(*groups)]))
