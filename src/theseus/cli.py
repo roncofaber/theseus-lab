@@ -1018,6 +1018,7 @@ def all_managed():
 
 
 def list_supervised(conf, as_json=False):
+    from . import profiles
     import time
     from . import agents, supervisor
     states = {info["name"]: info for info in agents.states(conf)}
@@ -1038,7 +1039,8 @@ def list_supervised(conf, as_json=False):
         print("supervision paused (`theseus agents down --all`); `theseus agents up` resumes it")
     for row in rows:
         uptime = f"{row['uptime'] // 60}m" if row["uptime"] is not None else "-"
-        print(f"{row['name']:<24} {row['state'] or '-':<10} {row['profile'] or '-':<10} gen {row['gen'] or '-':<4} "
+        print(f"{row['name']:<24} {row['state'] or '-':<10} {row['profile'] or '-':<10} "
+              f"cap {profiles.capability(conf, row['profile']) if row['profile'] else '-'} gen {row['gen'] or '-':<4} "
               f"pid {row['pid'] or '-':<8} {row['task'] or '-':<28} restarts {row['restarts']:<2} "
               f"up {uptime} session {row['sessionId'] or '-'}" + (f" drift: {'; '.join(row['driftChanges'])}" if row["driftChanges"] else ""))
     for info in legacy:
@@ -1436,7 +1438,8 @@ def build_parser():
     p.add_argument("--depends", nargs="+", default=[], metavar="ID")
     p.add_argument("--milestone", help="milestone (default: the current one)")
     p.add_argument("--room", choices=("clean", "dirty"), help="clean-room separation (see [rooms] in theseus.toml)")
-    p.add_argument("--priority", type=int, default=0, help="higher is assigned first among ready tasks (default 0)")
+    p.add_argument("--priority", type=int, default=0, help="1 (last) to 5 (first), default 3; an old task gains a level "
+                                                          "per [queue] aging_hours")
     p.add_argument("--profile", help="agent profile the task needs (default: any); see theseus tasks profile")
     p.add_argument("--min-capability", type=int, default=0, metavar="N",
                    help="lowest profile capability that may take the task (default 0: any); see theseus tasks capability")
@@ -1503,7 +1506,7 @@ def build_parser():
     p = ts.add_parser("deliver", help="mark a task delivered (awaiting coordinator integration)")
     p.add_argument("id")
     p.add_argument("--handoff", required=True)
-    p = ts.add_parser("priority", help="set a task's priority (higher is assigned first; 0 removes it)")
+    p = ts.add_parser("priority", help="set a task's priority, 1 (last) to 5 (first)")
     p.add_argument("id")
     p.add_argument("value", type=int)
     p = ts.add_parser("profile", help="set the agent profile a task needs: agents registered with it take it, and agents whose "

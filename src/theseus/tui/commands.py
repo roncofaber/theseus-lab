@@ -38,11 +38,13 @@ def project_commands(item):
                          ["tasks", "release", task, "--reason", "released from the console"], f"Release {task} back to pending?"))
     priorities = state.get("priorities") or {}
     for task in [*queue.get("ready", []), *queue.get("blocked", []), *queue.get("held", [])]:
-        level = int(priorities.get(task, 0))
-        commands += [(f"Raise the priority of {task} ({level} to {level + 1})", "theseus tasks priority",
-                      ["tasks", "priority", task, str(level + 1)], None),
-                     (f"Lower the priority of {task} ({level} to {level - 1})", "theseus tasks priority",
-                      ["tasks", "priority", task, str(level - 1)], None)]
+        level = int(priorities.get(task, 3))
+        if level < 5:
+            commands.append((f"Raise the priority of {task} ({level} to {level + 1})", "theseus tasks priority",
+                             ["tasks", "priority", task, str(level + 1)], None))
+        if level > 1:
+            commands.append((f"Lower the priority of {task} ({level} to {level - 1})", "theseus tasks priority",
+                             ["tasks", "priority", task, str(level - 1)], None))
     capabilities = state.get("capabilities") or {}
     for task in [*queue.get("ready", []), *queue.get("blocked", []), *queue.get("held", [])]:
         level = int(capabilities.get(task, 0))

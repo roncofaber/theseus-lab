@@ -373,6 +373,12 @@ class TaskService:
                 raise TaskError("invalid", str(error)) from error
         if int(values["min_capability"] or 0) < 0:
             raise TaskError("invalid", "the minimum capability must be 0 or more")
+        if "priority" in changed and values["priority"] not in (None, "", 0):
+            from . import scheduling
+            try:
+                scheduling.check_priority(values["priority"])
+            except ValueError as error:
+                raise TaskError("invalid", str(error)) from error
         for key in ("externalBlocker", "researchRequired"):
             blocker = values.get(key)
             if key in changed and blocker is not None and (

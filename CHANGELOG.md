@@ -72,6 +72,9 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- Task priority is a fixed scale from 1 (last) to 5 (first), default 3; `tasks add`, `tasks edit` and `tasks priority` refuse other values, and older records are read onto the scale (none or 0 as 3, the rest clamped). A ready task gains one level per `[queue] aging_hours` it has waited (default 24, 0 turns it off), up to 5.
+- The queue plans each tick's free agents together: the strongest choose first and take the tasks only they can do, a stronger agent leaves easier tasks to free weaker agents unless there are more such tasks than weaker agents, and an agent that left its tasks to others takes whatever they did not. Equal effective priorities go to the task that has waited longest.
+- The console's WAITING list has a priority column (`P3`, `P2+1` with aging) and shows a task's minimum capability as pips (`≥●●`, `any` without one, red when no agent meets it); AGENTS shows each agent's capability the same way. `theseus tasks ls` prints the priority and minimum capability, and `theseus agents ls` the capability.
 - Task commands no longer commit anything: an assignment is a store write plus the task message, so new tasks no longer wait for a commit or push, and `merge`, `unmerge` and the queue stop writing `chore:` record commits. Workers read their record from the store (`theseus tasks show ID` works in a worktree). `theseus check` validates the store from the project's own checkout and the committed export elsewhere.
 - `theseus tasks list --all` lists in store order: archived tasks first, then open ones.
 - The task message typed into an agent is a pointer: `theseus task show ID` for the record (`theseus tasks show ID` for a hand-made pane) and how to report, instead of the record text.

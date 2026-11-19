@@ -212,6 +212,7 @@ def evidence_level(task):
 
 
 def list_tasks(queue, status=None, include_archive=False, show_evidence=False):
+    from . import scheduling
     index = queue.index()
     current = queue.milestone()
     reach = merge_reach(queue.conf)
@@ -223,7 +224,9 @@ def list_tasks(queue, status=None, include_archive=False, show_evidence=False):
             continue
         flags = blocking(task, index, current, reach, holds) + (["held"] if task.get("hold") else [])
         flags += ["ready"] if task["status"] == "pending" and not flags else []
-        line = f"{task['status']:<12} {task['id']}  owner={task.get('owner') or '-'}  {','.join(flags)}"
+        need = int(task.get("minCapability") or 0)
+        line = (f"{task['status']:<12} P{scheduling.priority(task)} {task['id']}  owner={task.get('owner') or '-'}"
+                f"{f'  min-cap={need}' if need else ''}  {','.join(flags)}")
         if show_evidence:
             line += f"  evidence={evidence_level(task)}"
         lines.append(line.rstrip())

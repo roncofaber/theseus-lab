@@ -548,6 +548,7 @@ def watcher_state(conf):
 
 
 def snapshot(conf, sample=False, host=None):
+    from . import scheduling
     states = ag.states(conf)
     supervised_facts(conf, states)
     profile_facts(conf, states)
@@ -569,7 +570,9 @@ def snapshot(conf, sample=False, host=None):
         "blocked": {x["id"]: x["reasons"] for x in summary["blocked"]},
         "times": task_times(conf),
         "capacity": {k: list(v) for k, v in t.capacity_use(conf).items()},
-        "priorities": {x["id"]: int(x.get("priority") or 0) for x in records if x.get("priority")},
+        "priorities": {x["id"]: scheduling.priority(x) for x in records},
+        "aging": {x["id"]: scheduling.effective(x, scheduling.aging_hours(conf))[1] for x in records
+                  if x.get("status") == "pending"},
         "capabilities": {x["id"]: int(x.get("minCapability") or 0) for x in records if x.get("minCapability")},
         "tasks": {x["id"]: x for x in records},
         "paused": wq.paused(conf), "git": git_state(conf), "verification": verification_state(conf),
@@ -818,6 +821,13 @@ def waiting_reason(state, key, task_id):
     return "busy", f"eligible agents busy ({len(allowed)})"
 
 
+def priority_label(entry):
+    """'P3 ' or 'P2+1 ' (levels gained by waiting) before a waiting task's id, '' for a started one."""
+    if entry.get("priority") is None:
+        return ""
+    return f"P{entry['priority']}" + (f"+{entry['aging']}" if entry.get("aging") else "") + " "
+
+
 def waiting_entries(state):
     """Every waiting task in display order: review, merged, just started, ready, blocked, held."""
     queue, times, priorities = state["queue"], state.get("times", {}), state.get("priorities", {})
@@ -831,14 +841,14 @@ def waiting_entries(state):
                                 "posted": None, "agent": record.get("agent"), "reason_kind": "next", "reason": ""})
             continue
         ids = queue[key]
+        aging = state.get("aging", {})
         if key in ("ready", "blocked", "held"):
-            ids = sorted(ids, key=lambda i: -priorities.get(i, 0))
+            ids = sorted(ids, key=lambda i: -(priorities.get(i, 3) + aging.get(i, 0)))
         for task_id in ids:
             posted, since = times.get(task_id, (None, None))
-            level = priorities.get(task_id, 0)
             kind, text = waiting_reason(state, key, task_id)
             entries.append({"key": key, "label": key, "task": task_id, "room": state["rooms"].get(task_id),
-                            "shown_id": (f"▲{level} " if level > 0 else (f"▼{-level} " if level < 0 else "")) + task_id,
+                            "shown_id": task_id, "priority": priorities.get(task_id), "aging": aging.get(task_id, 0),
                             "since": age(since), "posted": posted, "agent": None, "reason_kind": kind, "reason": text})
     return entries
 
@@ -992,7 +1002,7 @@ def render(state, width=120, height=None, ui=None):
         key, label = entry["key"], entry["label"]
         shown = aged(entry["since"], SLOW, VERY_SLOW) if key in ("review", "merged") else duration(entry["since"])
         bold = B if key in ("review", "merged", "ready") else ""
-        rows.append(f"{QUEUE_COLOR[label]}{bold}{label:<8}{R} {bold}{cut(entry['shown_id'], 34):<34}{R} "
+        rows.append(f"{QUEUE_COLOR[label]}{bold}{label:<8}{R} {bold}{cut(priority_label(entry) + entry['shown_id'], 34):<34}{R} "
                     f"{ROOM_COLOR.get(room, '')}{room:<6}{R} {column(shown, 7)} "
                     + (f"{DIM}{posted_label(entry['posted']):<7}{R} " if medium else "")
                     + f"{REASON_COLOR[entry['reason_kind']]}{entry['reason']}{R}")

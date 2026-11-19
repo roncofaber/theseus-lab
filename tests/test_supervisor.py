@@ -257,7 +257,7 @@ class SupervisorTests(Sandbox):
         self.assertNotIn(granted["run_secret"], runs_log + start_command + environment)
         self.assertEqual("worker", taskservice.authenticate(granted).role, "an open run's credentials authenticate")
         listed = self.theseus("agents", "ls").stdout
-        self.assertRegex(listed, r"demo-fake-1\s+free\s+fake\s+gen 1")
+        self.assertRegex(listed, r"demo-fake-1\s+free\s+fake\s+cap 1 gen 1")
         self.assertRegex(self.theseus("agents").stdout, r"demo-fake-1\s+=demo--demo-fake-1:\s+free")
         self.assertEqual("", self.legacy_calls())
         self.up()

@@ -192,22 +192,6 @@ def fits(conf, agent, task, info, gate=True):
     return True, ("compact" if state.get("needs_reset", True) or finished_since else None)
 
 
-def next_task(conf, agent, info, claimed):
-    queue = t.Queue(conf)
-    order = {task["id"]: n for n, task in enumerate(queue.load()["tasks"])}
-    candidates = []
-    skipped = assign_failures(conf)
-    for task_id in t.ready(queue):
-        task = queue.get(task_id)
-        if task.get("hold") or task_id in claimed or task_id in skipped:
-            continue
-        ok, reset = fits(conf, agent, task, info)
-        if ok:
-            candidates.append((-(task.get("priority") or 0), order.get(task_id, 0), task, reset))
-    candidates.sort(key=lambda item: item[:2])
-    return (candidates[0][2], candidates[0][3]) if candidates else (None, None)
-
-
 def reset(conf, agent, kind):
     prompt = ag.pane_prompt(conf, agent, launched(conf, agent))
     if prompt:
@@ -494,6 +478,7 @@ def tick(conf, assign=True):
                 pools.sync(conf, pool, held)
             waiting_on_pool = set()
             working = {}
+            free, infos = [], {}
             for agent in registered:
                 press_enter(sends, sends.items, wait=False)
                 info = ag.state(conf, agent)
@@ -565,6 +550,7 @@ def tick(conf, assign=True):
                 if info.get("busy") and info["state"] in ("working", "busy"):
                     gateway.observe(conf, agent, info)
                 samples.append((name, info["state"], info["task"]))
+                infos[name] = info
                 if info["state"] != "free" or not assign or paused(conf):
                     continue
                 if agent.get("managed") and agent.get("desired") in ("down", "retire"):
@@ -573,63 +559,10 @@ def tick(conf, assign=True):
                     continue
                 if active.get(registered_profile(conf, agent)):
                     continue
-                from . import profiles as pf
-                used, capacity = t.capacity_use(conf).get(agent.get("provider") or pf.default_name(conf), (0, None))
-                if capacity is not None and used >= int(capacity):
-                    continue
-                task, needed = next_task(conf, agent, info, claimed)
-                if task is None:
-                    continue
-                pool = pool_names.get(name)
-                if pool:
-                    allowed, why = pools.may_add_turn(pool, (info.get("context") or {}).get("tokens"))
-                    if not allowed:
-                        state = runtime(conf)
-                        state.setdefault(name, {})["pool_wait"] = why
-                        save_runtime(conf, state)
-                        continue
-                    allowed, why = pools.acquire(conf, pool, name, task["id"])
-                    if not allowed:
-                        waiting_on_pool.add(pool)
-                        state = runtime(conf)
-                        state.setdefault(name, {})["pool_wait"] = why
-                        save_runtime(conf, state)
-                        continue
-                claimed.add(task["id"])
-                ok = False
-                try:
-                    target = health.substitute(task.get("profile"), active) or registered_profile(conf, agent)
-                    if target != launched(conf, agent):
-                        try:
-                            ok, detail = relaunch(conf, agent, target)
-                        except Exception as error:
-                            ok, detail = False, str(error)
-                        if not ok:
-                            recorded.append(event(conf, "error", name, task["id"], f"relaunch onto {target} failed: {detail}"))
-                            continue
-                        recorded.append(event(conf, "relaunched", name, task["id"], detail))
-                    if needed:
-                        try:
-                            ok, detail = reset(conf, agent, needed)
-                        except Exception as error:
-                            ok, detail = False, str(error)
-                        if not ok:
-                            recorded.append(event(conf, "error", name, task["id"], f"{needed} failed: {detail}"))
-                            continue
-                        recorded.append(event(conf, "cleared" if needed == "clear" else "compacted", name, None, detail))
-                    from . import integrate
-                    held = False
-                    try:
-                        ok, detail = assign_and_send(conf, agent, task)
-                    except Exception as error:
-                        ok, detail, held = False, str(error), isinstance(error, integrate.DependencyHeld)
-                    if not ok:
-                        back_off(conf, task["id"])
-                    recorded.append(events(conf, 1)[-1] if ok else
-                                    event(conf, "held" if held else "error", name, task["id"], detail))
-                finally:
-                    if pool and not ok:
-                        pools.release(conf.name, pool, name)
+                free.append((agent, info))
+            for agent, task, needed in plan_tick(conf, free, claimed):
+                recorded.extend(assign_planned(conf, agent, infos[agent["name"]], task, needed, claimed, active,
+                                               pool_names, waiting_on_pool))
             recorded.extend(note_holds(conf))
             record_turns(conf, pool_names, working)
         finally:
@@ -640,6 +573,86 @@ def tick(conf, assign=True):
             with store.for_project(conf) as conn:
                 store.add_samples(conn, conf.name, samples)
     housekeeping()
+    return recorded
+
+
+def plan_tick(conf, free, claimed):
+    """[(agent, task, reset)] for the free agents of this tick (scheduling.plan): the ready tasks, less held, claimed
+    and backed-off ones, matched by priority with aging and by capability."""
+    from . import profiles as pf
+    from . import scheduling
+    if not free:
+        return []
+    queue = t.Queue(conf)
+    skipped = assign_failures(conf)
+    ready = set(t.ready(queue))
+    tasks = [task for task in queue.load()["tasks"] if task["id"] in ready and not task.get("hold")
+             and task["id"] not in claimed and task["id"] not in skipped]
+    return scheduling.plan(free, tasks, lambda agent, info, task: fits(conf, agent, task, info),
+                           lambda agent: pf.capability(conf, registered_profile(conf, agent)), scheduling.aging_hours(conf))
+
+
+def assign_planned(conf, agent, info, task, needed, claimed, active, pool_names, waiting_on_pool):
+    """Hand one planned task to its agent: profile capacity, the pool's turn budget and slot, a relaunch onto the
+    task's profile and a reset when needed, then the assignment and its message. Returns the events recorded."""
+    from . import health
+    from . import pools
+    from . import profiles as pf
+    recorded = []
+    name = agent["name"]
+    used, capacity = t.capacity_use(conf).get(agent.get("provider") or pf.default_name(conf), (0, None))
+    if capacity is not None and used >= int(capacity):
+        return recorded
+    pool = pool_names.get(name)
+    if pool:
+        allowed, why = pools.may_add_turn(pool, (info.get("context") or {}).get("tokens"))
+        if not allowed:
+            state = runtime(conf)
+            state.setdefault(name, {})["pool_wait"] = why
+            save_runtime(conf, state)
+            return recorded
+        allowed, why = pools.acquire(conf, pool, name, task["id"])
+        if not allowed:
+            waiting_on_pool.add(pool)
+            state = runtime(conf)
+            state.setdefault(name, {})["pool_wait"] = why
+            save_runtime(conf, state)
+            return recorded
+    claimed.add(task["id"])
+    ok = False
+    try:
+        target = health.substitute(task.get("profile"), active) or registered_profile(conf, agent)
+        if target != launched(conf, agent):
+            try:
+                ok, detail = relaunch(conf, agent, target)
+            except Exception as error:
+                ok, detail = False, str(error)
+            if not ok:
+                recorded.append(event(conf, "error", name, task["id"], f"relaunch onto {target} failed: {detail}"))
+                return recorded
+            recorded.append(event(conf, "relaunched", name, task["id"], detail))
+        if needed:
+            try:
+                ok, detail = reset(conf, agent, needed)
+            except Exception as error:
+                ok, detail = False, str(error)
+            if not ok:
+                recorded.append(event(conf, "error", name, task["id"], f"{needed} failed: {detail}"))
+                return recorded
+            recorded.append(event(conf, "cleared" if needed == "clear" else "compacted", name, None, detail))
+        from . import integrate
+        held = False
+        try:
+            ok, detail = assign_and_send(conf, agent, task)
+        except Exception as error:
+            ok, detail, held = False, str(error), isinstance(error, integrate.DependencyHeld)
+        if not ok:
+            back_off(conf, task["id"])
+        recorded.append(events(conf, 1)[-1] if ok else
+                        event(conf, "held" if held else "error", name, task["id"], detail))
+    finally:
+        if pool and not ok:
+            pools.release(conf.name, pool, name)
     return recorded
 
 

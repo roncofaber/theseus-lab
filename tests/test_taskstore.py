@@ -79,7 +79,7 @@ class RoundTripTests(TaskStoreCase):
         edited = next(t for t in json.loads(second.tasks)["tasks"] if t["id"] == "task-11")
         before = next(t for t in json.loads(legacy.tasks)["tasks"] if t["id"] == "task-11")
         self.assertEqual(list(before), list(edited), "a write keeps the imported key order")
-        self.assertEqual(9, edited["priority"])
+        self.assertEqual(4, edited["priority"])
 
         self.use_db(self.tmp / "other" / "theseus.db")
         fresh = ts.open(self.conf)
@@ -97,7 +97,7 @@ class RoundTripTests(TaskStoreCase):
         svc.add(COORDINATOR, spec("beta", depends=["alpha"]))
         svc.add(COORDINATOR, spec("gamma", priority=2))
         svc.set_milestone(COORDINATOR, "M2")
-        svc.edit(COORDINATOR, "task-11", {"priority": 9})
+        svc.edit(COORDINATOR, "task-11", {"priority": 4})
         svc.edit(COORDINATOR, "gamma", {"objective": "Build gamma well.", "milestone": "M2"})
         svc.hold(COORDINATOR, "gamma", True)
         svc.hold(COORDINATOR, "gamma", False)
