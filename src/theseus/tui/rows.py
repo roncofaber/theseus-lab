@@ -5,23 +5,23 @@ from datetime import datetime, timezone
 
 from rich.text import Text
 
+from .. import tasks as t
 from .. import top
 from ..agents import LIMIT_SOURCES
 from . import charts, theme
 
-AGENT_COLUMNS = ("agent", "state", "cap", "task", "CPU (core %)", "MEM (RAM)", "context", "room", "on task", "quiet",
-                 "up", "restarts", "session", "model", "pool", "note")
+AGENT_COLUMNS = ("agent", "state", "cap", "task", "context", "room", "on task", "quiet", "up", "restarts", "model", "pool",
+                 "CPU", "RAM", "note")
 PROJECT_COLUMNS = ("project", "milestone", "coordinator", "watcher", "ready", "working on", "review", "attention", "agents",
                    "pool", "gateway", "today")
 # Columns that drop out, first to last, when a table is too narrow for all of them.
-OPTIONAL = {"agents": ("cap", "model", "pool", "session", "note", "restarts", "up", "room", "quiet", "on task", "context"),
+OPTIONAL = {"agents": ("cap", "model", "pool", "note", "restarts", "up", "room", "quiet", "on task", "context"),
             "projects": ("watcher", "today", "gateway", "pool", "working on", "ready", "attention"),
             "gateway": ("pool", "attempt", "outcome"), "waiting": ("min cap", "posted", "room")}
 # Stable column widths: an int is fixed, a float shares the remaining width in proportion.
 WIDTHS = {
-    "agents": {"agent": 14, "state": 10, "cap": 5, "task": 1.0, "CPU (core %)": 12, "MEM (RAM)": 11, "context": 14,
-               "room": 6, "on task": 8, "quiet": 6, "up": 6, "restarts": 8, "session": 8, "model": 0.8, "pool": 8,
-               "note": 0.5},
+    "agents": {"agent": 14, "state": 10, "cap": 4, "task": 1.0, "context": 14, "room": 6, "on task": 8, "quiet": 6,
+               "up": 6, "restarts": 8, "model": 0.8, "pool": 8, "CPU": 5, "RAM": 6, "note": 0.5},
     "waiting": {"status": 10, "pri": 5, "task": 1.0, "min cap": 8, "room": 6, "for": 8, "posted": 12, "reason": 1.2},
     "events": {"time": 8, "kind": 11, "agent": 16, "task": 0.7, "detail": 1.6},
     "host-events": {"time": 8, "project": 12, "kind": 11, "agent": 24, "task": 0.7, "detail": 1.6},
@@ -37,8 +37,11 @@ POOL_COLUMNS = ("pool", "working", "holders", "claims")
 GATEWAY_COLUMNS = ("time", "project", "agent", "task", "error", "attempt", "outcome", "pool")
 MEM_WARN, MEM_ALARM = 0.10, 0.25
 CTX_WARN, CTX_ALARM = 0.5, 0.8
-CPU_HELP = "CPU (core %): the agent's processes in percent of one core; 250% is two and a half cores busy"
-MEM_HELP = (f"MEM (RAM): resident memory and its share of system RAM; yellow from {MEM_WARN:.0%}, red from {MEM_ALARM:.0%}")
+CAP_HELP = ("cap and min cap: an agent's capability and a task's minimum (its difficulty), two levels per dot: "
+            "◐○○ 1, ●○○ 2, ●◐○ 3, ●●○ 4, ●●◐ 5, ●●● 6")
+CPU_HELP = "CPU: the agent's processes in percent of one core; 250% is two and a half cores busy"
+MEM_HELP = (f"RAM: the agent's resident memory; yellow from {MEM_WARN:.0%} of system RAM, red from {MEM_ALARM:.0%} "
+            f"(the popup shows the share)")
 CTX_HELP = (f"context: tokens in the agent's context after its last answer (its transcript, else the pane's /clear "
             f"hint) of the window of the answer's model: the agent CLI's own setting, else [models] context, else the "
             f"profile's context_limit (marked *); yellow from {CTX_WARN:.0%}, red from {CTX_ALARM:.0%}")
@@ -60,15 +63,20 @@ def row(key, cells, extra=""):
 
 
 def memory(rss, total):
-    """An agent's resident memory and its share of system RAM, colored from MEM_WARN and MEM_ALARM."""
-    if not total:
-        return Text(top.size(rss), justify="right")
-    share = rss / total
+    """An agent's resident memory, colored by its share of system RAM from MEM_WARN and MEM_ALARM."""
+    share = rss / total if total else 0
     style = theme.RED if share >= MEM_ALARM else theme.YELLOW if share >= MEM_WARN else ""
-    return Text(f"{top.size(rss)} {share:>3.0%}", style=style, justify="right")
+    return Text(compact_size(rss), style=style, justify="right")
+
+
+def compact_size(value):
+    """A size in at most five characters: 608M, 1.2G."""
+    return f"{value / 2**20:.0f}M" if value < 2**30 else f"{value / 2**30:.1f}G"
 
 
 def tokens(count):
+    if count >= 1000000:
+        return f"{count / 1000000:.1f}".rstrip("0").rstrip(".") + "M"
     return f"{count / 1000:.0f}k" if count >= 1000 else str(count)
 
 
@@ -116,23 +124,21 @@ def agent_rows(state):
         restarts = agent.get("restarts")
         rows.append(row(f"agent:{agent['name']}:{agent['pane']}", [
             marked(agent.get("display") or agent["name"], color), cell(agent["state"], color),
-            level_cell(agent.get("capability")),
-            cell(agent.get("task") or "-", "bold"), cpu, mem, context(agent.get("context")),
+            level_cell(agent.get("capability")), task_cell(agent.get("task"), state), context(agent.get("context")),
             cell(agent.get("room") or "-", theme.ROOM.get(agent.get("room"), "")),
             cell(top.duration(on_task), theme.aged(on_task, top.SLOW, top.VERY_SLOW)),
             cell(top.duration(quiet), theme.aged(quiet, top.QUIET_WARN, 2 * top.QUIET_WARN)),
             cell(top.duration(agent.get("uptime")), "dim"),
             cell("-" if restarts is None else str(restarts), theme.YELLOW if restarts else "dim"),
-            cell((agent.get("session") or "-")[:8], "dim"), cell(agent.get("model") or "-", "dim"),
-            cell(agent.get("pool") or "-", "dim"),
+            cell(agent.get("model") or "-", "dim"), cell(agent.get("pool") or "-", "dim"), cpu, mem,
             cell(note, theme.RED if agent.get("tainted") else glow_style)], agent["name"]))
     for worker in state.get("workers", []):
         on_task = top.age(times.get(worker["task"], (None, None))[1])
         rows.append(row(f"worker:{worker['name']}:{worker['task']}", [
-            marked(worker["name"], theme.CYAN, marker="◆"), cell(worker["kind"], theme.CYAN), "", cell(worker["task"], "bold"),
-            "-", "-", "-", cell(worker.get("room") or "-", theme.ROOM.get(worker.get("room"), "")),
-            cell(top.duration(on_task), theme.aged(on_task, top.SLOW, top.VERY_SLOW)), "-", "-", "-", "-",
-            cell(worker.get("model") or "-", "dim"), "-", ""]))
+            marked(worker["name"], theme.CYAN, marker="◆"), cell(worker["kind"], theme.CYAN), "", task_cell(worker["task"], state),
+            "-", cell(worker.get("room") or "-", theme.ROOM.get(worker.get("room"), "")),
+            cell(top.duration(on_task), theme.aged(on_task, top.SLOW, top.VERY_SLOW)), "-", "-", "-",
+            cell(worker.get("model") or "-", "dim"), "-", "-", "-", ""]))
     return rows
 
 
@@ -144,14 +150,32 @@ def level_style(level):
     return f"bold {getattr(theme, name)}" if name else ""
 
 
+def task_cell(task_id, state):
+    """The task an agent works on, after its difficulty (minimum capability) as dots."""
+    if not task_id:
+        return cell("-", "bold")
+    level = (state.get("capabilities") or {}).get(task_id) or t.LOWEST_CAPABILITY
+    shown = Text(pips(level), style=level_style(int(level)))
+    shown.append(f" {task_id}", style="bold")
+    return shown
+
+
+LEVEL_DOTS = 3
+
+
+def pips(level):
+    """A capability level on LEVEL_DOTS dots of two levels each: 1 ◐○○, 2 ●○○, 3 ●◐○, 6 ●●●; above that ●●●+."""
+    level = int(level)
+    full, half = min(level, 2 * LEVEL_DOTS) // 2, min(level, 2 * LEVEL_DOTS) % 2
+    return "●" * full + "◐" * half + "○" * (LEVEL_DOTS - full - half) + ("+" if level > 2 * LEVEL_DOTS else "")
+
+
 def level_cell(level, minimum=False, gated=False):
-    """A capability level as filled pips (an agent's capability, or a task's minimum with a >= mark); a minimum no
+    """A capability level as dots (pips): an agent's capability, or a task's minimum (its difficulty); a minimum no
     free agent meets is red."""
     if not level:
         return cell("any" if minimum else "-", "dim")
-    pips = "●" * min(int(level), 5)
-    text = Text(("≥" if minimum else "") + pips, style=f"bold {theme.RED}" if gated else level_style(int(level)))
-    return text
+    return Text(pips(level), style=f"bold {theme.RED}" if gated else level_style(int(level)))
 
 
 def priority_cell(entry):
@@ -183,7 +207,8 @@ def waiting_rows(state):
         rows.append(row(f"wait:{entry['label']}:{entry['task']}", [
             marked(label, style, f"bold {style}" if strong else style), priority_cell(entry),
             cell(entry["shown_id"], "bold" if strong else ""),
-            level_cell(minimums.get(entry["task"]), minimum=True, gated=entry["task"] in (state.get("gated") or {})),
+            level_cell(minimums.get(entry["task"]) or t.LOWEST_CAPABILITY, minimum=True,
+                       gated=entry["task"] in (state.get("gated") or {})),
             cell(room, theme.ROOM.get(room, "")), shown, cell(top.posted_label(entry["posted"]), "dim"), reason]))
     return rows
 
@@ -655,7 +680,10 @@ def task_detail(detail, task, entry=None, project=None, title=None):
         detail.add("record", "not in this snapshot", "dim")
         return detail
     for name in TASK_FIELDS:
-        if name in task:
+        if name == "minCapability":
+            level = t.min_capability(task)
+            detail.add(TASK_LABELS[name], f"{pips(level)} {level}" + ("" if task.get(name) else " (default)"), "bold")
+        elif name in task:
             detail.add(TASK_LABELS.get(name, name), task[name], task_status_style(task[name]) if name == "status" else "bold")
     extra = [(name, value) for name, value in task.items()
              if name not in TASK_FIELDS and name not in dict(TASK_TEXTS) and value not in (None, "", [], {})]

@@ -200,8 +200,10 @@ def conf_text():
         "set -g set-titles-string 'theseus #{@theseus_project} #{@theseus_role}#{?@theseus_task, #{@theseus_task},}'",
         f"set-hook -g pane-died \"run-shell -b '{hook} #{{socket_path}} #{{session_name}} #{{pane_pid}} s#{{pane_dead_status}} g#{{pane_dead_signal}}'\"",
         # resize-window leaves the window at a manual size that no later client resize changes; window-size latest
-        # makes it follow the attached terminal until detach pins it again.
+        # makes it follow the attached terminal until detach pins it again. A client that arrives by switch-client
+        # (prefix C, n, p, attach from inside this server) fires client-session-changed, not client-attached.
         'set-hook -g client-attached "setw window-size latest"',
+        'set-hook -g client-session-changed "setw window-size latest"',
         f'set-hook -g client-detached "resize-window -x {width} -y {height}"',
     ]
     extra = extra_path(host.get("extra_conf"))

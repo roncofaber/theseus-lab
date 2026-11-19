@@ -583,3 +583,25 @@ class CoordinatorFrictionTests(Sandbox):
         with mock.patch.object(t, "Queue", lambda conf: queue):
             [problem] = fold.owned_by_open_tasks(None, root, moves)
         self.assertIn("docs/investigations/owned.md is owned by open task(s) open-task", problem)
+
+
+class ConsoleCellTests(unittest.TestCase):
+    def test_levels_are_dots_of_two_levels_and_resources_come_after_the_pool(self):
+        from theseus.tui import rows
+        self.assertEqual(["◐○○", "●○○", "●◐○", "●●○", "●●◐", "●●●", "●●●+"], [rows.pips(n) for n in range(1, 8)])
+        self.assertEqual("●◐○", rows.level_cell(3, minimum=True).plain, "a task's minimum uses the same scale")
+        state = {"capabilities": {"hard-task": 4}}
+        self.assertEqual(["●●○ hard-task", "◐○○ plain-task", "-"],
+                         [rows.task_cell(task, state).plain for task in ("hard-task", "plain-task", None)],
+                         "a task with no minimum shows the lowest level")
+        self.assertEqual(1, t.min_capability({}))
+        self.assertEqual(3, t.min_capability({"minCapability": 3}))
+        columns = rows.AGENT_COLUMNS
+        self.assertEqual(("pool", "CPU", "RAM"), columns[columns.index("pool"):columns.index("pool") + 3])
+        self.assertNotIn("session", columns)
+        self.assertEqual(list(columns), list(rows.WIDTHS["agents"]))
+        self.assertEqual(("608M", "1.2G"), (rows.memory(608 * 2**20, 0).plain, rows.memory(int(1.25 * 2**30), 2**34).plain))
+        self.assertEqual(["1M", "229k"], [rows.tokens(1048576), rows.tokens(229376)])
+        state = {"agents": [{"name": "w", "pane": "%1", "state": "free"}], "workers": [{"name": "h", "kind": "headless",
+                 "task": "t"}], "events": []}
+        self.assertEqual([len(columns)] * 2, [len(cells) for _, cells, _ in rows.agent_rows(state)])

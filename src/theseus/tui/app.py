@@ -820,7 +820,7 @@ class TopApp(App):
                                                       "command of the same name; destructive ones ask first")])]
         legend = Text()
         legend.append("Columns\n", style="bold underline")
-        legend.append(f"  {R.CPU_HELP}\n  {R.MEM_HELP}\n  {R.CTX_HELP}\n\n")
+        legend.append(f"  {R.CAP_HELP}\n  {R.CPU_HELP}\n  {R.MEM_HELP}\n  {R.CTX_HELP}\n\n")
         legend.append("Activity colors\n", style="bold underline")
         for name, label in theme.SERIES_LABEL.items():
             legend.append("  ■ ", style=theme.SERIES[name])

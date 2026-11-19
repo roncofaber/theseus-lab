@@ -4,6 +4,8 @@ from functools import partial
 
 from textual.command import DiscoveryHit, Hit, Provider
 
+from .. import tasks as t
+
 
 def project_commands(item):
     """(title, help, argv, confirm question or None) for the project of a console tab, from its snapshot alone."""
@@ -47,10 +49,10 @@ def project_commands(item):
                              ["tasks", "priority", task, str(level - 1)], None))
     capabilities = state.get("capabilities") or {}
     for task in [*queue.get("ready", []), *queue.get("blocked", []), *queue.get("held", [])]:
-        level = int(capabilities.get(task, 0))
+        level = int(capabilities.get(task) or t.LOWEST_CAPABILITY)
         commands.append((f"Raise the minimum capability of {task} ({level} to {level + 1})", "theseus tasks capability",
                          ["tasks", "capability", task, str(level + 1)], None))
-        if level:
+        if level > t.LOWEST_CAPABILITY:
             commands.append((f"Lower the minimum capability of {task} ({level} to {level - 1})", "theseus tasks capability",
                              ["tasks", "capability", task, str(level - 1)], None))
     for task in queue.get("review", []):

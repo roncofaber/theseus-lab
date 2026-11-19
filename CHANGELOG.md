@@ -20,7 +20,12 @@ All notable changes to this project are documented here. The format follows [Kee
 - `tasks complete --from-log` refuses a verify log of a commit that does not contain the task's merge, and names `--check/--log` for non-verify evidence; `theseus verify` prints the commit it verifies.
 - Manual `dispatch` is stopped only by the candidate's own or project-wide rule problems, not by an unrelated record's. A completed task without an owner is valid when no worker ever ran it (an administrative completion).
 - `docs fold-apply` refuses to move a report an open task still owns, which the next `tasks export` would write back.
+- A session reached by switching inside the private tmux server (prefix `C`, `n`, `p`, or an attach from inside it) follows the terminal's size instead of staying pinned at the agent size by an earlier detach.
 - Leaving an agent opened in place from the console (C-q) no longer leaves tmux's `[detached (from session X)]` line on the terminal, where the lines piled up and showed when the console quit.
+
+### Changed
+
+- Console agents table: `CPU` and `RAM` (resident size only; the popup keeps the share of system RAM) follow `pool`, the session column is gone (popups show it), and a capability or task minimum (its difficulty) shows as three dots of two levels each (◐○○ 1, ●○○ 2, ●◐○ 3, ... ●●● 6), also before the task each agent works on. Every task has a difficulty: one without a minimum counts as the lowest level, 1 (shown in the waiting table, the agents table and the task popup as the default). A 1,048,576-token window reads `1M`.
 
 ### Added
 

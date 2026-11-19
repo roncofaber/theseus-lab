@@ -575,7 +575,7 @@ def snapshot(conf, sample=False, host=None):
         "priorities": {x["id"]: scheduling.priority(x) for x in records},
         "aging": {x["id"]: scheduling.effective(x, scheduling.aging_hours(conf))[1] for x in records
                   if x.get("status") == "pending"},
-        "capabilities": {x["id"]: int(x.get("minCapability") or 0) for x in records if x.get("minCapability")},
+        "capabilities": {x["id"]: t.min_capability(x) for x in records},
         "tasks": {x["id"]: x for x in records},
         "paused": wq.paused(conf), "git": git_state(conf), "verification": verification_state(conf),
         "events": merge_resets(wq.events(conf, 200)),

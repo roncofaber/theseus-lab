@@ -107,9 +107,11 @@ class AttachSizeTests(Sandbox):
         self.addCleanup(tmux, "kill-server")
         tmux("-f", str(conf_file), "new-session", "-d", "-s", "demo--coordinator", "sleep 600")
         tmux("resize-window", "-t", "demo--coordinator", "-x", str(width), "-y", str(height))
+        tmux("new-session", "-d", "-s", "demo--worker-1", "sleep 600")
+        tmux("resize-window", "-t", "demo--worker-1", "-x", str(width), "-y", str(height))
 
-        def size():
-            return tmux("display", "-p", "-t", "demo--coordinator", "#{window_width}x#{window_height}").stdout.strip()
+        def size(session="demo--coordinator"):
+            return tmux("display", "-p", "-t", session, "#{window_width}x#{window_height}").stdout.strip()
 
         pid, fd = pty.fork()
         if pid == 0:
@@ -132,6 +134,17 @@ class AttachSizeTests(Sandbox):
         try:
             self.assertEqual("120x39", terminal(120, 40, "120x39"), "the window takes the terminal's size")
             self.assertEqual("160x44", terminal(160, 45, "160x44"), "and follows it when it is resized")
+            tmux("switch-client", "-t", "demo--worker-1")
+            deadline = time.time() + 5
+            while time.time() < deadline and size("demo--worker-1") != "160x44":
+                if select.select([fd], [], [], 0.1)[0]:
+                    try:
+                        os.read(fd, 65536)
+                    except OSError:
+                        break
+            self.assertEqual("160x44", size("demo--worker-1"),
+                             "a window the terminal switches to (prefix C, n, p) follows it too")
+            tmux("switch-client", "-t", "demo--coordinator")
         finally:
             tmux("detach-client", "-a")
             tmux("detach-client")

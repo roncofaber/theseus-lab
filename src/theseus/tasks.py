@@ -822,14 +822,24 @@ def set_profile(queue, task_id, profile):
     return f"{task_id}: {f'needs profile {profile}' if profile else 'any profile'}"
 
 
+LOWEST_CAPABILITY = 1
+
+
+def min_capability(task):
+    """A task's minimum capability (its difficulty): the one it sets, else the lowest level, LOWEST_CAPABILITY, which
+    every profile meets by default."""
+    return int(task.get("minCapability") or 0) or LOWEST_CAPABILITY
+
+
 @refreshes_inbox
 def set_min_capability(queue, task_id, level):
-    """The lowest profile capability an agent needs to take the task ([workers.<name>] capability); 0 removes it."""
+    """The lowest profile capability an agent needs to take the task ([workers.<name>] capability); 0 removes it,
+    leaving the default, LOWEST_CAPABILITY."""
     level = int(level)
     if level < 0:
         raise TaskError("the minimum capability must be 0 or more")
     queue.service.edit(acting_principal(None), task_id, {"min_capability": level}, force=True)
-    return f"{task_id}: {f'needs capability >= {level}' if level else 'any capability'}"
+    return f"{task_id}: needs capability >= {level or LOWEST_CAPABILITY}{'' if level else ' (the default)'}"
 
 
 def hold(queue, task_id, held):
