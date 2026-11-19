@@ -183,6 +183,11 @@ class Table(DataTable):
         self.show_cursor = True
 
     def on_blur(self):
+        """Hide the highlight, remembering its row for the command palette, which takes the focus when it opens."""
+        if self.show_cursor and self.row_count and self.cursor_row is not None:
+            view = next((a for a in self.ancestors if isinstance(a, (ProjectView, HostView))), None)
+            key = self.coordinate_to_cell_key((self.cursor_row, 0)).row_key.value
+            self.app.last_highlight = (view, key)
         self.show_cursor = False
 
     def on_click(self, event):
@@ -431,7 +436,7 @@ class ProjectView(VerticalScroll):
                 yield CoordinatorOverview(id="coordinator")
         with Panel("AGENTS", id="agents-panel", accent=accent, classes="grow"):
             yield Table(R.AGENT_COLUMNS, widths=R.WIDTHS["agents"], optional=R.OPTIONAL["agents"], id="agents")
-        with Panel("WAITING", id="waiting-panel", accent=accent, classes="grow"):
+        with Panel("QUEUE", id="waiting-panel", accent=accent, classes="grow"):
             yield Table(R.WAITING_COLUMNS, widths=R.WIDTHS["waiting"], optional=R.OPTIONAL["waiting"], id="waiting")
         with Panel("ACTIVITY 12 h", id="activity-panel", accent=accent,
                    classes="grow"):
@@ -479,7 +484,7 @@ class ProjectView(VerticalScroll):
             agents_panel.border_title = "AGENTS"
         queue = state["queue"]
         self.query_one("#waiting-panel", Panel).border_title = (
-            f"WAITING review {len(queue['review'])} · merged {len(queue['merged'])} · ready {len(queue['ready'])}"
+            f"QUEUE review {len(queue['review'])} · merged {len(queue['merged'])} · ready {len(queue['ready'])}"
             f" · blocked {len(queue['blocked'])} · held {len(queue['held'])}")
         self.panes = {f"agent:{agent['name']}:{agent['pane']}": agent for agent in state["agents"]}
         self.records = {R.event_key(record, index): record for index, record in enumerate(state["events"])}
@@ -539,7 +544,7 @@ class TopApp(App):
         Binding("/", "filter", "Filter", key_display="/", tooltip="Filter rows"),
         Binding("escape", "clear", "Clear the filter and the row highlight", show=False),
         Binding("a", "focus_table('agents')", "Highlight a row in AGENTS", show=False),
-        Binding("w", "focus_table('waiting')", "Highlight a row in WAITING", show=False),
+        Binding("w", "focus_table('waiting')", "Highlight a row in QUEUE", show=False),
         Binding("e", "focus_table('events')", "Highlight a row in EVENTS", show=False),
         Binding("E", "edit_profile", "Edit profile", key_display="E", show=False,
                 tooltip="Open the highlighted agent profile (Host tab, PROFILES) in $EDITOR"),
@@ -582,6 +587,7 @@ class TopApp(App):
         self.greet = True
         self.views = {}
         self.items = {}
+        self.last_highlight = None
 
     @property
     def base(self):
@@ -738,7 +744,22 @@ class TopApp(App):
             box.styles.display = "none"
             self.filter_text = ""
             self.redraw()
+        self.last_highlight = None
         self.set_focus(None)
+
+    def highlighted_subject(self):
+        """The agent, task or profile of the row highlighted in the active tab before the palette opened, or None."""
+        view, key = self.last_highlight or (None, "")
+        if view is None or view is not self.active_view():
+            return None
+        kind, _, rest = (key or "").partition(":")
+        if kind == "agent":
+            return rest.rsplit(":", 1)[0]
+        if kind == "wait":
+            return rest.split(":", 1)[1] if ":" in rest else None
+        if kind == "profile":
+            return rest
+        return None
 
     def action_focus_table(self, name):
         view = self.active_view()
@@ -857,11 +878,14 @@ class TopApp(App):
                                          " Ctrl-C asks first; Esc Esc or Ctrl-] leaves (the INSERT border)"),
                         ("attach", "Enter suspends the console and attaches this terminal to a supervised agent's own "
                                    "pane; C-q detaches back")]),
-                    ("Actions (Ctrl+P)", [("palette", "every action of the active project: queue tick, agents up, add or "
-                                                      "remove an agent (theseus.local.toml), restart, stop, start, attach; "
-                                                      "dispatch, hold, release, priority, reopen; pool hold and release; "
-                                                      "the coordinator; a delivered task's handoff. Each runs the theseus "
-                                                      "command of the same name; destructive ones ask first")])]
+                    ("Actions (Ctrl+P)", [("opened", "the actions of the row you highlighted (an agent, a QUEUE task, a "
+                                                     "profile), then the tab's own (queue tick, agents up, stop all, close, "
+                                                     "the coordinator), then one entry per group: Agent actions, Task "
+                                                     "actions, Scale agents, Pool slots, Handoffs, Profile actions, New "
+                                                     "profile; a group opens its own list"),
+                                          ("typing", "searches every action of the tab, grouped or not"),
+                                          ("running", "each runs the theseus command of the same name; destructive ones "
+                                                      "ask first")])]
         legend = Text()
         legend.append("Columns\n", style="bold underline")
         legend.append(f"  {R.CAP_HELP}\n  {R.CPU_HELP}\n  {R.MEM_HELP}\n  {R.CTX_HELP}\n\n")

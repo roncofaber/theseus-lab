@@ -156,7 +156,7 @@ def summary_counts(item):
 
 def render_host(state):
     lines = [f"theseus top - host - {len(state['projects'])} project(s)", ""]
-    lines.append(f"{'PROJECT':<22} {'MILESTONE':<22} {'AGENTS':<8} {'WAITING':<34} LAST EVENT")
+    lines.append(f"{'PROJECT':<22} {'MILESTONE':<22} {'AGENTS':<8} {'QUEUE':<34} LAST EVENT")
     for item in state["projects"]:
         if not item["available"]:
             lines.append(f"{top.cut(item['name'], 22):<22} unavailable: {top.cut(item['error'] or '', 60)}")

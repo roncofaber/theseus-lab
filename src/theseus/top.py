@@ -989,7 +989,7 @@ def render(state, width=120, height=None, ui=None):
         spare = height - len(frame.lines) - 8 - footer
         waiting_rows = max(ROWS["waiting"], min(12, spare // 3))
         events_rows = max(ROWS["events"], spare - waiting_rows)
-    frame.rule("WAITING", counts)
+    frame.rule("QUEUE", counts)
     frame.header(f"{'STATUS':<8} {'TASK':<34} {'ROOM':<6} {'FOR':<7} " + (f"{'POSTED':<7} " if medium else "") + "REASON")
     rows = []
     for entry in waiting_entries(state):

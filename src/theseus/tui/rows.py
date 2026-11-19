@@ -18,12 +18,12 @@ PROJECT_COLUMNS = ("project", "milestone", "coordinator", "watcher", "ready", "w
 # Columns that drop out, first to last, when a table is too narrow for all of them.
 OPTIONAL = {"agents": ("cap", "model", "pool", "note", "restarts", "up", "room", "quiet", "on task", "context"),
             "projects": ("watcher", "today", "gateway", "pool", "working on", "ready", "attention"),
-            "gateway": ("pool", "attempt", "outcome"), "waiting": ("min cap", "posted", "room")}
+            "gateway": ("pool", "attempt", "outcome"), "waiting": ("cap", "posted", "room")}
 # Stable column widths: an int is fixed, a float shares the remaining width in proportion.
 WIDTHS = {
     "agents": {"agent": 14, "state": 10, "cap": 4, "task": 1.0, "context": 14, "room": 6, "on task": 8, "quiet": 6,
                "up": 6, "restarts": 8, "model": 0.8, "pool": 8, "CPU": 5, "RAM": 6, "note": 0.5},
-    "waiting": {"status": 10, "pri": 5, "task": 1.0, "min cap": 8, "room": 6, "for": 8, "posted": 12, "reason": 1.2},
+    "waiting": {"status": 10, "pri": 5, "task": 1.0, "cap": 4, "room": 6, "for": 8, "posted": 12, "reason": 1.2},
     "events": {"time": 8, "kind": 11, "agent": 16, "task": 0.7, "detail": 1.6},
     "host-events": {"time": 8, "project": 12, "kind": 11, "agent": 24, "task": 0.7, "detail": 1.6},
     "pools": {"pool": 12, "working": 1.0, "holders": 1.5, "claims": 1.0},
@@ -32,7 +32,7 @@ WIDTHS = {
     "projects": {"project": 14, "milestone": 1.0, "coordinator": 13, "watcher": 9, "ready": 6, "working on": 10,
                  "review": 13, "attention": 1.0, "agents": 1.0, "pool": 10, "gateway": 9, "today": 11},
 }
-WAITING_COLUMNS = ("status", "pri", "task", "min cap", "room", "for", "posted", "reason")
+WAITING_COLUMNS = ("status", "pri", "task", "cap", "room", "for", "posted", "reason")
 EVENT_COLUMNS = ("time", "kind", "agent", "task", "detail")
 HOST_EVENT_COLUMNS = ("time", "project", "kind", "agent", "task", "detail")
 POOL_COLUMNS = ("pool", "working", "holders", "claims")
@@ -40,7 +40,7 @@ PROFILE_COLUMNS = ("profile", "preset", "model", "cap", "agents", "pool", "file"
 GATEWAY_COLUMNS = ("time", "project", "agent", "task", "error", "attempt", "outcome", "pool")
 MEM_WARN, MEM_ALARM = 0.10, 0.25
 CTX_WARN, CTX_ALARM = 0.5, 0.8
-CAP_HELP = ("cap and min cap: an agent's capability and a task's minimum (its difficulty), two levels per dot: "
+CAP_HELP = ("cap: an agent's capability (AGENTS) or a task's minimum, its difficulty (QUEUE), two levels per dot: "
             "◐○○ 1, ●○○ 2, ●◐○ 3, ●●○ 4, ●●◐ 5, ●●● 6")
 CPU_HELP = "CPU: the agent's processes in percent of one core; 250% is two and a half cores busy"
 MEM_HELP = (f"RAM: the agent's resident memory; yellow from {MEM_WARN:.0%} of system RAM, red from {MEM_ALARM:.0%} "

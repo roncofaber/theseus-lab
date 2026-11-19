@@ -1,79 +1,104 @@
 """The console's actions: Textual command palette providers (Ctrl+P) whose commands run the theseus CLI itself, so
-each action is the same code path as on the command line; destructive ones ask first."""
+each action is the same code path as on the command line; destructive ones ask first.
+
+Every action has a group and, for one agent, task or profile, a subject. Opened empty, the palette lists the actions
+of the row highlighted when it opened, the tab's own few actions, and one entry per group ("Task actions…") that opens
+the group in a second palette; typing searches every action."""
+from dataclasses import dataclass
 from functools import partial
 
 from textual.command import DiscoveryHit, Hit, Provider
 
 from .. import tasks as t
 
+GROUPS = {"agents": "Agent actions", "scale": "Scale agents", "tasks": "Task actions", "handoffs": "Handoffs",
+          "pools": "Pool slots", "profiles": "Profile actions", "new-profile": "New profile"}
 
-def project_commands(item):
-    """(title, help, argv, confirm question or None) for the project of a console tab, from its snapshot alone. A
-    closed project offers only Reopen, an active one also Close."""
+
+@dataclass
+class Action:
+    title: str
+    help: str
+    group: str
+    subject: str = None
+    argv: list = None
+    question: str = None
+    callback: object = None
+
+
+def project_actions(item):
+    """The CLI actions of a project tab, from its snapshot alone: Action rows with argv (run by app.run_cli). A closed
+    project offers only Reopen, an active one also Close."""
     state = item["snapshot"]
     if item.get("closed"):
-        return [("Reopen project", "theseus reopen: bring back its agents, queue driver and coordinator", ["reopen"],
-                 f"Reopen {item['name']}?")]
-    commands = [("Queue tick", "run one queue tick now", ["queue", "tick"], None),
-                ("Agents up", "reconcile the supervised agents toward [agents.counts]", ["agents", "up"], None),
-                ("Close project", "theseus close --commit: export and commit the tasks, stop its agents, queue driver "
-                                  "and coordinator until Reopen (refused while an agent holds a task)",
-                 ["close", "--commit"], f"Close {item['name']}? Everything it runs stops until Reopen.")]
-    for profile, count in sorted((state.get("agentCounts") or {}).items()):
-        commands.append((f"Add a {profile} agent ({count} to {count + 1})", "theseus agents scale, in theseus.local.toml",
-                         ["agents", "scale", profile, str(count + 1)], f"Add a {profile} agent ({count} to {count + 1})?"))
-        if count:
-            commands.append((f"Remove a {profile} agent ({count} to {count - 1})",
-                             "theseus agents scale; a busy agent stops once free", ["agents", "scale", profile, str(count - 1)],
-                             f"Remove a {profile} agent ({count} to {count - 1})?"))
+        return [Action("Reopen project", "theseus reopen: bring back its agents, queue driver and coordinator", "project",
+                       argv=["reopen"], question=f"Reopen {item['name']}?")]
+    found = [Action("Queue tick", "run one queue tick now", "project", argv=["queue", "tick"]),
+             Action("Agents up", "reconcile the supervised agents toward [agents.counts]", "project", argv=["agents", "up"]),
+             Action("Close project", "theseus close --commit: export and commit the tasks, stop its agents, queue driver "
+                                     "and coordinator until Reopen (refused while an agent holds a task)", "project",
+                    argv=["close", "--commit"], question=f"Close {item['name']}? Everything it runs stops until Reopen.")]
     if state.get("managed"):
-        commands.append(("Stop all agents", "theseus agents down --all: supervision pauses until Agents up",
-                         ["agents", "down", "--all"], "Stop every agent and pause supervision?"))
+        found.append(Action("Stop all agents", "theseus agents down --all: supervision pauses until Agents up", "project",
+                            argv=["agents", "down", "--all"], question="Stop every agent and pause supervision?"))
+    for profile, count in sorted((state.get("agentCounts") or {}).items()):
+        found.append(Action(f"Add a {profile} agent ({count} to {count + 1})", "theseus agents scale, in theseus.local.toml",
+                            "scale", argv=["agents", "scale", profile, str(count + 1)],
+                            question=f"Add a {profile} agent ({count} to {count + 1})?"))
+        if count:
+            found.append(Action(f"Remove a {profile} agent ({count} to {count - 1})",
+                                "theseus agents scale; a busy agent stops once free", "scale",
+                                argv=["agents", "scale", profile, str(count - 1)],
+                                question=f"Remove a {profile} agent ({count} to {count - 1})?"))
     for agent in state["agents"]:
         shown = agent.get("display") or agent["name"]
         if agent.get("managed"):
-            commands += [(f"Restart {shown}", "theseus agents restart (resumes its conversation)",
-                          ["agents", "restart", agent["name"]], f"Restart {shown}?"),
-                         (f"Stop {shown}", "theseus agents down", ["agents", "down", agent["name"]], f"Stop {shown}?"),
-                         (f"Start {shown}", "theseus agents up NAME", ["agents", "up", agent["name"]], None)]
+            found += [Action(f"Restart {shown}", "theseus agents restart (resumes its conversation)", "agents",
+                             agent["name"], ["agents", "restart", agent["name"]], f"Restart {shown}?"),
+                      Action(f"Stop {shown}", "theseus agents down", "agents", agent["name"], ["agents", "down", agent["name"]],
+                             f"Stop {shown}?"),
+                      Action(f"Start {shown}", "theseus agents up NAME", "agents", agent["name"], ["agents", "up", agent["name"]])]
     queue = state["queue"]
     for task in queue.get("ready", []):
-        commands += [(f"Dispatch {task}", "theseus dispatch: a one-shot worker", ["dispatch", task], f"Dispatch {task}?"),
-                     (f"Hold {task}", "theseus tasks hold", ["tasks", "hold", task], None)]
+        found += [Action(f"Dispatch {task}", "theseus dispatch: a one-shot worker", "tasks", task, ["dispatch", task],
+                         f"Dispatch {task}?"),
+                  Action(f"Hold {task}", "theseus tasks hold", "tasks", task, ["tasks", "hold", task])]
     for task in queue.get("held", []):
-        commands.append((f"Release the hold on {task}", "theseus tasks release-hold", ["tasks", "release-hold", task], None))
+        found.append(Action(f"Release the hold on {task}", "theseus tasks release-hold", "tasks", task,
+                            ["tasks", "release-hold", task]))
     for task in queue.get("in_progress", []):
-        commands.append((f"Release {task}", "theseus tasks release: back to pending",
-                         ["tasks", "release", task, "--reason", "released from the console"], f"Release {task} back to pending?"))
+        found.append(Action(f"Release {task}", "theseus tasks release: back to pending", "tasks", task,
+                            ["tasks", "release", task, "--reason", "released from the console"],
+                            f"Release {task} back to pending?"))
     priorities = state.get("priorities") or {}
+    capabilities = state.get("capabilities") or {}
     for task in [*queue.get("ready", []), *queue.get("blocked", []), *queue.get("held", [])]:
         level = int(priorities.get(task, 3))
         if level < 5:
-            commands.append((f"Raise the priority of {task} ({level} to {level + 1})", "theseus tasks priority",
-                             ["tasks", "priority", task, str(level + 1)], None))
+            found.append(Action(f"Raise the priority of {task} ({level} to {level + 1})", "theseus tasks priority", "tasks",
+                                task, ["tasks", "priority", task, str(level + 1)]))
         if level > 1:
-            commands.append((f"Lower the priority of {task} ({level} to {level - 1})", "theseus tasks priority",
-                             ["tasks", "priority", task, str(level - 1)], None))
-    capabilities = state.get("capabilities") or {}
-    for task in [*queue.get("ready", []), *queue.get("blocked", []), *queue.get("held", [])]:
+            found.append(Action(f"Lower the priority of {task} ({level} to {level - 1})", "theseus tasks priority", "tasks",
+                                task, ["tasks", "priority", task, str(level - 1)]))
         level = int(capabilities.get(task) or t.LOWEST_CAPABILITY)
-        commands.append((f"Raise the minimum capability of {task} ({level} to {level + 1})", "theseus tasks capability",
-                         ["tasks", "capability", task, str(level + 1)], None))
+        found.append(Action(f"Raise the cap of {task} ({level} to {level + 1})", "theseus tasks capability: the lowest "
+                            "agent capability that may take it", "tasks", task, ["tasks", "capability", task, str(level + 1)]))
         if level > t.LOWEST_CAPABILITY:
-            commands.append((f"Lower the minimum capability of {task} ({level} to {level - 1})", "theseus tasks capability",
-                             ["tasks", "capability", task, str(level - 1)], None))
+            found.append(Action(f"Lower the cap of {task} ({level} to {level - 1})", "theseus tasks capability", "tasks",
+                                task, ["tasks", "capability", task, str(level - 1)]))
     for task in queue.get("review", []):
-        commands.append((f"Reopen {task}", "theseus tasks reopen: verification back to in_progress",
-                         ["tasks", "reopen", task, "--reason", "reopened from the console"], f"Reopen {task}?"))
+        found.append(Action(f"Reopen {task}", "theseus tasks reopen: verification back to in_progress", "tasks", task,
+                            ["tasks", "reopen", task, "--reason", "reopened from the console"], f"Reopen {task}?"))
     for pool in state.get("pools") or []:
-        commands.append((f"Hold a {pool['pool']} slot for the coordinator", "theseus pool hold",
-                         ["pool", "hold", pool["pool"], "coordinator", "--project", state["project"], "--task", "console"], None))
+        found.append(Action(f"Hold a {pool['pool']} slot for the coordinator", "theseus pool hold", "pools",
+                            argv=["pool", "hold", pool["pool"], "coordinator", "--project", state["project"], "--task",
+                                  "console"]))
         for lease in (pool.get("leases") or {}).values():
             if lease.get("project") == state["project"]:
-                commands.append((f"Release the {pool['pool']} slot of {lease['agent']}", "theseus pool release",
-                                 ["pool", "release", pool["pool"], lease["agent"], "--project", state["project"]],
-                                 f"Release the {pool['pool']} slot of {lease['agent']}?"))
-    return commands
+                found.append(Action(f"Release the {pool['pool']} slot of {lease['agent']}", "theseus pool release", "pools",
+                                    argv=["pool", "release", pool["pool"], lease["agent"], "--project", state["project"]],
+                                    question=f"Release the {pool['pool']} slot of {lease['agent']}?"))
+    return found
 
 
 def unique_name(base, taken):
@@ -83,65 +108,91 @@ def unique_name(base, taken):
     return name
 
 
-def host_entries(app):
+def host_actions(app):
     """The Host tab's actions: edit or create agent profiles in $EDITOR (the host config.toml)."""
     from .. import profiles
     found = (app.snap or {}).get("profiles") or []
     taken = {p["name"] for p in found}
-    entries = [("Edit the host config ($EDITOR)", "~/.config/theseus/config.toml, checked on save",
-                partial(app.edit_profiles, ["profiles", "edit", "--host"]))]
+    actions = [Action("Edit the host config ($EDITOR)", "~/.config/theseus/config.toml, checked on save", "project",
+                      callback=partial(app.edit_profiles, ["profiles", "edit", "--host"]))]
     for profile in found:
+        name = profile["name"]
         if profile.get("defined") != "preset":
-            entries.append((f"Edit profile {profile['name']} ($EDITOR)", "its section of the host config, checked on save",
-                            partial(app.edit_profiles, ["profiles", "edit", profile["name"], "--host"])))
+            actions.append(Action(f"Edit profile {name} ($EDITOR)", "its section of the host config, checked on save",
+                                  "profiles", name, callback=partial(app.edit_profiles, ["profiles", "edit", name, "--host"])))
+        actions.append(Action(f"Show profile {name}", "every key and where it comes from", "profiles", name,
+                              callback=partial(app.show_profile, name)))
     for preset in sorted(profiles.PRESETS):
         name = unique_name(f"my-{preset}", taken)
-        entries.append((f"New profile from {preset} ($EDITOR)", f"adds [workers.{name}] to the host config and opens it; "
-                                                                f"rename it there",
-                        partial(app.edit_profiles, ["profiles", "add", name, "--preset", preset, "--edit"])))
+        actions.append(Action(f"New profile from {preset} ($EDITOR)", f"adds [workers.{name}] to the host config and "
+                                                                      f"opens it; rename it there", "new-profile",
+                              callback=partial(app.edit_profiles, ["profiles", "add", name, "--preset", preset, "--edit"])))
+    return actions
+
+
+def tab_actions(app):
+    """Every action of the active tab, with callbacks: the Host tab's, or a project's CLI actions plus its
+    coordinator, attach and handoff actions."""
+    item = app.active_item()
+    if item is None:
+        return host_actions(app) if app.snap is not None else []
+    if not item.get("available"):
+        return []
+    found = project_actions(item)
+    for action in found:
+        action.callback = partial(app.run_cli, item["root"], action.argv, action.question)
+    state = item["snapshot"]
+    for task in state["queue"].get("review", []):
+        found.append(Action(f"Open the handoff of {task}", "the delivered task's handoff.md", "handoffs", task,
+                            callback=partial(app.open_handoff, item, task)))
+    if item.get("closed"):
+        return found
+    found.append(Action("Coordinator", "the coordinator's mirror and send line", "project",
+                        callback=app.action_coordinator))
+    if (state.get("coordinator") or {}).get("supervised"):
+        found.append(Action("Attach the coordinator", "the coordinator session here; prefix d detaches", "project",
+                            callback=app.action_attach_coordinator))
+    for agent in state["agents"]:
+        if agent.get("managed"):
+            shown = agent.get("display") or agent["name"]
+            found.append(Action(f"Attach {shown}", "the agent's own pane here; C-q detaches", "agents", agent["name"],
+                                callback=partial(app.attach_agent, item["root"], agent["name"])))
+    return found
+
+
+def palette_entries(app, actions, subject):
+    """(title, help, callback) for the palette opened empty: the highlighted subject's actions, the tab's own, then one
+    entry per group that opens the group in a second palette."""
+    entries = [(f"{subject}: {a.title}", a.help, a.callback) for a in actions if subject and a.subject == subject]
+    entries += [(a.title, a.help, a.callback) for a in actions if a.group == "project"]
+    for group, label in GROUPS.items():
+        members = [a for a in actions if a.group == group]
+        if members:
+            entries.append((f"{label}… ({len(members)})", f"open the {label.lower()} of this tab",
+                            partial(open_group, app, members, label)))
     return entries
 
 
-class ConsoleCommands(Provider):
-    """The actions of the active project tab, plus the coordinator popup and handoffs of delivered tasks."""
+def open_group(app, members, label):
+    """Open one group's actions in a second palette."""
+    app.call_after_refresh(app.search_commands, [(a.title, a.callback, a.help) for a in members],
+                           f"{label}: type to filter")
 
-    def entries(self):
-        app = self.app
-        item = app.active_item()
-        found = []
-        if item is None and app.snap is not None:
-            return host_entries(app)
-        if item and item.get("available"):
-            name = item["name"]
-            for title, help_text, argv, question in project_commands(item):
-                found.append((f"{name}: {title}", help_text, partial(app.run_cli, item["root"], argv, question)))
-            if item.get("closed"):
-                return found + [(f"{name}: Open the handoff of {task}", "the delivered task's handoff.md",
-                                 partial(app.open_handoff, item, task)) for task in item["snapshot"]["queue"].get("review", [])]
-            found.append((f"{name}: Coordinator", "the coordinator's mirror and send line", app.action_coordinator))
-            if (item["snapshot"].get("coordinator") or {}).get("supervised"):
-                found.append((f"{name}: Attach the coordinator", "the coordinator session here; prefix d detaches",
-                              app.action_attach_coordinator))
-            for task in item["snapshot"]["queue"].get("review", []):
-                found.append((f"{name}: Open the handoff of {task}", "the delivered task's handoff.md",
-                              partial(app.open_handoff, item, task)))
-            for agent in item["snapshot"]["agents"]:
-                if agent.get("managed"):
-                    shown = agent.get("display") or agent["name"]
-                    found.append((f"{name}: Attach {shown}", "the agent's own pane here; C-q detaches",
-                                  partial(app.attach_agent, item["root"], agent["name"])))
-        return found
+
+class ConsoleCommands(Provider):
+    """The actions of the active tab (see the module docstring)."""
 
     async def discover(self):
-        for title, help_text, callback in self.entries():
+        app = self.app
+        for title, help_text, callback in palette_entries(app, tab_actions(app), app.highlighted_subject()):
             yield DiscoveryHit(title, callback, help=help_text)
 
     async def search(self, query):
         matcher = self.matcher(query)
-        for title, help_text, callback in self.entries():
-            score = matcher.match(title)
+        for action in tab_actions(self.app):
+            score = matcher.match(action.title)
             if score > 0:
-                yield Hit(score, matcher.highlight(title), callback, help=help_text)
+                yield Hit(score, matcher.highlight(action.title), action.callback, help=action.help)
 
 
 class AgentCommands(Provider):

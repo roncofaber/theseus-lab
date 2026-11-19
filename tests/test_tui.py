@@ -209,8 +209,8 @@ class ClosedConsoleTests(ConsoleTests):
             self.assertIn("CLOSED", str(view.query_one("#status").content))
             self.assertIn("milestone done", str(view.query_one("#status").content))
             self.assertEqual(0, view.query_one("#agents").row_count)
-            self.assertEqual(["Reopen project"], [c[0] for c in commands.project_commands(self.app.active_item())])
-            self.assertIn("Close project", [c[0] for c in commands.project_commands(self.app.items[
+            self.assertEqual(["Reopen project"], [a.title for a in commands.project_actions(self.app.active_item())])
+            self.assertIn("Close project", [a.title for a in commands.project_actions(self.app.items[
                 next(i for i, item in self.app.items.items() if item["name"] == "alpha")])])
 
     test_the_console_shows_every_project_and_its_agents_queue_and_events = None
@@ -228,11 +228,47 @@ class ProfilesConsoleTests(ConsoleTests):
             await pilot.press("1")
             table = self.app.active_view().query_one("#profiles")
             await self.settle(pilot, lambda: table.row_count == len(profiles.PRESETS))
-            titles = [entry[0] for entry in commands.host_entries(self.app)]
+            titles = [action.title for action in commands.host_actions(self.app)]
             self.assertIn("New profile from antigravity ($EDITOR)", titles)
             self.assertIn("Edit the host config ($EDITOR)", titles)
             self.app.show_profile("antigravity")
             await self.settle(pilot, lambda: isinstance(self.app.screen, Dialog))
+
+    test_the_console_shows_every_project_and_its_agents_queue_and_events = None
+    test_the_agent_popup_mirrors_the_pane_and_sends_a_line = None
+    test_the_help_screen_opens = None
+
+
+class PaletteConsoleTests(ConsoleTests):
+    async def test_the_palette_lists_the_highlighted_row_the_tab_and_groups_and_searches_everything(self):
+        from textual.command import CommandPalette
+        from theseus.tui import commands
+        async with self.app.run_test(size=(170, 60)) as pilot:
+            await self.start(pilot)
+            await pilot.press("w")
+            await self.settle(pilot, lambda: self.app.focused is not None and self.app.focused.id == "waiting")
+            await pilot.press("down")
+            self.app.set_focus(None)
+            await self.settle(pilot, lambda: self.app.highlighted_subject() == "ready-task")
+            actions = commands.tab_actions(self.app)
+            titles = [entry[0] for entry in commands.palette_entries(self.app, actions, "ready-task")]
+            self.assertEqual("ready-task: Dispatch ready-task", titles[0], "the highlighted row's actions come first")
+            self.assertIn("Queue tick", titles)
+            self.assertTrue(any(title.startswith("Task actions… (") for title in titles))
+            self.assertFalse(any("Raise the priority" in title and "ready-task" not in title for title in titles),
+                             "other rows' actions stay in their group")
+            project = {a.title for a in actions if a.group == "project"}
+            self.assertEqual([], [title for title in titles if not (title.startswith("ready-task: ") or title in project
+                                                                    or "… (" in title)],
+                             "opened empty: the row's actions, the tab's own and the groups, nothing else")
+            group = next(entry for entry in commands.palette_entries(self.app, actions, None)
+                         if entry[0].startswith("Task actions"))
+            group[2]()
+            await self.settle(pilot, lambda: isinstance(self.app.screen, CommandPalette))
+            await pilot.press("escape")
+            await pilot.press("escape")
+            self.app.action_clear()
+            self.assertIsNone(self.app.highlighted_subject())
 
     test_the_console_shows_every_project_and_its_agents_queue_and_events = None
     test_the_agent_popup_mirrors_the_pane_and_sends_a_line = None

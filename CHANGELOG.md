@@ -25,6 +25,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- The console's command palette (Ctrl+P) is grouped: opened empty it lists the highlighted row's actions, the tab's own few and one entry per group (Agent actions, Task actions, Scale agents, Pool slots, Handoffs, Profile actions, New profile) that opens the group in its own list; typing still searches every action. On a project with 68 actions the empty palette lists 10. WAITING is now QUEUE, and its `min cap` column `cap`.
 - Console agents table: `CPU` and `RAM` (resident size only; the popup keeps the share of system RAM) follow `pool`, the session column is gone (popups show it), and a capability or task minimum (its difficulty) shows as three dots of two levels each (◐○○ 1, ●○○ 2, ●◐○ 3, ... ●●● 6), also before the task each agent works on. Every task has a difficulty: one without a minimum counts as the lowest level, 1 (shown in the waiting table, the agents table and the task popup as the default). A 1,048,576-token window reads `1M`.
 
 ### Added
