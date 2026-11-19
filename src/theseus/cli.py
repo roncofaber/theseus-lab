@@ -856,6 +856,12 @@ def cmd_supervised(args):
     try:
         if action == "up":
             confs = all_managed() if args.all_projects else [load()]
+            if not args.all_projects and not args.dry_run:
+                from . import closure
+                try:
+                    closure.refuse_if_closed(confs[0], "`agents up`")
+                except closure.ClosedError as error:
+                    sys.exit(f"theseus: {error}")
             failed = False
             for conf in confs:
                 if not supervisor.managed(conf):
@@ -1178,6 +1184,11 @@ def cmd_coordinator(args):
         elif args.action == "unregister":
             print(attention.unregister(conf))
         elif args.action == "up":
+            from . import closure
+            try:
+                closure.refuse_if_closed(conf, "`coordinator up`")
+            except closure.ClosedError as error:
+                sys.exit(f"theseus: {error}")
             print_actions([(coordinator.NAME, *coordinator.up(conf, args.profile, wait=not args.no_wait))])
             if attention.settings(conf)["notify"] != "pane":
                 print("note: push is off; set [attention] notify = \"pane\" in theseus.local.toml for the queue driver to "
@@ -1294,14 +1305,46 @@ def cmd_top(args):
 
 def cmd_projects(args):
     from . import registry
-    found = registry.entries()
+    found = registry.entries(include_closed=args.all)
     if args.json:
         print(json.dumps(found, indent=2))
         return
     for entry in found:
-        print(f"{entry.get('name') or '-':<24} {entry['root']}")
+        closed = entry.get("closed")
+        print(f"{entry.get('name') or '-':<24} {entry['root']}"
+              + (f"  (closed {closed.get('closed') or ''}{': ' + closed['reason'] if closed.get('reason') else ''})"
+                 if closed else ""))
     if not found:
         print("no projects registered yet: run any theseus command inside a project")
+
+
+def cmd_close(args):
+    from . import closure, coordinator
+    conf = load()
+    coordinator_principal()
+    inside = coordinator.inside(conf)
+    try:
+        rows, notes = closure.close(conf, reason=args.reason or "", force=args.force, commit=args.commit)
+    except closure.ClosedError as error:
+        sys.exit(f"theseus: {error}")
+    print_actions(rows)
+    emit(notes)
+    if inside:
+        print("this runs inside the coordinator session, which stops now", flush=True)
+    sys.stdout.flush()
+    stopped = closure.stop_coordinator(conf)
+    if stopped:
+        print_actions([stopped])
+
+
+def cmd_reopen(args):
+    from . import closure
+    conf = load()
+    coordinator_principal()
+    was = closure.closed(conf)
+    if not was:
+        print(f"{conf.name} is not closed; bringing it up anyway")
+    print_actions(closure.reopen(conf, wait=not args.no_wait))
 
 
 def size_text(count):
@@ -1858,7 +1901,20 @@ def build_parser():
     p.set_defaults(func=guarded(cmd_top))
     p = sub.add_parser("projects", help="list the projects registered on this host")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--all", action="store_true", help="include closed projects")
     p.set_defaults(func=cmd_projects)
+
+    p = sub.add_parser("close", help="close this project: export its tasks, stop its agents, queue driver and coordinator, "
+                                     "and keep them stopped (hidden from the console) until `theseus reopen`")
+    p.add_argument("--reason", help="recorded with the close and shown by `theseus projects --all`")
+    p.add_argument("--force", action="store_true", help="also stop agents that hold a task (it stays assigned and "
+                                                        "resumes on reopen)")
+    p.add_argument("--commit", action="store_true", help="commit the task export")
+    p.set_defaults(func=guarded(cmd_close))
+
+    p = sub.add_parser("reopen", help="reopen a closed project: its agents, queue driver and (if it ran) coordinator")
+    p.add_argument("--no-wait", action="store_true", help="return once started, not ready")
+    p.set_defaults(func=guarded(cmd_reopen))
 
     p = sub.add_parser("db", help="host store: check, maintain, backup, restore FILE --yes, prune",
                        description="The host database (~/.local/share/theseus/theseus.db, THESEUS_DB overrides) holds "

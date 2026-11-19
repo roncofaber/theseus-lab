@@ -56,14 +56,24 @@ def entry(row):
             "last_seen": row["last_seen_epoch"]}
 
 
-def entries():
-    """Registered projects whose root still has a theseus.toml, sorted by name."""
+def entries(include_closed=False):
+    """Registered projects whose root still has a theseus.toml, sorted by name; a closed project (theseus.closure) only
+    with include_closed, and then with its close record under "closed"."""
+    from . import closure
     try:
         with store.for_host() as conn:
             rows = store.list_projects(conn)
     except (OSError, sqlite3.Error):
         return []
-    found = [entry(row) for row in rows if row["root"] and alive(row["root"])]
+    found = []
+    for row in rows:
+        if not (row["root"] and alive(row["root"])):
+            continue
+        item = entry(row)
+        record = closure.closed(item["data"]) if item["data"] else None
+        if record and not include_closed:
+            continue
+        found.append({**item, "closed": record} if record else item)
     return sorted(found, key=lambda item: (item["name"] or "", item["root"]))
 
 

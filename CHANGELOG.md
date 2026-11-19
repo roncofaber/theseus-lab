@@ -29,6 +29,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Added
 
+- `theseus close [--reason TEXT] [--commit] [--force]` closes a project in one step: writes the task export (optionally committed), stops its supervised agents, queue driver and coordinator, keeps them stopped (`agents up` and `coordinator up` refuse it; `agents up --all-projects` and the console skip it), and names what is left to commit or push. `theseus reopen` brings back the agents that ran under their own names, the queue driver and the coordinator. `theseus projects --all` lists closed projects with their reason. Nothing is deleted.
 - `tasks add --hold` creates a task held in the same transaction; `tasks edit --append-note TEXT` adds a dated line to the coordinator note (both also in the MCP tools).
 - `theseus doctor` warns when `commands.build`, `smoke` or `verify` is empty.
 

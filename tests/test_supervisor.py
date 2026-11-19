@@ -315,6 +315,32 @@ class SupervisorTests(Sandbox):
         self.assertRegex(self.theseus("agents", "down", "--all").stdout, r"queue-driver\s+stopped")
         self.assertFalse(self.tmux("has-session", "-t", "=demo--queue").returncode == 0)
 
+    def test_close_stops_everything_and_keeps_it_stopped_until_reopen(self):
+        self.replace_config("driver = false", "driver = true")
+        self.git("commit", "-q", "-am", "a supervised driver")
+        self.up()
+        alive = lambda name: self.tmux("has-session", "-t", f"={name}").returncode == 0
+        self.assertTrue(all(alive(n) for n in ("demo--demo-fake-1", "demo--demo-fake-2", "demo--queue")))
+        out = self.theseus("close", "--reason", "milestone done").stdout
+        self.assertRegex(out, r"queue-driver\s+stopped")
+        self.assertIn("closed; `theseus reopen` brings it back", out)
+        self.assertFalse(any(alive(n) for n in ("demo--demo-fake-1", "demo--demo-fake-2", "demo--queue")))
+        self.assertEqual("milestone done", json.loads((self.tmp / "data/closed.json").read_text())["reason"])
+        refused = self.up(check=False)
+        self.assertEqual(1, refused.returncode)
+        self.assertIn("demo is closed", refused.stderr)
+        self.assertIn("theseus reopen", refused.stderr)
+        self.assertNotIn(str(self.project), self.theseus("projects").stdout, "the console and listings skip it")
+        self.assertIn("(closed", self.theseus("projects", "--all").stdout)
+        self.assertNotIn("demo", self.theseus("agents", "up", "--all-projects").stdout)
+        reopened = self.theseus("reopen", timeout=60).stdout
+        self.assertRegex(reopened, r"demo-fake-1\s+(re)?started")
+        self.assertRegex(reopened, r"demo-fake-2\s+(re)?started")
+        self.assertNotIn("demo-fake-3", reopened, "the agents that ran come back under their own names")
+        self.assertRegex(reopened, r"queue-driver\s+started")
+        self.assertFalse((self.tmp / "data/closed.json").exists())
+        self.assertTrue(all(alive(n) for n in ("demo--demo-fake-1", "demo--demo-fake-2", "demo--queue")))
+
     def test_coordinator_up_runs_a_registered_coordinator_session_that_the_hook_resumes(self):
         self.replace_config("fake = 2", "fake = 0")
         self.replace_config('env = { FAKE_SECRET = "s3cret-value" }',

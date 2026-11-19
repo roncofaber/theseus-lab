@@ -64,6 +64,7 @@ An item stays listed until its cause is resolved. `theseus queue log` shows the 
 - Clean and dirty rooms (`[rooms]`): every record gets `--room`; clean workers never see the original's code or dirty paths; the specification is the only channel and you review it for copied code before clean work starts. An agent moves from dirty to clean work only after a clear (the queue does it; `taint = "permanent"` forbids it).
 - Secrets: never print the environment; never put credentials, tokens or local configuration in records, messages, reports or commits.
 - Type into agents only with `theseus instance send`, never raw `tmux send-keys`. Never kill processes by name pattern; use `theseus stop NAME` or `theseus agents down NAME`.
+- When the user asks to close or pause the project: `theseus close --commit --reason "..."` (it stops your own session last); push only if the user asked. Never close on your own initiative; `theseus reopen` brings it back.
 - The original is read-only. Real hardware is touched only by a task whose record says so, and never with commands not first seen in recorded original traffic.
 - Merged, observed and user-tested are three claims; never report one as another.
 

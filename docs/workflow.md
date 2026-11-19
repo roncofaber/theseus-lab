@@ -194,6 +194,17 @@ Every start registers the session for the attention push, so with `[attention] n
 - The pre-push hook refuses code that no passing `theseus verify` covers. To push urgently anyway, set `THESEUS_PUSH_UNVERIFIED="reason"`. The hook logs the override and allows it only for a limited number of commits (`max_unverified_merges`) and hours (`max_unverified_hours`).
 - If a check kind has no command configured, it reports `NOT CONFIGURED` (exit code 4), never a silent pass.
 
+## Closing and reopening a project
+
+```sh
+theseus close [--reason TEXT] [--commit] [--force]
+theseus reopen
+```
+
+`theseus close`, run in the project's checkout, writes the task export (and commits it with `--commit`), stops the supervised agents, the queue driver and the coordinator, and records the close in `<data>/closed.json`. A closed project stays stopped: `theseus agents up` and `theseus coordinator up` refuse it, and `agents up --all-projects` and the console skip it (`theseus projects --all` still lists it, with the reason). It refuses while an agent holds a task; `--force` stops those agents too, and their tasks stay assigned. It ends by naming anything left to commit or push.
+
+Nothing is deleted, so `theseus reopen` brings the project back as it was: the agents that ran at close come back under their own names (an agent that held a task resumes it), the queue driver starts, and the coordinator returns if it ran at close or `[coordinator] autostart` is on. To remove a project from the host for good, see `theseus db prune` in [Configuration](configuration.md#host-store).
+
 ## Evidence and reports
 
 - Every statement in a report says where it comes from: recovered from the original, read from source data, measured, reconstructed, or a test fixture.

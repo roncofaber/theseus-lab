@@ -605,3 +605,19 @@ class ConsoleCellTests(unittest.TestCase):
         state = {"agents": [{"name": "w", "pane": "%1", "state": "free"}], "workers": [{"name": "h", "kind": "headless",
                  "task": "t"}], "events": []}
         self.assertEqual([len(columns)] * 2, [len(cells) for _, cells, _ in rows.agent_rows(state)])
+
+
+class ClosureTests(Sandbox):
+    def test_close_refuses_while_agents_hold_tasks_unless_forced(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from theseus import closure
+        conf = SimpleNamespace(name="demo", data=self.tmp / "data", root=self.tmp)
+        with mock.patch.object(closure, "holders", lambda conf: [("demo-w-1", "parse-header")]):
+            with self.assertRaisesRegex(closure.ClosedError, r"demo-w-1 \(parse-header\).*--force"):
+                closure.close(conf)
+        self.assertIsNone(closure.closed(conf))
+        (self.tmp / "data").mkdir()
+        (self.tmp / "data/closed.json").write_text('{"closed": "2026-11-19T12:00:00", "reason": "done"}')
+        with self.assertRaisesRegex(closure.ClosedError, "demo is closed .*theseus reopen"):
+            closure.refuse_if_closed(conf, "`agents up`")
