@@ -448,7 +448,8 @@ def type_line(conf, record, text):
     agent = {"name": "coordinator", "pane": pane, "provider": profile}
     if record.get("server"):
         agent.update(managed=True, server=record["server"])
-    ok, detail = ag.send_verified(conf, agent, text, record=False, profile=profile)
+    # The draft check above already let only an empty line or an unsent line of the push's own through.
+    ok, detail = ag.send_verified(conf, agent, text, record=False, profile=profile, keep_draft=False)
     if ok or detail.startswith(("not typed", "tmux send-keys failed")):
         return ok, detail
     try:

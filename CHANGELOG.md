@@ -115,6 +115,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- `theseus tasks edit --touches` on a task whose patches were already observed (after a delivery, or by the tick's patch scan of a reopened task) failed with a UNIQUE constraint error; declaring a path now turns its observed row into the declaration.
+- Automatic sends (task messages, nudges, restart and start prompts, `instance send`) no longer clear an input line that holds text theseus did not type: whoever is writing there keeps their draft, and the send is retried later as not typed. An unsent line theseus typed itself is still replaced.
+- A send whose text left the input line counts as delivered even when the busy marker was never seen (a fast answer, as with OpenCode), so `instance send` no longer reports a false failure that invites a duplicate resend.
+- The worker skill names the project's configured citation index (`[re] citation_index`) instead of the default path.
 - `theseus agents remove`, `enable` and `disable` act on every name given (they acted on the first and ignored the rest), and report each name that failed; `theseus agents list --json` prints JSON like `ls --json`, which now also carries each agent's capability.
 - A supervised queue driver restarts cleanly when the installed code changes: it runs as `python -c <boot line> queue run`, and the restart re-ran `python -c queue run`, which exited 1, so every release counted as a driver crash against its restart budget.
 - The coordinator's start prompt is typed at most once per conversation: a send that typed the prompt but saw no busy marker (a fast answer, as with OpenCode) used to stay owed, and every queue tick typed the whole prompt again.

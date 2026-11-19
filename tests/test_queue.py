@@ -14,7 +14,10 @@ case "$1" in
         if [ -e "$FAKE_STATE/busy-$4" ]; then echo "working (esc to interrupt)"; rm -f "$FAKE_STATE/busy-$4"; fi ;;
     send-keys) if [ -e "$FAKE_STATE/gone-$3" ]; then echo "can't find session: $3" >&2; exit 1; fi
         printf '%s\\n' "$*" >> "$FAKE_STATE/typed"
-        if [ "${!#}" = Enter ] && [ ! -e "$FAKE_STATE/stuck-$3" ]; then touch "$FAKE_STATE/busy-$3"; fi ;;
+        if [ "$4" = -l ] && [ -e "$FAKE_STATE/sticky-$3" ] && [ "${5:0:1}" != / ]; then
+            printf '> %s\\n' "$5" >> "$FAKE_STATE/screen-$3"; touch "$FAKE_STATE/held-$3"; fi
+        if [ "${!#}" = Enter ] && [ ! -e "$FAKE_STATE/stuck-$3" ] && [ ! -e "$FAKE_STATE/held-$3" ]; then
+            touch "$FAKE_STATE/busy-$3"; fi ;;
 esac
 """
 
@@ -95,15 +98,16 @@ class QueueTests(Sandbox):
                                     phase="waiting", next_epoch=1.0)
         hint = "> \n  new task? /clear to save 150.0k tokens\n"
         (self.state / "screen-%1").write_text(hint)
-        (self.state / "stuck-%1").write_text("")
+        (self.state / "sticky-%1").write_text("")
         out = self.theseus("queue", "tick").stdout
         self.assertIn("nudged", out)
-        self.assertIn("send_failed", out, "the first restart prompt was not confirmed")
+        self.assertIn("send_failed", out, "the first restart prompt stayed in the input line")
         with store.opened() as conn:
             self.assertEqual("resent", store.gateway_retry(conn, "demo-port", "worker-a")["phase"],
                              "the scheduled gateway resend is called off")
         self.theseus("queue", "tick")
-        (self.state / "stuck-%1").unlink()
+        (self.state / "sticky-%1").unlink()
+        (self.state / "held-%1").unlink()
         out = self.theseus("queue", "tick").stdout
         self.assertRegex(out, r"nudged\s+worker-a\s+long-task restart prompt after an idle stop")
         (self.state / "screen-%1").write_text("> \n")

@@ -16,7 +16,7 @@ You do one task inside its owned paths, in a Git worktree made for you, and hand
 ## Start
 
 1. `cd WORKTREE && git status && git log -1 --oneline`; note the base. On a resumed task the changes are yours.
-2. Read `AGENTS.md`, `docs/project/STATE.md`, the task record and the documents it names; search `docs/investigations/README.md` and `docs/re/citation-index.md` (not in a clean-room task) for prior work.
+2. Read `AGENTS.md`, `docs/project/STATE.md`, the task record and the documents it names; search `docs/investigations/README.md` and the `[re] citation_index` file (not in a clean-room task) for prior work.
 3. Create the owned report `docs/investigations/<name>.md` from `docs/investigations/TEMPLATE.md` now; save findings to it after each step, progress to `.theseus/notes.md`.
 4. Load the domain skills you need: `theseus-native-re` (the original's binaries), `theseus-reference-runs` (running the original), project skills; never in a clean-room task.
 

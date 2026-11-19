@@ -167,6 +167,12 @@ class SoftOwnershipTests(TaskStoreCase):
                          "the tick's patch scan holds a conflicting task before the delivery")
         svc.deliver(QUEUE, "first", handoff_path="/h", observed_touches=["src/third.py"])
         self.assertIn("third", svc.holds(COORDINATOR), "held while the first task is in verification")
+        svc.reopen(COORDINATOR, "first", "review findings")
+        self.assertTrue(svc.set_observed(QUEUE, "first", ["src/third.py"]), "the next scan sees the patch again")
+        svc.edit(COORDINATOR, "first", {"touches": ["src/third.py", "src/other.py"]}, force=True)
+        self.assertEqual(["src/third.py", "src/other.py"], svc.get(COORDINATOR, "first")["task"]["touches"],
+                         "declaring an observed path makes it a declared touch instead of colliding with it")
+        svc.deliver(QUEUE, "first", handoff_path="/h2", observed_touches=["src/third.py"])
         svc.mark_merged(COORDINATOR, "first", "abc")
         self.assertEqual({}, svc.holds(COORDINATOR))
         self.assertEqual(["patcher", "inner", "third"], svc.ready(COORDINATOR))

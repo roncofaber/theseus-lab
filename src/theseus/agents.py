@@ -6,6 +6,7 @@ project runs: `theseus agents add|remove|enable|disable`. A disabled agent keeps
 from the queue. A project's <data>/agents.json, the registry before the store, is imported once and left in place.
 """
 import contextvars
+import json
 import os
 import re
 import time
@@ -412,6 +413,48 @@ def send_context(conf, agent, profile=None):
             "clear": settings.get("clear_input")}
 
 
+def typed_path():
+    from . import supervisor
+    return supervisor.home() / "typed.json"
+
+
+def remember_typed(pane, text):
+    """The last text theseus typed into each pane, so a leftover of it is told apart from a person's draft."""
+    path = typed_path()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        data = {}
+    data[pane] = " ".join(text.split())[:400]
+    try:
+        from . import config as cfg
+        cfg.write_atomic(path, json.dumps(data))
+    except OSError:
+        pass
+
+
+def foreign_draft(ctx):
+    """The text in the pane's input line when it is not something theseus typed there itself, else ''. Profiles
+    without an input_pattern cannot tell, and are typed into as before."""
+    if not ctx.get("input"):
+        return ""
+    try:
+        screen = pane_screen(ctx["pane"], ctx["server"])
+    except Exception:
+        return ""
+    if input_empty(screen, ctx["input"]) is not False:
+        return ""
+    try:
+        mine = json.loads(typed_path().read_text()).get(ctx["pane"]) or ""
+    except (OSError, ValueError):
+        mine = ""
+    if mine and input_holds(screen, mine, ctx["input"], placeholder=ctx.get("placeholder")):
+        return ""
+    regex = re.compile(ctx["input"])
+    held = [m.group(1) for m in (regex.match(line) for line in screen[-8:]) if m]
+    return " ".join((held[-1] if held else "").split())
+
+
 def type_text(ctx, text, sleep=None, enter=True):
     """Empty the input line, type text and (enter) press Enter after a short pause. Returns '' or the tmux error."""
     server, pane = ctx["server"], ctx["pane"]
@@ -426,6 +469,7 @@ def type_text(ctx, text, sleep=None, enter=True):
     typed = tmux("send-keys", "-t", pane, "-l", text) if server.is_legacy else server.send_literal(pane, text)
     if typed.returncode != 0:
         return f"tmux send-keys failed: {(typed.stderr or '').strip()[:120]}"
+    remember_typed(pane, text)
     if enter:
         (sleep or clock.sleep)(enter_pause())
         on(server, "send-keys", "-t", pane, "Enter")
@@ -457,7 +501,9 @@ def advance(ctx, pending, now=None):
         return "wait", None
     if pending["enters"] >= 2:
         return "failed", f"the input line still holds the text after a second Enter ({timeout:g}s each)"
-    return "failed", f"not busy after Enter and the text is not in the input line ({timeout:g}s each)"
+    # The text left the input line: it was submitted. A fast answer (OpenCode, a short reply) can come and go between
+    # two looks, so a busy marker never seen is no evidence of loss, and a retry would send the text twice.
+    return "ok", "sent (the input line cleared; the busy marker was not seen)"
 
 
 def record_send_failed(conf, name, task, text, detail):
@@ -467,7 +513,7 @@ def record_send_failed(conf, name, task, text, detail):
 
 
 def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, record=True, sleep=None,
-                  kind="plain", into_prompt=False, **extra):
+                  kind="plain", into_prompt=False, keep_draft=True, **extra):
     """Type text into an agent's pane and confirm it was submitted: within instances.send_verify_seconds the pane must
     show the profile's busy marker (expect_busy) or, for slash commands, no longer hold the text in its input line.
     If the text is still in the input line, Enter is pressed once more and the pane checked again. Returns (ok, detail);
@@ -475,7 +521,8 @@ def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, 
     Inside a queue tick (batched) the text is typed at once and Enter and the verification are left to the tick, which
     does them for all its sends together: the result is (True, "typed; verifying") and kind with extra says what to do
     once it resolves (workqueue.settle_send). Nothing is typed into a pane that shows a prompt for a human
-    (pane_prompt) unless into_prompt says a human is answering it."""
+    (pane_prompt) unless into_prompt says a human is answering it, nor (keep_draft) into an input line that holds text
+    theseus did not type there: someone is writing, and clearing the line would lose their draft."""
     ctx = send_context(conf, agent, profile)
     prompt = None if into_prompt else pane_prompt(conf, ctx["pane"], ctx["profile"], server=ctx["server"])
     if prompt:
@@ -483,6 +530,13 @@ def send_verified(conf, agent, text, task=None, expect_busy=True, profile=None, 
         if record:
             record_send_failed(conf, agent["name"], task, text, detail)
         return False, detail
+    if keep_draft and not into_prompt:
+        draft = foreign_draft(ctx)
+        if draft:
+            detail = f"not typed: the input line holds text someone is typing ({draft[:40]!r})"
+            if record:
+                record_send_failed(conf, agent["name"], task, text, detail)
+            return False, detail
     current = batch()
     verified = not expect_busy or bool(ctx["busy"])
     error = type_text(ctx, text, sleep, enter=current is None or not verified)

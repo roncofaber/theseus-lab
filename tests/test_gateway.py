@@ -243,7 +243,8 @@ class TypedErrorTests(unittest.TestCase):
 
 class FakePanes:
     """In-process tmux for many panes at once: Enter makes a pane show the busy marker on its next capture only, unless
-    the pane is deaf (nothing happens) or sticky (the typed text stays in its input line)."""
+    the pane is deaf (the text leaves the input line but no busy marker is ever seen: a fast answer) or sticky (the
+    typed text stays in its input line)."""
 
     def __init__(self, deaf=(), sticky=()):
         import threading
@@ -288,16 +289,32 @@ class BatchedSendTests(GatewayCase):
         from theseus import workqueue as wq
         os.environ["THESEUS_SEND_VERIFY"] = "1"
         agents = self.agents(8)
-        panes = FakePanes(deaf={a["pane"] for a in agents[:6]})
+        panes = FakePanes(sticky={a["pane"] for a in agents[:6]})
         self.use(panes)
         started = self.clock.monotonic()
         with self.ag.batched(30) as sends:
             for agent in agents:
                 self.assertEqual((True, "typed; verifying"), self.ag.send_verified(self.conf, agent, f"Hello {agent['name']}."))
             recorded = wq.verify_sends(self.conf, sends)
-        self.assertLess(self.clock.monotonic() - started, 4, "six silent agents verified one after another take 6 s or more")
+        self.assertLess(self.clock.monotonic() - started, 6, "six stuck agents verified one after another take 12 s or more")
         self.assertEqual(sorted(a["name"] for a in agents[:6]), sorted(e["agent"] for e in recorded))
-        self.assertTrue(all(e["kind"] == "send_failed" and "not busy after Enter" in e["detail"] for e in recorded))
+        self.assertTrue(all(e["kind"] == "send_failed" and "still holds the text" in e["detail"] for e in recorded))
+
+    def test_nothing_is_typed_over_a_draft_someone_is_writing_but_theseus_replaces_its_own_leftover(self):
+        agent = self.agents(1)[0]
+        panes = FakePanes()
+        self.use(panes)
+        panes.lines[agent["pane"]] = [f"{PROMPT} I was just typing a long ques"]
+        ok, detail = self.ag.send_verified(self.conf, agent, "theseus: 1 item needs you", record=False)
+        self.assertFalse(ok)
+        self.assertTrue(detail.startswith("not typed: the input line holds text someone is typing"), detail)
+        self.assertEqual([], panes.typed, "the draft is never cleared")
+        self.ag.remember_typed(agent["pane"], "Continue the task you were given.")
+        panes.lines[agent["pane"]] = [f"{PROMPT} Continue the task you were given."]
+        os.environ["THESEUS_SEND_VERIFY"] = "1"
+        self.assertTrue(self.ag.send_verified(self.conf, agent, "theseus: 1 item needs you", record=False)[0],
+                        "an unsent line theseus typed itself is replaced")
+        self.assertEqual([(agent["pane"], "theseus: 1 item needs you")], panes.typed)
 
     def test_the_budget_starts_when_the_tick_verifies_and_an_unverified_profile_owes_nothing_twice(self):
         from theseus import workqueue as wq

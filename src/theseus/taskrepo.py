@@ -190,6 +190,9 @@ class SqliteRepo:
 
     def set_paths(self, pk, kind, paths):
         self.conn.execute("DELETE FROM task_paths WHERE task_pk = ? AND kind = ? AND source = 'declared'", (pk, kind))
+        # One row per path: declaring a path the task was observed touching turns that row into the declaration.
+        self.conn.executemany("DELETE FROM task_paths WHERE task_pk = ? AND kind = ? AND path = ?",
+                              [(pk, kind, path) for path in paths])
         self.conn.executemany("INSERT INTO task_paths (task_pk, kind, path, n) VALUES (?, ?, ?, ?)",
                               [(pk, kind, path, n) for n, path in enumerate(paths)])
 
